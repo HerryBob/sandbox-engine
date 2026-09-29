@@ -1,0 +1,27 @@
+# 构建产物
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# 编译中间产物
+*.obj
+*.o
+*.pdb
+*.ilk
+*.log
+
+# 可执行文件
+*.exe
+
+# vcpkg / 依赖
+vcpkg_installed/
+
+# 系统
+Thumbs.db
+Desktop.ini
