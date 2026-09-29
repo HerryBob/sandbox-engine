@@ -1,7 +1,7 @@
 #include "input/InputSampler.hpp"
 #include "core/Log.hpp"
 
-#include <iostream>
+#include <sstream>
 
 namespace engine::input {
 
@@ -32,9 +32,10 @@ void InputSampler::maybeLog(double wallNow) {
     const auto now = std::chrono::steady_clock::now();
     if (std::chrono::duration<double>(now - lastLog_).count() >= 1.0) {
         lastLog_ = now;
-        std::lock_guard<std::mutex> lock(engine::core::g_logMutex);
-        std::cout << "[输入] 墙钟=" << wallNow << "s 采样=" << samples()
-                  << "  (不受 time_scale 影响)\n";
+        std::ostringstream os;
+        os << "[输入] 墙钟=" << wallNow << "s 采样=" << samples()
+           << "  (不受 time_scale 影响)";
+        engine::core::log(engine::core::LogLevel::Info, os.str());
     }
 }
 

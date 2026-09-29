@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional> // std::hash 特化（BlockPos 作 unordered_map key 用）
 
 namespace engine::shared {
 
@@ -22,12 +23,15 @@ struct BlockPos {
     bool operator==(const BlockPos&) const = default;
 };
 
-// 一个方块 = 类型 + 位置。
+// 一个方块 = 类型 + 位置 + 所属域。
+// contraptionId：-1 = 主世界静态方块（pos 为世界坐标）；
+//                ≥0 = 刚体内方块（pos 为刚体局部坐标，飞船参考系）。
 // 原型阶段 Block 是纯数据（无逻辑）；
 // 后续 Contraption 打包/解包由"方块列表"构成（文档 7.5 第 2 步）。
 struct Block {
     BlockType type = BlockType::Air;
     BlockPos  pos;
+    int       contraptionId = -1; // -1=主世界，≥0=刚体（局部坐标）
 };
 
 } // namespace engine::shared

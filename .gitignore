@@ -22,6 +22,9 @@ CMakeFiles/
 # vcpkg / 依赖
 vcpkg_installed/
 
+# 第三方学习资料（机械动力航空学源码，Polyform Shield 许可，只学不抄，不入库）
+Allmd/机械动力航空学及其物理引擎源代码/
+
 # 系统
 Thumbs.db
 Desktop.ini
