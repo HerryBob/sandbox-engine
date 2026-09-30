@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <atomic>
 
 #include <glm/glm.hpp>
 
@@ -96,12 +97,14 @@ private:
     void destroySwapchain();
     bool createRenderPass();
     bool createUniformObjects();
+    bool createDepthResources();
     bool createPipeline();
     bool createFramebuffers();
     bool createMeshBuffers();
     bool createCommandObjects();
     bool createSyncObjects();
     void destroyRenderObjects();
+    void destroyDepthResources();
     void updateCamera(double dt); // 读输入更新相机状态 + 写 UBO（drawFrame 开头调用）
     void destroyUniformObjects();
 
@@ -124,6 +127,12 @@ private:
     std::vector<VkImageView>  swapchainImageViews_;
     std::vector<VkPhysicalDevice> devices_;
 
+    // 深度缓冲（2026-10-01：渲染正确性地基——深度测试/背面剔除前的必要条件）
+    VkImage              depthImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory       depthImageMemory_ = VK_NULL_HANDLE;
+    VkImageView          depthImageView_ = VK_NULL_HANDLE;
+    VkFormat             depthFormat_ = VK_FORMAT_UNDEFINED;
+
     // 渲染对象（第三步：RenderPass + Pipeline + 帧缓冲 + 命令 + 同步）
     VkRenderPass         renderPass_ = VK_NULL_HANDLE;
     VkPipelineLayout     pipelineLayout_ = VK_NULL_HANDLE;
@@ -145,11 +154,19 @@ private:
 
     // ---- 相机（MVP uniform）----
     glm::vec3  camPos_{0.0f, 0.0f, 3.5f};
-    float      camYaw_ = 0.0f;    // 左右旋转（弧度）
-    float      camPitch_ = 0.0f;  // 上下旋转（弧度，clamp ±85°）
-    bool       mouseDown_ = false;
-    double     lastMouseX_ = 0.0;
-    double     lastMouseY_ = 0.0;
+    float      camYaw_ = 0.0f;    // 左右旋转（弧度）——仅渲染线程写
+    float      camPitch_ = 0.0f;  // 上下旋转（弧度，clamp ±85°）——仅渲染线程写
+
+    // ---- 输入槽（2026-10-01：消除相机成员数据竞争）----
+    // 主线程 GLFW 回调只写这些原子槽；渲染线程 updateCamera 消费增量。
+    // camYaw_/camPitch_/camPos_ 等相机成员从此只被渲染线程写 → 零竞争。
+    // （修复前：回调直接写相机成员 ↔ 渲染线程 updateCamera 并发读写 = 数据竞争
+    //   UB，未定义写随栈布局漂移，表现为 createFramebuffers/uboMemory_ 等随机写坏。）
+    std::atomic<bool>   inputDragging_{false}; // 左键是否按下（回调写）
+    std::atomic<double> inputLastX_{0.0};      // 上次光标位置（回调写）
+    std::atomic<double> inputLastY_{0.0};
+    std::atomic<double> inputYawDelta_{0.0};   // 待消费旋转增量（回调累加 / 渲染 exchange 取走）
+    std::atomic<double> inputPitchDelta_{0.0};
     VkBuffer             uboBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory       uboMemory_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descLayout_ = VK_NULL_HANDLE;

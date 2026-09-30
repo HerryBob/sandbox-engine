@@ -95,10 +95,33 @@ void main() {
 }
 )";
 
+// ---- 深度格式选择：按支持度优先 D32（纯深度）→ D24+8（模板兼容）----
+// 深度缓冲只存"像素离相机多远"，精度越高 z-fighting 越少；D32_SFLOAT
+// 是桌面 GPU 普遍支持且精度最高（无模板需求，模板位留给将来 stencil 特效）。
+VkFormat pickDepthFormat(VkPhysicalDevice dev) {
+    const VkFormat candidates[] = { VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT };
+    for (VkFormat f : candidates) {
+        VkFormatProperties p;
+        vkGetPhysicalDeviceFormatProperties(dev, f, &p);
+        if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+            return f;
+    }
+    return VK_FORMAT_UNDEFINED; // 调用方判错
+}
+
+const char* depthFormatName(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_D32_SFLOAT:        return "D32_SFLOAT";
+    case VK_FORMAT_D24_UNORM_S8_UINT: return "D24_UNORM_S8";
+    default:                          return "?";
+    }
+}
+
 // ---- 方块几何：24 顶点 + 36 索引（每面独立 4 顶点、独立颜色）----
 // 体素 mesh 标准做法：面不共享顶点（相邻面颜色/法线不同），
 // 与将来 chunk mesh 的生成逻辑一致（每个方块 24 顶点 36 索引）。
-std::vector<Vertex> buildCubeVertices() {
+// offset：方块中心的世界坐标偏移（本阶段用于摆放多个方块）。
+std::vector<Vertex> buildCubeVertices(const glm::vec3& offset = {0.0f, 0.0f, 0.0f}) {
     const glm::vec3 c[6] = {
         {1.00f, 0.55f, 0.20f}, // +X 橙（木面）
         {0.55f, 0.35f, 0.15f}, // -X 深棕
@@ -127,7 +150,7 @@ std::vector<Vertex> buildCubeVertices() {
     verts.reserve(24);
     for (int f = 0; f < 6; ++f)
         for (int i = 0; i < 4; ++i)
-            verts.push_back(Vertex{faces[f][i], c[f]});
+            verts.push_back(Vertex{faces[f][i] + offset, c[f]});
     return verts;
 }
 
@@ -181,21 +204,27 @@ VkShaderModule compileShader(VkDevice dev, VkShaderStageFlagBits stage,
 void VulkanContext::mouseButtonCb(GLFWwindow* w, int button, int action, int) {
     auto* self = static_cast<VulkanContext*>(glfwGetWindowUserPointer(w));
     if (button != GLFW_MOUSE_BUTTON_LEFT) return;
-    self->mouseDown_ = (action == GLFW_PRESS);
-    if (self->mouseDown_) glfwGetCursorPos(w, &self->lastMouseX_, &self->lastMouseY_);
+    // 只写原子输入槽（渲染线程消费），绝不直接碰相机成员——消除数据竞争。
+    self->inputDragging_.store(action == GLFW_PRESS, std::memory_order_relaxed);
+    if (action == GLFW_PRESS) {
+        double x = 0.0, y = 0.0;
+        glfwGetCursorPos(w, &x, &y);
+        self->inputLastX_.store(x, std::memory_order_relaxed);
+        self->inputLastY_.store(y, std::memory_order_relaxed);
+    }
 }
 
 void VulkanContext::cursorPosCb(GLFWwindow* w, double x, double y) {
     auto* self = static_cast<VulkanContext*>(glfwGetWindowUserPointer(w));
-    if (!self->mouseDown_) return;
-    const double dx = x - self->lastMouseX_;
-    const double dy = y - self->lastMouseY_;
-    self->lastMouseX_ = x;
-    self->lastMouseY_ = y;
+    if (!self->inputDragging_.load(std::memory_order_relaxed)) return;
+    // 增量累加进原子槽（线程安全）；渲染线程 exchange(0) 取走并应用。
     constexpr double kSens = 0.005; // 拖动灵敏度（弧度/像素）
-    self->camYaw_   += static_cast<float>(dx * kSens);
-    self->camPitch_ -= static_cast<float>(dy * kSens);
-    self->camPitch_ = std::clamp(self->camPitch_, -1.45f, 1.45f); // ±83°，防翻跟头
+    const double dx = x - self->inputLastX_.load(std::memory_order_relaxed);
+    const double dy = y - self->inputLastY_.load(std::memory_order_relaxed);
+    self->inputYawDelta_.fetch_add(dx * kSens, std::memory_order_relaxed);
+    self->inputPitchDelta_.fetch_add(-dy * kSens, std::memory_order_relaxed);
+    self->inputLastX_.store(x, std::memory_order_relaxed);
+    self->inputLastY_.store(y, std::memory_order_relaxed);
 }
 
 VulkanContext::~VulkanContext() { shutdown(); }
@@ -238,8 +267,14 @@ bool VulkanContext::init(int width, int height, const char* title) {
     if (!createDevice()) return false;
     volkLoadDevice(device_);     // 设备创建后加载设备级函数指针（vkCreateSwapchainKHR 等）
     if (!createSwapchain()) return false;
+    depthFormat_ = pickDepthFormat(physicalDevice_); // 深度格式探测（RX 6750 GRE 支持 D32）
+    if (depthFormat_ == VK_FORMAT_UNDEFINED) {
+        LOG_ERROR("[Vulkan] 无支持的深度格式");
+        return false;
+    }
     if (!createRenderPass()) return false;
     if (!createUniformObjects()) return false;
+    if (!createDepthResources()) return false; // 深度图像/内存/视图（帧缓冲引用它，须先建）
     if (!createPipeline()) return false;
     if (!createFramebuffers()) return false;
     if (!createMeshBuffers()) return false;
@@ -521,7 +556,8 @@ void VulkanContext::destroySwapchain() {
 
 bool VulkanContext::createRenderPass() {
     // RenderPass = 告诉 GPU"这帧怎么画"：附件格式/读写规则 + 子pass。
-    // 一个颜色附件（swapchain 图像）：每帧开头 CLEAR（清屏），结尾 STORE（保留到呈现）。
+    // 两个附件：颜色（swapchain 图像，CLEAR→画→STORE 呈现）+
+    //           深度（每帧 CLEAR 为 1.0，画完丢弃——深度只在本帧内用）。
     VkAttachmentDescription color{};
     color.format = swapchainFormat_;
     color.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -532,12 +568,24 @@ bool VulkanContext::createRenderPass() {
     color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;          // 进来不知道什么布局
     color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;      // 出去要能呈现
 
+    VkAttachmentDescription depth{};
+    depth.format = depthFormat_;
+    depth.samples = VK_SAMPLE_COUNT_1_BIT;
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;        // 每帧清为 1.0（最远）
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // 深度不呈现，无需保留
+    depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
     VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef; // 深度附件挂进子pass
 
     // 隐式布局转换（UNDEFINED→COLOR_ATTACHMENT→PRESENT_SRC）的同步依赖，
     // 经典模板：保证清屏写入在呈现前完成。
@@ -549,10 +597,11 @@ bool VulkanContext::createRenderPass() {
     dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
+    VkAttachmentDescription attachments[2] = { color, depth };
     VkRenderPassCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    ci.attachmentCount = 1;
-    ci.pAttachments = &color;
+    ci.attachmentCount = 2;
+    ci.pAttachments = attachments;
     ci.subpassCount = 1;
     ci.pSubpasses = &subpass;
     ci.dependencyCount = 1;
@@ -562,7 +611,7 @@ bool VulkanContext::createRenderPass() {
         LOG_ERROR("[Vulkan] vkCreateRenderPass 失败");
         return false;
     }
-    LOG_INFO("[Vulkan] RenderPass 创建成功（1 颜色附件：CLEAR→画→STORE 呈现）");
+    LOG_INFO("[Vulkan] RenderPass 创建成功（颜色 CLEAR→画→STORE 呈现 + 深度 CLEAR→画→丢弃）");
     return true;
 }
 
@@ -656,6 +705,76 @@ bool VulkanContext::createUniformObjects() {
     return true;
 }
 
+bool VulkanContext::createDepthResources() {
+    // 深度图像：GPU 专用显存（DEVICE_LOCAL，CPU 从不碰它——深度由 GPU 每帧读写）。
+    VkImageCreateInfo ii{};
+    ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = depthFormat_;
+    ii.extent = { swapchainExtent_.width, swapchainExtent_.height, 1 };
+    ii.mipLevels = 1;
+    ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL; // 深度走 GPU 最优排布（性能）
+    ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(device_, &ii, nullptr, &depthImage_) != VK_SUCCESS) {
+        LOG_ERROR("[Vulkan] 深度图像创建失败");
+        return false;
+    }
+
+    // 内存：DEVICE_LOCAL（显存）优先，不需要 host 可见（CPU 不读写深度）。
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(device_, depthImage_, &req);
+    VkPhysicalDeviceMemoryProperties props;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice_, &props);
+    uint32_t memIdx = UINT32_MAX;
+    for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
+        if ((req.memoryTypeBits & (1u << i)) &&
+            (props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            memIdx = i;
+            break;
+        }
+    }
+    if (memIdx == UINT32_MAX) {
+        LOG_ERROR("[Vulkan] 深度图像无 device local 内存类型");
+        return false;
+    }
+    VkMemoryAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = memIdx;
+    if (vkAllocateMemory(device_, &ai, nullptr, &depthImageMemory_) != VK_SUCCESS) {
+        LOG_ERROR("[Vulkan] 深度图像内存分配失败");
+        return false;
+    }
+    vkBindImageMemory(device_, depthImage_, depthImageMemory_, 0);
+
+    // 深度视图：只暴露深度方面（aspect DEPTH），帧缓冲按它引用。
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = depthImage_;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = depthFormat_;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vci.subresourceRange.baseMipLevel = 0;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.baseArrayLayer = 0;
+    vci.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(device_, &vci, nullptr, &depthImageView_) != VK_SUCCESS) {
+        LOG_ERROR("[Vulkan] 深度图像视图创建失败");
+        return false;
+    }
+    {
+        std::ostringstream os;
+        os << "[Vulkan] 深度缓冲就绪（格式 " << depthFormatName(depthFormat_)
+           << " " << swapchainExtent_.width << "x" << swapchainExtent_.height << "）";
+        LOG_INFO(os.str());
+    }
+    return true;
+}
+
 bool VulkanContext::createPipeline() {
     // 图形管线 = 顶点着色器 + 片元着色器 + 顶点布局 + 光栅化/混合状态，
     // 一个完整"怎么画"的固化配方。Vulkan 最重的样板，但一次建好反复用。
@@ -717,10 +836,24 @@ bool VulkanContext::createPipeline() {
     rasterizer.depthClampEnable = VK_FALSE;
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.cullMode = VK_CULL_MODE_NONE;      // 先不剔除，看得到双面
-    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;  // 背面剔除：省一半三角形（立方体只画 3 面）
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; // 绕序与顶点索引一致
     rasterizer.depthBiasEnable = VK_FALSE;
     rasterizer.lineWidth = 1.0f;
+
+    // 深度测试状态（渲染正确性地基，2026-10-01）：
+    //  depthTestEnable：按深度值判定"这个片元能不能画"（近的挡远的）
+    //  depthWriteEnable：把本片元深度写进缓冲（后续片元拿它比较）
+    //  compareOp LESS：更小深度（更近）通过测试；标准"近遮远"规则
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE; // 模板测试留待将来（轮廓/特效）
+    depthStencil.minDepthBounds = 0.0f;
+    depthStencil.maxDepthBounds = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -757,6 +890,7 @@ bool VulkanContext::createPipeline() {
     ci.pViewportState = &viewportState;
     ci.pRasterizationState = &rasterizer;
     ci.pMultisampleState = &multisample;
+    ci.pDepthStencilState = &depthStencil; // 深度测试/写入挂进管线
     ci.pColorBlendState = &colorBlend;
     ci.layout = pipelineLayout_;
     ci.renderPass = renderPass_;
@@ -777,16 +911,16 @@ bool VulkanContext::createPipeline() {
 }
 
 bool VulkanContext::createFramebuffers() {
-    // 帧缓冲 = "附件具体实例"：renderpass 规则 + 具体 swapchain 图像视图。
-    // 每张交换链图像一个帧缓冲（画到哪张就用哪张的）。
-    framebuffers_.clear();
+    // 帧缓冲 = "附件具体实例"：renderpass 规则 + 具体 swapchain 图像视图 + 深度视图。
+    // 每张交换链图像一个帧缓冲（画到哪张就用哪张的），深度视图三张共用同一个。
     framebuffers_.reserve(swapchainImageViews_.size());
-    for (VkImageView view : swapchainImageViews_) {
+    for (std::size_t i = 0; i < swapchainImageViews_.size(); ++i) {
+        VkImageView attachments[2] = { swapchainImageViews_[i], depthImageView_ }; // [颜色, 深度]
         VkFramebufferCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         ci.renderPass = renderPass_;
-        ci.attachmentCount = 1;
-        ci.pAttachments = &view;
+        ci.attachmentCount = 2;
+        ci.pAttachments = attachments;
         ci.width = swapchainExtent_.width;
         ci.height = swapchainExtent_.height;
         ci.layers = 1;
@@ -799,7 +933,8 @@ bool VulkanContext::createFramebuffers() {
     }
     {
         std::ostringstream os;
-        os << "[Vulkan] 帧缓冲创建成功（" << framebuffers_.size() << " 个，每交换链图像一个）";
+        os << "[Vulkan] 帧缓冲创建成功（" << framebuffers_.size()
+           << " 个，每交换链图像一个，含深度附件）";
         LOG_INFO(os.str());
     }
     return true;
@@ -809,8 +944,20 @@ bool VulkanContext::createMeshBuffers() {
     // 顶点/索引缓冲：把方块几何从 CPU 交给 GPU。
     // 本阶段用 HOST_VISIBLE|HOST_COHERENT 单缓冲（CPU 直接写，显卡读）；
     // 性能阶段换 device local + staging 上传（体素量大了再优化，见学习路线 ③）。
-    const auto vertices = buildCubeVertices();
-    const auto indices  = buildCubeIndices();
+    // 两个方块（遮挡验证）：A 在原点 (0,0,0)，B 在其正后方 (0,0,-2.5)。
+    // 默认视角（面向 -Z）A 完全遮挡 B → 深度测试正确性的直接观察点；
+    // 侧移/绕后视角可同时看到两个 → 背面剔除生效（方块内部是空的）。
+    auto vertsA = buildCubeVertices({0.0f, 0.0f, 0.0f});
+    auto vertsB = buildCubeVertices({0.0f, 0.0f, -2.5f});
+    std::vector<Vertex> vertices = std::move(vertsA);
+    vertices.insert(vertices.end(), vertsB.begin(), vertsB.end());
+
+    auto idxA = buildCubeIndices();
+    auto idxB = buildCubeIndices();
+    for (auto& i : idxB) i += 24; // 第二方块顶点偏移 24（前 24 个顶点属于方块 A）
+    std::vector<uint32_t> indices = std::move(idxA);
+    indices.insert(indices.end(), idxB.begin(), idxB.end());
+
     vertexCount_ = static_cast<uint32_t>(vertices.size());
     indexCount_  = static_cast<uint32_t>(indices.size());
 
@@ -872,7 +1019,7 @@ bool VulkanContext::createMeshBuffers() {
     {
         std::ostringstream os;
         os << "[Vulkan] 方块 mesh 就绪：顶点=" << vertexCount_ << " 索引=" << indexCount_
-           << "（6 面独立着色，单位立方体）";
+           << "（2 方块 × 24 顶点 36 索引，遮挡验证：A=(0,0,0) B=(0,0,-2.5)）";
         LOG_INFO(os.str());
     }
     return true;
@@ -924,6 +1071,13 @@ bool VulkanContext::createSyncObjects() {
 }
 
 void VulkanContext::updateCamera(double dt) {
+    // 鼠标旋转增量：主线程回调原子累加，本线程（渲染）独占消费。
+    // camYaw_/camPitch_ 只在此处写 → 与回调零竞争（修复 2026-10-01）。
+    if (inputDragging_.load(std::memory_order_relaxed)) {
+        camYaw_   += static_cast<float>(inputYawDelta_.exchange(0.0, std::memory_order_relaxed));
+        camPitch_ += static_cast<float>(inputPitchDelta_.exchange(0.0, std::memory_order_relaxed));
+        camPitch_ = std::clamp(camPitch_, -1.45f, 1.45f); // ±83°，防翻跟头
+    }
     // 键盘平移（WASD + 空格/Shift），速度 ~2.5 单位/秒（dt≈16ms 时每帧 ~0.04）。
     const float speed = 2.5f * static_cast<float>(dt);
     // 前进方向：只取 yaw 的水平分量（保持在地平面移动），pitch 只影响视角。
@@ -995,10 +1149,11 @@ bool VulkanContext::drawFrame() {
     rp.renderPass = renderPass_;
     rp.framebuffer = framebuffers_[imageIndex];
     rp.renderArea = {{0, 0}, swapchainExtent_};
-    VkClearValue clear{};
-    clear.color = {{0.02f, 0.02f, 0.05f, 1.0f}}; // 深蓝黑清屏
-    rp.clearValueCount = 1;
-    rp.pClearValues = &clear;
+    VkClearValue clears[2]{};
+    clears[0].color = {{0.02f, 0.02f, 0.05f, 1.0f}}; // 颜色清屏：深蓝黑
+    clears[1].depthStencil = {1.0f, 0};             // 深度清屏：最远（1.0），stencil 0
+    rp.clearValueCount = 2;
+    rp.pClearValues = clears;
     vkCmdBeginRenderPass(cmdBuffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmdBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     vkCmdBindDescriptorSets(cmdBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1006,7 +1161,7 @@ bool VulkanContext::drawFrame() {
     VkDeviceSize vbOffset = 0;
     vkCmdBindVertexBuffers(cmdBuffer_, 0, 1, &vertexBuffer_, &vbOffset);
     vkCmdBindIndexBuffer(cmdBuffer_, indexBuffer_, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(cmdBuffer_, indexCount_, 1, 0, 0, 0); // 方块：36 索引
+    vkCmdDrawIndexed(cmdBuffer_, indexCount_, 1, 0, 0, 0); // 双方块：72 索引
     vkCmdEndRenderPass(cmdBuffer_);
     if (vkEndCommandBuffer(cmdBuffer_) != VK_SUCCESS) {
         LOG_ERROR("[Vulkan] vkEndCommandBuffer 失败");
@@ -1059,6 +1214,14 @@ void VulkanContext::destroyUniformObjects() {
     if (uboMemory_) { vkFreeMemory(device_, uboMemory_, nullptr); uboMemory_ = VK_NULL_HANDLE; }
 }
 
+void VulkanContext::destroyDepthResources() {
+    // 深度资源释放：视图 → 内存 → 图像（与创建相反）。
+    // 必须在帧缓冲销毁之后（帧缓冲还引用着深度视图）。
+    if (depthImageView_) { vkDestroyImageView(device_, depthImageView_, nullptr); depthImageView_ = VK_NULL_HANDLE; }
+    if (depthImageMemory_) { vkFreeMemory(device_, depthImageMemory_, nullptr); depthImageMemory_ = VK_NULL_HANDLE; }
+    if (depthImage_) { vkDestroyImage(device_, depthImage_, nullptr); depthImage_ = VK_NULL_HANDLE; }
+}
+
 void VulkanContext::destroyRenderObjects() {
     renderObjectsReady_ = false;
     if (inFlightFence_) { vkDestroyFence(device_, inFlightFence_, nullptr); inFlightFence_ = VK_NULL_HANDLE; }
@@ -1068,6 +1231,7 @@ void VulkanContext::destroyRenderObjects() {
     if (cmdPool_) { vkDestroyCommandPool(device_, cmdPool_, nullptr); cmdPool_ = VK_NULL_HANDLE; }
     for (auto fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
     framebuffers_.clear();
+    destroyDepthResources(); // 深度资源：帧缓冲之后、管线之前
     if (indexBuffer_) { vkDestroyBuffer(device_, indexBuffer_, nullptr); indexBuffer_ = VK_NULL_HANDLE; }
     if (indexBufferMemory_) { vkFreeMemory(device_, indexBufferMemory_, nullptr); indexBufferMemory_ = VK_NULL_HANDLE; }
     if (vertexBuffer_) { vkDestroyBuffer(device_, vertexBuffer_, nullptr); vertexBuffer_ = VK_NULL_HANDLE; }

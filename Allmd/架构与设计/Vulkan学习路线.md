@@ -21,7 +21,7 @@
 | 几万方块 | 实例化绘制/视锥剔除 | 性能问题出现时再深入 |
 | 帧率瓶颈 | 同步/内存/多帧流水线 | 届时专项学习 |
 
-## 三、里程碑进度（2026-09-30）
+## 三、里程碑进度（2026-10-01）
 
 ```
 ✅ GLFW 窗口        （1280x720，GLFW_NO_API 纯 Vulkan 窗口）
@@ -37,6 +37,12 @@
 ✅ 相机 + MVP uniform（descriptor set + UBO；glm 透视/视图矩阵；WASD 平移 +
                      鼠标左键拖动旋转 + R 重置；proj[1][1]*=-1 适配 Vulkan Y 向下 NDC；
                      37/37 断言）
+✅ 深度缓冲 + 背面剔除 + 双方块遮挡验证（2026-10-01）
+   深度四件套：D32_SFLOAT 深度图 → 深度视图 → RenderPass 双附件（深度 CLEAR→画→
+   DONT_CARE）→ framebuffer 附件[2]={颜色,深度}；管线 depthTest/Write=TRUE +
+   VK_COMPARE_OP_LESS + cullMode=BACK。第二个方块 B=(0,0,-2.5) 与 A 共 48 顶点
+   72 索引；默认视角 A 挡 B，侧移见 B，背面剔除内部不可见。
+   （此里程碑暴露并修复了一个致命的线程数据竞争，见下方"崩溃修复"坑记录）
 ⬜ chunk mesh：方块批量绘制 + 相邻面剔除
 ⬜ 纹理（stb_image 图集 + UV）
 ```
@@ -51,6 +57,31 @@
   - vcpkg shaderc 的 CMake target 是 `unofficial::shaderc::shaderc`（不是 shaderc_combined）
   - 相机默认朝向必须面向 -Z（`lookDir.z = -cos(yaw)*cos(pitch)`）：GLFW/Vulkan 惯例 +Z 是"屏幕里"方向，初始朝向 +Z 会看向方块背后 → 全黑窗口（已踩坑修复）
   - GLFW 输入回调必须是 static 成员/自由函数（C 函数指针），经 `glfwSetWindowUserPointer` 转发到对象；放匿名 namespace 里会编译报 C2888
+  - **【崩溃修复 2026-10-01】GLFW 回调 ↔ 渲染线程的数据竞争（本里程碑最大坑）**：
+    - 症状：确定性 0xC0000005（读 0x8），崩溃点随加打印随机漂移——用户版崩在
+      `framebuffers_.push_back`，加 cerr 后崩在 `updateCamera/vkMapMemory`，
+      `uboMemory_` 高位被改写；插打印后"变 ALIVE"是栈布局侥幸，不是修复。
+    - 根因：主线程 GLFW 鼠标回调**直接写** `camYaw_/camPitch_/mouseDown_/
+      lastMouseX_/lastMouseY_`，渲染线程 `updateCamera` **并发读写**同一批成员 →
+      C++ 数据竞争 = 未定义行为，写坏落点随栈布局漂移。
+    - 铁律：**GLFW 回调线程永远不能直接写对象成员**（回调在主线程任意时刻触发，
+      而渲染对象被渲染线程并发使用）。跨线程输入一律走原子槽：
+      回调只 `store/fetch_add` 原子成员 → 渲染线程 `load/exchange` 消费增量；
+      相机成员从此只被渲染线程写，零竞争。
+    - 排查方法复盘：二分禁用 init 各环节 → 全链 cerr 打点对照（init 完好 vs
+      首帧损坏）→ 禁回调/空回调复现对照 → 最终读全部源码定位竞争。教训：先查
+      跨线程共享状态，再怀疑 Vulkan 驱动。
+  - 深度缓冲要点（2026-10-01）：
+    - 深度图是**独立图像**，不是 framebuffer 直接开一块：先建图像（usage 含
+      DEPTH_STENCIL_ATTACHMENT）→ 分配内存 → 建视图（aspect 只取 DEPTH_BIT）→
+      RenderPass 加第二附件（loadOp=CLEAR, storeOp=DONT_CARE）→ framebuffer
+      attachments[2]={颜色视图, 深度视图}（3 个帧缓冲共用 1 个深度视图）。
+    - 深度格式探测：优先 D32_SFLOAT，D24_UNORM_S8_UINT 兜底（用
+      `vkGetPhysicalDeviceFormatProperties` 查 linearTilingFeatures）。
+    - clears 数组必须 2 个（颜色 + 深度），`depthStencil = {1.0f, 0}`（清成最远，
+      配合 COMPARE_OP_LESS：近的覆盖远的）。
+    - 背面剔除依赖**顶点绕序**：cullMode=BACK + frontFace=CCW，索引必须按逆时针
+      定义正面，否则整个方块消失（比"画错"更难排查）。
 
 ## 五、与引擎架构的对应
 

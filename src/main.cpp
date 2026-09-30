@@ -420,8 +420,8 @@ static int runDemo() {
               "Vulkan：RenderPass 创建成功（CLEAR→画→STORE 呈现规则）");
         check(vkOk && vkCtx.pipeline() != VK_NULL_HANDLE,
               "Vulkan：图形管线创建成功（着色器 shaderc 编译 + 装配）");
-        check(vkOk && vkCtx.vertexCount() == 24 && vkCtx.indexCount() == 36,
-              "Vulkan：方块 mesh 就绪（24 顶点 36 索引，6 面独立着色）");
+        check(vkOk && vkCtx.vertexCount() == 48 && vkCtx.indexCount() == 72,
+              "Vulkan：双方块 mesh 就绪（48 顶点 72 索引，遮挡验证 A/B 各 24/36）");
         check(vkOk && vkCtx.descriptorSet() != VK_NULL_HANDLE,
               "Vulkan：MVP uniform 就绪（descriptor set + UBO，相机可操作）");
         check(vkOk && vkCtx.framesPresented() >= 1,
