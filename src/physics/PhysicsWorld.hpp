@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace engine::physics {
@@ -84,7 +85,6 @@ private:
     std::atomic<int>           blockZ_{0};
     long long                  lastSentProcessed_{0}; // 纯物理线程：上次回传时的处理数
     std::chrono::steady_clock::time_point lastLog_;
-
     // 刚体表（纯物理线程独占读写；bodyCount_ 是它的原子投影供 main 读）。
     std::vector<RigidBody>     bodies_;
     long long                  nextBodyId_{1};    // 刚体 ID 分配器
@@ -97,10 +97,20 @@ private:
     std::vector<engine::shared::PhysicsResult> pendingCollisions_; // 待发碰撞事件（纯物理线程）
     std::atomic<long long> collisions_{0};  // 累计碰撞次数（main 读）
     bool                       thrustActive_{false}; // 本 tick 推力状态（纯物理线程私有）
+    double lastPosSentSimT_ = -1.0; // 纯物理线程：上次已发位置快照的模拟时刻。
+                                    // 物理循环每墙钟帧调 syncToBusiness，但模拟 tick 只
+                                    // 25Hz——同一模拟时刻的位置被重复发 ~15 次（旧行为）。
+                                    // 位置快照语义：只发"新模拟时刻"的位置（数据层②修正）。
 
     // 静态方块碰撞体集合（纯物理线程独占；架构 2.7 物理层）。
     // 放置/破坏增量维护；打包时方块转移进刚体（物理形态转移），解包时回写。
     std::unordered_map<engine::shared::BlockPos, engine::shared::BlockType> colliders_;
+
+    // 接触集合（纯物理线程独占；Rapier Started/Stopped 语义的 Started 部分）：
+    // 刚体 id → 接触中的静态方块坐标。碰撞事件只在"接触开始"（新加入集合）时发，
+    // 持续重叠（Stay）不发；方块被删/离开后下一帧重叠检测自然移除（不发 Stopped，
+    // 业务暂无接触结束需求）。全量同步/解包时整体清空对应记录。
+    std::unordered_map<int, std::unordered_set<engine::shared::BlockPos>> contactPairs_;
 };
 
 } // namespace engine::physics

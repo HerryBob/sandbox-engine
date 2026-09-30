@@ -46,7 +46,9 @@ void PhysicsWorld::advance(double scale, double wallDt,
                 break;
             case engine::shared::PhysicsCommand::Type::SyncBlockSet:
                 // 全量同步：重建静态碰撞体集合（初始世界 / 世界重建时用）。
+                // 世界重建：接触状态全部重置（旧的接触记录全部失效）。
                 colliders_.clear();
+                contactPairs_.clear();
                 for (const auto& b : cmd.blocks) colliders_[b.pos] = b.type;
                 break;
             case engine::shared::PhysicsCommand::Type::PlaceBlock: {
@@ -130,6 +132,7 @@ void PhysicsWorld::advance(double scale, double wallDt,
                     }
                     bodies_.erase(it);
                 }
+                contactPairs_.erase(cmd.contraptionId); // 刚体已拆：其接触记录作废
                 bodyCount_.store(static_cast<long long>(bodies_.size()),
                                  std::memory_order_relaxed);
                 engine::shared::PhysicsResult r;
@@ -158,7 +161,9 @@ void PhysicsWorld::advance(double scale, double wallDt,
         // 先移动后响应：刚体 AABB 与静态方块碰撞体（每格 1×1×1）相交检测。
         // 粗相思想：只查询刚体 AABB 覆盖的整格坐标（空间查询），不遍历全部碰撞体。
         // 世界 AABB = 基准 + 中心偏移 ± 半宽（增量重算的最小包裹碰撞箱）。
-        // 撞上 → 位置回退到方块侧面 + 速度清零 + 生成碰撞事件（回传业务裁决）。
+        // 接触语义（Rapier Started/Stopped 的 Started 部分）：碰撞响应（回退+清速）
+        // 每帧可重复（顶着方块持续重叠），但事件只在"接触开始"（新加入接触集合）时发
+        // 一次——同一对 (刚体, 方块) 不重复上报，业务按真实碰撞次数裁决。
         for (auto& b : bodies_) {
             const double leftX  = b.x + b.centerOffsetX - b.halfExtentX;
             const double rightX = b.x + b.centerOffsetX + b.halfExtentX;
@@ -172,10 +177,14 @@ void PhysicsWorld::advance(double scale, double wallDt,
             const int y1 = static_cast<int>(std::floor(rightY));
             const int z0 = static_cast<int>(std::floor(leftZ));
             const int z1 = static_cast<int>(std::floor(rightZ));
-            bool hit = false;
-            for (int ix = x0; ix <= x1 && !hit; ++ix)
-                for (int iy = y0; iy <= y1 && !hit; ++iy)
-                    for (int iz = z0; iz <= z1 && !hit; ++iz) {
+            // 本帧接触中的方块（收集全部接触，不再 break 只取第一个）。
+            std::unordered_set<engine::shared::BlockPos> currentContacts;
+            double vxBefore = 0.0;
+            int    nx       = 0;
+            bool   responded = false;
+            for (int ix = x0; ix <= x1; ++ix)
+                for (int iy = y0; iy <= y1; ++iy)
+                    for (int iz = z0; iz <= z1; ++iz) {
                         if (colliders_.find(engine::shared::BlockPos{ix, iy, iz}) ==
                             colliders_.end())
                             continue;
@@ -183,27 +192,44 @@ void PhysicsWorld::advance(double scale, double wallDt,
                         if (rightX > ix && leftX < ix + 1.0 &&
                             rightY > iy && leftY < iy + 1.0 &&
                             rightZ > iz && leftZ < iz + 1.0) {
-                            // 碰撞：原型只回退 x 轴（飞船沿 x 运动），速度清零。
-                            const double vxBefore = b.vx;
-                            if (b.vx >= 0.0)
-                                b.x = static_cast<double>(ix) - b.centerOffsetX -
-                                      b.halfExtentX; // AABB 右边界贴方块左边界
-                            else
-                                b.x = static_cast<double>(ix + 1) - b.centerOffsetX +
-                                      b.halfExtentX; // AABB 左边界贴方块右边界
-                            b.vx = 0.0;
-                            collisions_.fetch_add(1, std::memory_order_relaxed);
-                            engine::shared::PhysicsResult colEv;
-                            colEv.type = engine::shared::PhysicsResult::Type::CollisionEvent;
-                            colEv.contraptionId = b.id;
-                            colEv.cx = ix; colEv.cy = iy; colEv.cz = iz;
-                            colEv.nx = (vxBefore >= 0.0) ? -1 : 1; // 刚体被推回的方向
-                            colEv.impact = std::abs(vxBefore);
-                            colEv.simTime = simTime_.load(std::memory_order_relaxed);
-                            pendingCollisions_.push_back(colEv);
-                            hit = true; // 原型：一个 tick 每刚体只报第一个碰撞
+                            currentContacts.insert(engine::shared::BlockPos{ix, iy, iz});
+                            if (!responded) {
+                                // 碰撞响应：原型只回退 x 轴（飞船沿 x 运动），速度清零。
+                                // 本帧只响应第一个接触（原型行为保持，断言依赖此回退）。
+                                responded = true;
+                                vxBefore  = b.vx;
+                                nx        = (vxBefore >= 0.0) ? -1 : 1;
+                                if (b.vx >= 0.0)
+                                    b.x = static_cast<double>(ix) - b.centerOffsetX -
+                                          b.halfExtentX; // AABB 右边界贴方块左边界
+                                else
+                                    b.x = static_cast<double>(ix + 1) - b.centerOffsetX +
+                                          b.halfExtentX; // AABB 左边界贴方块右边界
+                                b.vx = 0.0;
+                            }
                         }
                     }
+            // ---- 接触集合更新（Started / Stay / 结束）----
+            // 新接触（不在集合）→ 加入 + 发 CollisionEvent（业务裁决）；
+            // 持续接触（已在集合）→ Stay，不发；接触结束（本帧未接触）→ 移除，不发。
+            auto& set = contactPairs_[b.id];
+            for (const auto& cp : currentContacts) {
+                if (set.insert(cp).second) {
+                    collisions_.fetch_add(1, std::memory_order_relaxed);
+                    engine::shared::PhysicsResult colEv;
+                    colEv.type = engine::shared::PhysicsResult::Type::CollisionEvent;
+                    colEv.contraptionId = b.id;
+                    colEv.cx = cp.x; colEv.cy = cp.y; colEv.cz = cp.z;
+                    colEv.nx = nx;                 // 刚体被推回的方向
+                    colEv.impact = std::abs(vxBefore);
+                    colEv.simTime = simTime_.load(std::memory_order_relaxed);
+                    pendingCollisions_.push_back(colEv);
+                }
+            }
+            for (auto it = set.begin(); it != set.end();) {
+                if (currentContacts.count(*it) == 0) it = set.erase(it);
+                else ++it;
+            }
         }
 
         // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
@@ -225,19 +251,24 @@ void PhysicsWorld::syncToBusiness(
     for (const auto& ev : pendingCollisions_) q.push(ev);
     pendingCollisions_.clear();
 
-    // ② 刚体位置快照（合并语义）：有刚体就每帧发一条最新位置。
-    // 刚体自己积分在动，不依赖命令——所以每帧发，不并入③的"命令驱动"节奏。
-    // 原型只有 1 个刚体（飞船），发第一个；多刚体将来做批量快照。
+    // ② 刚体位置快照（合并语义，数据层 ② 修正）：有刚体就发最新位置，
+    // 但只发"新模拟时刻"——物理循环每墙钟帧调本函数，模拟 tick 却只有 25Hz，
+    // 同一模拟时刻重复发会淹没业务双槽（插值窗口退化，实测 1647 条回执大量同戳）。
+    // 刚体自己积分在动，不依赖命令；原型只有 1 个刚体（飞船），发第一个。
     if (!bodies_.empty()) {
-        const RigidBody& b = bodies_.front();
-        engine::shared::PhysicsResult pos;
-        pos.type = engine::shared::PhysicsResult::Type::RigidBodyPos;
-        pos.contraptionId = b.id;
-        pos.rx = b.x;
-        pos.ry = b.y;
-        pos.rz = b.z;
-        pos.simTime = simTime_.load(std::memory_order_relaxed);
-        q.push(pos); // 满则丢：业务消化不过来时丢弃旧快照可接受
+        const double st = simTime_.load(std::memory_order_relaxed);
+        if (st != lastPosSentSimT_) { // 模拟时刻已推进 → 发一条新位置快照
+            lastPosSentSimT_ = st;
+            const RigidBody& b = bodies_.front();
+            engine::shared::PhysicsResult pos;
+            pos.type = engine::shared::PhysicsResult::Type::RigidBodyPos;
+            pos.contraptionId = b.id;
+            pos.rx = b.x;
+            pos.ry = b.y;
+            pos.rz = b.z;
+            pos.simTime = st;
+            q.push(pos); // 满则丢：业务消化不过来时丢弃旧快照可接受
+        }
     }
 
     // ③ 静态碰撞体数量快照（合并语义：业务只需最新值，用于两侧一致性核对）。

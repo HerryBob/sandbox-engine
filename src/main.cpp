@@ -16,6 +16,8 @@
 #include "shared/Protocol.hpp"
 
 #include <chrono>
+#include <cmath>
+#include <sstream>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -255,9 +257,12 @@ static int runDemo() {
               std::abs(bodyOffsetAtT9 - 0.0) < 1e-9,
           "飞船改造：tick160 后刚体 27 块、AABB 半宽 1.5、偏移 0.0（增量收缩贴合）");
 
-    // 单 AABB 碰撞（4.3）：飞船撞上飞行路径障碍物 → 碰撞事件 → 业务裁决破坏
-    check(businessWorld.collisions() >= 1,
-          "飞船撞上障碍物（碰撞事件 ≥1）");
+    // 单 AABB 碰撞（4.3）+ 接触语义：飞船撞上飞行路径障碍物 → CollisionEvent → 业务裁决破坏。
+    // 接触语义保证同一 (刚体, 方块) 只报一次——精确断言 ==1（此前为 >=1 兜底重复上报）。
+    check(businessWorld.collisions() == 1,
+          "飞船撞上障碍物（接触语义：同一障碍物只报 1 次）");
+    check(physicsWorld.collisions() == 1,
+          "物理侧碰撞计数精确 = 1（Started 语义，无重复上报）");
     {
         // 障碍物破坏闭环：碰撞后 (50,0,0) 处不再有石头。
         // 注意：飞船撞破障碍物继续飞，解包后其右舷方块可能恰好落进 (50,0,0)
@@ -279,6 +284,29 @@ static int runDemo() {
         }
         check(nearShip && businessWorld.blockCount() == 27,
               "解包后业务方块重建到飞船位置（世界坐标，非局部坐标）");
+    }
+
+    // 位置插值基座（数据层 ②）：双槽快照 + lerp 验证。
+    // 飞船匀速滑行段 x 单调增：窗口内中点插值应等于两端平均，窗口外钳制。
+    {
+        engine::business::BusinessWorld::PosSample pOld, pNew;
+        if (businessWorld.lastTwoPosSamples(pOld, pNew) && pNew.simT > pOld.simT) {
+            double mx, my, mz;
+            const double midT = (pOld.simT + pNew.simT) / 2.0;
+            check(businessWorld.sampleShipPos(midT, mx, my, mz) &&
+                      std::abs(mx - (pOld.x + pNew.x) / 2.0) < 1e-6,
+                  "位置插值：窗口中点 = 两端平均（lerp 正确）");
+            double lx;
+            businessWorld.sampleShipPos(pNew.simT + 999.0, lx, my, mz);
+            check(std::abs(lx - pNew.x) < 1e-9,
+                  "位置插值：查询晚于最新快照 → 钳到最新（无未来数据）");
+        } else {
+            std::ostringstream os;
+            os << "位置插值：窗口异常（count=" << businessWorld.posSampleCount()
+               << " old.t=" << pOld.simT << " new.t=" << pNew.simT
+               << " old.x=" << pOld.x << " new.x=" << pNew.x << "）";
+            check(false, os.str().c_str());
+        }
     }
 
     std::cout << (allPass ? ">>> 全部断言通过\n" : ">>> 存在失败断言！\n");

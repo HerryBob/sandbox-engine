@@ -159,10 +159,18 @@ void BusinessWorld::receiveFromPhysics(
             }
             break;
         case engine::shared::PhysicsResult::Type::RigidBodyPos:
-            // 刚体（飞船）位置快照：业务视角更新飞船坐标。
+            // 刚体（飞船）位置快照：业务视角更新飞船坐标（日志/伪渲染用最新值）。
+            // 同时写入插值基座双槽：保留最近两个带模拟时间戳的快照（渲染 lerp 用）。
             shipX_.store(res.rx, std::memory_order_relaxed);
             shipY_.store(res.ry, std::memory_order_relaxed);
             shipZ_.store(res.rz, std::memory_order_relaxed);
+            {
+                std::lock_guard<std::mutex> lock(posMutex_);
+                const int other = (posNewest_ == 0) ? 1 : 0; // 写非最新槽（覆盖最旧）
+                posSamples_[other] = PosSample{res.simTime, res.rx, res.ry, res.rz};
+                posNewest_ = other;
+                ++posCount_;
+            }
             break;
         case engine::shared::PhysicsResult::Type::BlockSetSize:
             // 物理静态碰撞体数量快照（合并语义：只留最新值）。
@@ -291,6 +299,38 @@ int BusinessWorld::contraptionState() const {
 double BusinessWorld::shipX() const { return shipX_.load(std::memory_order_relaxed); }
 double BusinessWorld::shipY() const { return shipY_.load(std::memory_order_relaxed); }
 double BusinessWorld::shipZ() const { return shipZ_.load(std::memory_order_relaxed); }
+
+bool BusinessWorld::sampleShipPos(double simT, double& x, double& y, double& z) const {
+    // 渲染插值基座：按查询模拟时刻在最近两个快照间线性插值。
+    // 窗口外钳制：晚于最新 → 返回最新（无未来数据，等下一快照）；早于最旧 → 返回最旧。
+    std::lock_guard<std::mutex> lock(posMutex_);
+    if (posNewest_ < 0) return false;                 // 尚无任何快照
+    const PosSample& n = posSamples_[posNewest_];    // 最新
+    if (posCount_ < 2) {                              // 只有一个快照：无插值窗口
+        x = n.x; y = n.y; z = n.z;
+        return true;
+    }
+    const PosSample& o = posSamples_[1 - posNewest_]; // 次新
+    if (n.simT <= o.simT) { x = n.x; y = n.y; z = n.z; return true; } // 防御：时间倒序
+    if (simT >= n.simT) { x = n.x; y = n.y; z = n.z; return true; }   // 钳最新
+    if (simT <= o.simT) { x = o.x; y = o.y; z = o.z; return true; }   // 钳最旧
+    const double k = (simT - o.simT) / (n.simT - o.simT);             // 0~1 插值比例
+    x = o.x + (n.x - o.x) * k;
+    y = o.y + (n.y - o.y) * k;
+    z = o.z + (n.z - o.z) * k;
+    return true;
+}
+bool BusinessWorld::lastTwoPosSamples(PosSample& old, PosSample& latest) const {
+    std::lock_guard<std::mutex> lock(posMutex_);
+    if (posNewest_ < 0 || posCount_ < 2) return false;
+    latest = posSamples_[posNewest_];
+    old    = posSamples_[1 - posNewest_];
+    return true;
+}
+int BusinessWorld::posSampleCount() const {
+    std::lock_guard<std::mutex> lock(posMutex_);
+    return posCount_;
+}
 long long BusinessWorld::blocksPlaced() const {
     return blocksPlaced_.load(std::memory_order_relaxed);
 }

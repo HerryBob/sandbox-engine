@@ -66,6 +66,22 @@ public:
     double shipY() const;
     double shipZ() const;
 
+    // ---- 位置插值基座（数据层 ② 位置带时间戳，渲染插值前提）----
+    // 物理 RigidBodyPos 回执自带 simTime 戳；业务侧保留最近两个带戳快照，
+    // 渲染端按查询模拟时刻在两快照间线性插值（lerp）。渲染帧率不受限时
+    // 帧率越高插值点越密，插值机制与帧率无关。
+    struct PosSample {
+        double simT = 0.0;            // 物理模拟时刻（快照时刻）
+        double x = 0.0, y = 0.0, z = 0.0;
+    };
+    // 按模拟时刻查询刚体位置：落在两快照之间 → 线性插值；
+    // 晚于最新快照 → 钳到最新（无未来数据，等下一快照）；早于最旧 → 钳到最旧。
+    bool sampleShipPos(double simT, double& x, double& y, double& z) const;
+    // 最近两个快照（断言/调试用）：old=次新，latest=最新。返回 false=不足两个快照。
+    bool lastTwoPosSamples(PosSample& old, PosSample& latest) const;
+    // 诊断：已接收位置快照数（插值窗口诊断/调试用）。
+    int posSampleCount() const;
+
     // ---- 方块放置/破坏（业务裁决，架构 2.7 + 飞船改造）----
     // 裁决规则：①目标域是刚体时飞船必须处于打包状态（刚体存在性）；
     //           ②同域位置已占用拒绝放置；③破坏不存在的方块拒绝。
@@ -130,6 +146,15 @@ private:
     std::atomic<long long> physicsBlockCount_{0};  // 物理碰撞体数量快照
     std::atomic<long long> collisions_{0};         // 收到碰撞事件次数
     std::chrono::steady_clock::time_point lastLog_;
+
+    // ---- 位置插值基座：双槽快照（业务线程写 / main 渲染读）----
+    // 环形双槽恒存"最近两个"带模拟时间戳的位置快照：新快照覆盖次新槽，
+    // 随后最新槽翻转。posMutex_ 保护（更新 25Hz、读取 60Hz+，锁竞争可忽略，
+    // 性能敏感后再升级无锁 seqlock）。
+    mutable std::mutex posMutex_;
+    PosSample posSamples_[2];  // 槽 0/1 轮换；posNewest_ 指向最新槽
+    int       posNewest_ = -1; // -1=尚无快照
+    int       posCount_  = 0;  // 累计快照数（<2 时无插值窗口）
 };
 
 } // namespace engine::business
