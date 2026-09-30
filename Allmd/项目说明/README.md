@@ -23,6 +23,8 @@ C++ 自研方块沙盒引擎（对标 Minecraft），核心创新：
 - **碰撞检测**：空间哈希粗相 + 严格三轴区间重叠窄相（贴边不算碰撞）；撞上回退 + 清速 + CollisionEvent 回传业务裁决破坏
 - **碰撞事件 = 接触语义**（2026-09-30）：物理侧维护接触集合（刚体 id → 接触中方块），Started 只在接触开始时发（同一障碍物只报 1 次，断言 ==1）；持续重叠不发；接触结束/方块删除后移除
 - **位置带时间戳 = 插值基座**（2026-09-30）：业务侧双槽快照（`PosSample{simT,x,y,z}` 恒存最近两个）+ `sampleShipPos(simT)` lerp 插值（窗口外钳制）；渲染 60Hz+/无限帧率每帧按渲染时刻插值（帧率越高插值点越密，机制与帧率无关）。顺带修复：物理位置快照原本每墙钟循环重复发（同 simT 发 ~15 次），改为**只在模拟时刻推进时发**（每模拟 tick 一条）
+- **区块化存储**（2026-09-30）：主世界方块 → `unordered_map<ChunkPos, ChunkData>`（16³ 立方体密集 `uint8_t[4096]`，空 chunk 不占内存，定位 O(1)）；刚体域方块独立容器 `bodyBlocks_`（复合体不进 chunk）；`forEachBlockInAABB` 区域查询（同步/LOD/变更广播共用）；修改跟踪 `dirty` 位掩码（Minetest raiseModified 思想）；协议边界保持 vector<Block>，物理侧零改动
+- **变更事件流**（2026-09-30）：业务→渲染增量通道 `BlockChangeEvent{tick, dirtyChunks[]}`——写操作标脏 `dirtyChunksThisTick_`，tick 边界聚合一条发出；渲染端消费标记脏 chunk → 只重建变过的 chunk mesh。与位置快照区分：快照满则丢、变更事件满则不丢（下 tick 重试）
 - **飞船改造 + 增量最小碰撞箱**：刚体内方块增删（Sable 思想简化落地），`recomputeAABB` 实时贴合（半宽/中心偏移）
 - **伪渲染**：`demo/ConsoleRenderer` 控制台侧视 ASCII 帧（第 4 轨只读，视口跟随飞船），渲染线程落地前的数据通路验证
 - `shared/Block`：BlockType/BlockPos/Block（方块数据层，int 格索引 + 格心 +0.5 语义），初始世界 3×3×3 木头飞船 + 石头障碍物
@@ -63,7 +65,7 @@ Release + 基线：
 ```
 cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/release
-build\release\sandbox_engine.exe > bench\baseline.txt   # 20/20 软断言全过
+build\release\sandbox_engine.exe > bench\baseline.txt   # 25/25 软断言全过
 ```
 
 ## 里程碑
@@ -79,11 +81,12 @@ build\release\sandbox_engine.exe > bench\baseline.txt   # 20/20 软断言全过
 - [x] 碰撞检测（空间哈希粗相 + 严格区间重叠窄相）+ 碰撞事件回传业务破坏
 - [x] 碰撞事件 = 接触语义（Started 只在接触开始时发，同一障碍物只报 1 次）
 - [x] 位置带时间戳 = 插值基座（业务双槽快照 + sampleShipPos lerp；顺带修复物理位置快照洪水）
+- [x] 区块化存储（16³ chunk 稀疏映射 + 区域查询 + 修改跟踪；复合体不进 chunk）
+- [x] 变更事件流（业务→渲染增量通道，tick 聚合脏 chunk；**数据层 ② 收官**）
 - [x] 解包闭环（物理回执携带世界坐标方块列表，业务重建）
 - [x] 飞船改造（刚体内方块增删）+ 增量最小碰撞箱（Sable 思想简化）
 - [x] 伪渲染（ConsoleRenderer 控制台侧视帧，第 4 轨只读）
-- [x] 定向清理（DemoDriver / 日志分级 / release + 基线，20/20 软断言）
-- [ ] 世界数据升级（区块化 chunk / 变更事件流，碰撞去重 + 位置时间戳已 ✅）
+- [x] 定向清理（DemoDriver / 日志分级 / release + 基线，25/25 软断言）
 - [ ] 极简 TE（业务线程方块逻辑）
 - [ ] 极简渲染（约 5.x，引入 vcpkg + Vulkan + glfw；渲染=第四轨只读快照）
 - [ ] 模组类拦截系统、子复合体、增量更新、结构冻结等（全部后置）

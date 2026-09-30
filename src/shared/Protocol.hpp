@@ -70,4 +70,15 @@ struct PhysicsResult {
     std::vector<engine::shared::Block> blocks;
 };
 
+// 业务 → 渲染：变更事件流（数据层 ② 第四项，渲染快照正式化）。
+// 每业务 tick 聚合一条：本 tick 变脏的 chunk 集合。渲染端（第 4 轨只读）
+// 消费后标记 chunk 脏 → 重建该 chunk 的 mesh（未来 LOD 线程）。
+// 与位置快照的区别：位置是"状态"（合并语义，中间态丢弃），
+// 变更事件是"事件流"（增量：渲染端只重建变过的 chunk，不全量重画）。
+// 刚体域方块变更不进此流（复合体 = 动态渲染单元，状态由 RigidBodyPos 驱动）。
+struct BlockChangeEvent {
+    long long tick = 0;                              // 业务 tick 序号（事件时序）
+    std::vector<engine::shared::ChunkPos> dirtyChunks; // 本 tick 变脏的 chunk（去重）
+};
+
 } // namespace engine::shared

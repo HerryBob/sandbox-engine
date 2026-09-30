@@ -6,7 +6,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional> // std::function（forEachBlockInAABB 回调）
 #include <mutex>
+#include <optional>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -30,6 +33,12 @@ public:
     // 业务 Tick 边界：收取物理结果（刚体位置回传）。
     void receiveFromPhysics(engine::core::SPSCQueue<engine::shared::PhysicsResult>& q);
 
+    // 业务 Tick 边界：变更事件流（数据层 ② 第四项，渲染快照正式化）。
+    // 把本 tick 变脏的 chunk 聚合为一条变更事件发给渲染端（第 4 轨只读）：
+    // 渲染端消费 → 标记 chunk 脏 → 只重建变过的 chunk mesh（不全量重画）。
+    void flushChanges(engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& q);
+    long long changeEventsSent() const; // 已发变更事件数（断言/诊断）
+
     // ---- 命令式接口（演示/玩家操作/脚本事件源共用）----
     // 请求全量同步：初始世界方块 → 物理碰撞体集合（排队一条 SyncBlockSet）。
     bool syncAll();
@@ -49,15 +58,29 @@ public:
     int        blockY() const;
     int        blockZ() const;
 
-    // 世界方块列表（原型：初始一艘 3×3×3 木头飞船，后续打包/解包的数据源）。
-    const std::vector<engine::shared::Block>& blocks() const;
+    // 世界方块查询（数据层 ② 区块化）：
+    // 主世界静态方块 → 16³ chunk（chunks_，世界坐标，定位 O(1)）；
+    // 刚体内方块（contraptionId≥0，飞船改造）→ bodyBlocks_（局部坐标，独立容器）。
     std::size_t blockCount() const;
-    // 渲染快照：锁内拷贝方块列表（第 4 轨只读，main 线程运行中安全调用）。
+    // 渲染快照：锁内拷贝全量方块列表（第 4 轨只读，main 线程运行中安全调用）。
     std::vector<engine::shared::Block> renderSnapshot() const;
-    // 按坐标查方块（找不到返回 nullptr；原型线性查找，将来换坐标映射）。
-    // contraptionId：-1=主世界方块，≥0=刚体内方块（两个空间坐标独立，互不冲突）。
-    const engine::shared::Block* findBlock(const engine::shared::BlockPos& p,
-                                           int contraptionId = -1) const;
+    // 按坐标查方块（返回空 = 不存在）。区块化后按域分流：
+    // contraptionId=-1 → chunk 定位 O(1)；≥0 → bodyBlocks_ 查找。
+    // 值返回（optional）：主世界方块由 chunk 现场构造（存储只存类型），
+    // 不返回内部指针（避免悬垂/并发写风险）。
+    std::optional<engine::shared::Block> findBlock(const engine::shared::BlockPos& p,
+                                                   int contraptionId = -1) const;
+
+    // 已加载 chunk 数（空 chunk 不占内存；断言/诊断用）。
+    std::size_t chunkCount() const;
+    // 区域查询（跨 chunk；同步 / LOD 生成 / 变更广播共用）：遍历 [min, max]
+    // 内所有非空气方块，对每个调用 fn。原型直接按坐标遍历（区域内坐标定位 O(1)）。
+    void forEachBlockInAABB(const engine::shared::BlockPos& min,
+                            const engine::shared::BlockPos& max,
+                            const std::function<void(const engine::shared::BlockPos&,
+                                                     engine::shared::BlockType)>& fn) const;
+    // 某 chunk 的变更原因位掩码（修改跟踪诊断/断言用；未加载返回 0）。
+    std::uint32_t chunkDirtyFlags(const engine::shared::ChunkPos& cp) const;
 
     // Contraption 打包状态（0=未打包 1=已打包 2=已解包，main 演示读取）。
     int contraptionState() const;
@@ -114,10 +137,21 @@ private:
     std::atomic<double>        shipX_{0.0};  // 刚体（飞船）位置快照（业务视角）
     std::atomic<double>        shipY_{0.0};
     std::atomic<double>        shipZ_{0.0};
-    // 世界方块列表：构造时写入初始内容；此后仅业务线程结构性修改（放置/破坏/重建），
-    // main 线程伪渲染也会读取（架构 4.x 第 4 轨只读）——用 blocksMutex_ 保护。
-    std::vector<engine::shared::Block> blocks_;
+    // 世界方块存储（数据层 ② 区块化）：主世界与刚体域分容器。
+    // 主世界静态方块（contraptionId=-1，世界坐标）→ chunks_（16³ 密集 uint8，
+    // 空 chunk 不占内存；定位 O(1)）。刚体内方块（contraptionId≥0，局部坐标，
+    // 飞船改造）→ bodyBlocks_（独立容器，不进 chunk——两个坐标空间独立，
+    // 硬塞进 chunk 会与主世界同坐标方块冲突）。
+    // 两容器仅业务线程结构性修改；main 线程伪渲染/断言在锁内读取——blocksMutex_ 保护。
+    std::unordered_map<engine::shared::ChunkPos, engine::shared::ChunkData> chunks_;
+    std::unordered_map<engine::shared::BlockPos, engine::shared::Block>    bodyBlocks_;
     mutable std::mutex blocksMutex_; // const 读函数也要能加锁（blockCount/renderSnapshot）
+
+    // 变更事件流（数据层 ② 第四项）的事件源：本 tick 变脏的 chunk 集合。
+    // 写操作（放置/破坏/碰撞破坏/解包重建）除 markDirty（持久位掩码，诊断留档）
+    // 外还插入本集合；flushChanges 在 tick 边界采集打包为 BlockChangeEvent 后清空。
+    std::unordered_set<engine::shared::ChunkPos> dirtyChunksThisTick_;
+    std::atomic<long long> changeEventsSent_{0}; // 已发变更事件数
 
     // 打包状态机（纯业务线程私有，无需原子）：
     bool wantSync_ = false;      // 待发全量同步指令（syncAll）

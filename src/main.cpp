@@ -21,6 +21,7 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <unordered_set>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -48,6 +49,8 @@ static int runDemo() {
     core::SPSCQueue<shared::InputEvent>     inputToPhysics(512);
     core::SPSCQueue<shared::PhysicsCommand> businessToPhysics(512);
     core::SPSCQueue<shared::PhysicsResult>  physicsToBusiness(512);
+    // 数据层 ② 第四项：业务 → 渲染变更事件流（第 4 轨只读增量通道，渲染快照正式化）。
+    core::SPSCQueue<shared::BlockChangeEvent> businessToRender(256);
 
     business::BusinessWorld businessWorld(tm);
     physics::PhysicsWorld   physicsWorld(tm);
@@ -72,6 +75,7 @@ static int runDemo() {
             demoDriver.step();                             // 演示事件源（tick 驱动）
             businessWorld.syncToPhysics(businessToPhysics);       // 发指令 → 物理
             businessWorld.receiveFromPhysics(physicsToBusiness);  // 收结果 ← 物理
+            businessWorld.flushChanges(businessToRender);         // 变更事件 → 渲染
             next += std::chrono::milliseconds(50);
             std::this_thread::sleep_until(next);
         }
@@ -108,9 +112,17 @@ static int runDemo() {
     // global 同时缩放业务+物理；域乘数只缩放单轨（见 TimeManager）
     // 伪渲染穿插：把 sleep 拆成 1s 块，每块画一帧 ASCII 侧视图
     //（第 4 轨只读：renderSnapshot 锁内拷贝，渲染输出整帧持 g_logMutex 原子化）。
+    // 每帧先消费变更事件流（pop 积压全部）：渲染端标记脏 chunk 的落点（伪渲染阶段只计数收集）。
+    long long changeEventsReceived = 0; // 渲染端已收变更事件数（断言用）
+    std::unordered_set<shared::ChunkPos> dirtyChunksSeen_; // 渲染端见过的脏 chunk
     auto renderWait = [&](double seconds) {
         for (int f = 0; f < static_cast<int>(seconds); ++f) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            shared::BlockChangeEvent ev;
+            while (businessToRender.pop(ev)) {
+                ++changeEventsReceived;
+                for (const auto& cp : ev.dirtyChunks) dirtyChunksSeen_.insert(cp);
+            }
             demo::renderFrame(businessWorld.renderSnapshot(), businessWorld.shipX(),
                               businessWorld.contraptionState(),
                               static_cast<int>(businessWorld.tickCount()));
@@ -241,7 +253,7 @@ static int runDemo() {
           "合法放置 2 次成功（主世界 1 + 刚体改造 1），重复放置被拒 1 次");
     check(businessWorld.blocksRemoved() == 2 && businessWorld.removalsRejected() == 1,
           "合法破坏 2 次成功（主世界 1 + 刚体改造 1），破坏不存在方块被拒 1 次");
-    check(businessWorld.findBlock(engine::shared::BlockPos{0, 5, 0}) == nullptr,
+    check(!businessWorld.findBlock(engine::shared::BlockPos{0, 5, 0}).has_value(),
           "放置又破坏后 (0,5,0) 已不存在（裁决闭环）");
     check(businessWorld.physicsBlockCount() ==
               static_cast<long long>(businessWorld.blockCount()),
@@ -267,8 +279,8 @@ static int runDemo() {
         // 障碍物破坏闭环：碰撞后 (50,0,0) 处不再有石头。
         // 注意：飞船撞破障碍物继续飞，解包后其右舷方块可能恰好落进 (50,0,0)
         // （木头），因此不能断言"该格无方块"，只能断言"该格无石头"。
-        const auto* obs = businessWorld.findBlock(engine::shared::BlockPos{50, 0, 0});
-        check(obs == nullptr || obs->type != engine::shared::BlockType::Stone,
+        const auto obs = businessWorld.findBlock(engine::shared::BlockPos{50, 0, 0});
+        check(!obs || obs->type != engine::shared::BlockType::Stone,
               "障碍物（石头）已被撞击破坏（(50,0,0) 无石头）");
     }
     check(shipAtT15 > 45.0,
@@ -279,11 +291,67 @@ static int runDemo() {
     {
         const double sx = businessWorld.shipX();
         bool nearShip = true;
-        for (const auto& b : businessWorld.blocks()) {
+        for (const auto& b : businessWorld.renderSnapshot()) {
             if (std::abs(b.pos.x - sx) > 2.5) nearShip = false;
         }
         check(nearShip && businessWorld.blockCount() == 27,
               "解包后业务方块重建到飞船位置（世界坐标，非局部坐标）");
+    }
+
+    // ---- 区块化存储（数据层 ② 第三项）：chunk 组织 + 区域查询 + 修改跟踪 ----
+    {
+        // ① 主世界被组织进 16³ chunk：初始 27 块飞船横跨 chunk -1/0 边界，石头在 (3,0,0)，
+        //    稀疏映射只存有方块的 chunk（无空 chunk 占位）。
+        check(businessWorld.chunkCount() > 0 && businessWorld.chunkCount() <= 12,
+              "区块化：主世界按 16³ chunk 组织（稀疏，空 chunk 不占内存）");
+        // ② 区域查询（同步/LOD/变更广播共用）：查询解包后飞船所在区域应收集 27 块木头。
+        //    飞船最终位置 ~48.6，方块 x∈{47,48,49} 跨 chunk 2/3 边界——验证跨 chunk 遍历。
+        //    （不能查初始 [-1..1]：演示已结束，飞船已飞离；石头 (50,0,0) 已被撞击破坏，
+        //     区域内无其它方块干扰。）
+        const int sx0 = static_cast<int>(businessWorld.shipX());
+        std::size_t areaCount = 0;
+        businessWorld.forEachBlockInAABB(
+            engine::shared::BlockPos{sx0 - 3, -1, -1}, engine::shared::BlockPos{sx0 + 3, 1, 1},
+            [&](const engine::shared::BlockPos&, engine::shared::BlockType t) {
+                if (t == engine::shared::BlockType::Wood) ++areaCount;
+            });
+        check(areaCount == 27,
+              "区域查询：解包后飞船区域遍历收集 27 块木头（跨 chunk 边界）");
+        // ③ 修改跟踪（Minetest raiseModified 思想，变更事件流种子）：解包重建后
+        //    飞船新位置的 chunk 应带脏标记（业务权威记录"因何变更"）。
+        bool anyDirty = false;
+        {
+            const auto sx = businessWorld.shipX();
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        const auto cp = engine::shared::chunkOf(
+                            engine::shared::BlockPos{static_cast<int>(sx) + dx,
+                                                     dy, dz});
+                        if (businessWorld.chunkDirtyFlags(cp) != 0) anyDirty = true;
+                    }
+        }
+        check(anyDirty, "修改跟踪：解包重建的 chunk 带脏标记（变更事件流种子）");
+    }
+
+    // ---- 变更事件流（数据层 ② 第四项）：业务→渲染增量通道 ----
+    {
+        // ① 事件送达：渲染端收到变更事件（业务每 tick 聚合脏 chunk 集合发出）。
+        check(changeEventsReceived > 0,
+              "变更事件流：渲染端收到变更事件（业务→渲染增量通道）");
+        // ② 增量语义正确：解包重建标脏 → 飞船最终位置所在 chunk 应出现在事件流中
+        //    （渲染端据此只重建变过的 chunk，不全量重画）。
+        bool shipChunkSeen = false;
+        const auto sx = businessWorld.shipX();
+        for (int dx = -1; dx <= 1 && !shipChunkSeen; ++dx)
+            for (int dy = -1; dy <= 1 && !shipChunkSeen; ++dy)
+                for (int dz = -1; dz <= 1 && !shipChunkSeen; ++dz) {
+                    const auto cp = engine::shared::chunkOf(
+                        engine::shared::BlockPos{static_cast<int>(sx) + dx, dy, dz});
+                    if (dirtyChunksSeen_.count(cp)) shipChunkSeen = true;
+                }
+        check(shipChunkSeen,
+              "变更事件流：飞船解包重建的 chunk 出现在事件流中（增量语义正确）");
     }
 
     // 位置插值基座（数据层 ②）：双槽快照 + lerp 验证。
