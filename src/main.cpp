@@ -8,11 +8,11 @@
 #include "core/SPSCQueue.hpp"
 #include "core/ThreadLoop.hpp"
 #include "core/TimeManager.hpp"
-#include "demo/ConsoleRenderer.hpp"
 #include "demo/DemoDriver.hpp"
 #include "input/InputController.hpp"
 #include "input/InputSampler.hpp"
 #include "physics/PhysicsWorld.hpp"
+#include "render/Renderer.hpp"
 #include "shared/Protocol.hpp"
 
 #include <chrono>
@@ -21,7 +21,6 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
-#include <unordered_set>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -41,7 +40,7 @@ using namespace engine;
 // 优雅停止 → 软断言汇总。返回 0 = 全部断言通过，非 0 = 有失败。
 static int runDemo() {
     initConsole();
-    std::cout << "=== 沙盒引擎 · 三轨消息流 + 刚体积分 + 增量碰撞箱 + 伪渲染骨架 ===\n";
+    std::cout << "=== 沙盒引擎 · 四轨消息流 + 刚体积分 + 增量碰撞箱 + 渲染线程骨架 ===\n";
 
     // 全局 time_scale 单实例，三条轨共享
     core::TimeManager tm;
@@ -57,6 +56,8 @@ static int runDemo() {
     input::InputSampler     inputSampler;
     input::InputController  inputController; // 玩家操控权开关（服务端权威）
     engine::demo::DemoDriver demoDriver(businessWorld); // tick 事件源（演示）
+    // 渲染线程（第 4 轨只读观众）：消费变更事件流 + 插值刚体位置 + 伪渲染帧。
+    engine::render::Renderer renderer(businessWorld, businessToRender);
 
     // 初始世界内容（2.1 验证）：一艘 3×3×3 木头飞船 + 一块路径上的石头障碍物
     std::cout << "初始世界：方块=" << businessWorld.blockCount()
@@ -66,6 +67,7 @@ static int runDemo() {
     core::ThreadLoop businessLoop("business");
     core::ThreadLoop physicsLoop("physics");
     core::ThreadLoop inputLoop("input");
+    core::ThreadLoop renderLoop("render");
 
     // ---- 业务线程 20TPS：固定 50ms 墙钟节奏 ----
     businessLoop.start([&] {
@@ -108,30 +110,30 @@ static int runDemo() {
         }
     });
 
+    // ---- 渲染线程（第 4 轨只读观众，~60Hz）：消费变更事件 + 插值位置 + 伪渲染帧 ----
+    // 渲染不向模拟发任何指令；数据源 = businessToRender 事件流（增量）+ 锁内快照 + 位置插值。
+    renderLoop.start([&] {
+        while (!renderLoop.shouldStop()) {
+            renderer.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60Hz
+        }
+    });
+
     // ---- 主线程：阶段演示 time_scale 效果 ----
     // global 同时缩放业务+物理；域乘数只缩放单轨（见 TimeManager）
-    // 伪渲染穿插：把 sleep 拆成 1s 块，每块画一帧 ASCII 侧视图
-    //（第 4 轨只读：renderSnapshot 锁内拷贝，渲染输出整帧持 g_logMutex 原子化）。
-    // 每帧先消费变更事件流（pop 积压全部）：渲染端标记脏 chunk 的落点（伪渲染阶段只计数收集）。
-    long long changeEventsReceived = 0; // 渲染端已收变更事件数（断言用）
-    std::unordered_set<shared::ChunkPos> dirtyChunksSeen_; // 渲染端见过的脏 chunk
+    // 伪渲染帧由渲染线程输出（1Hz）；主线程只负责阶段切换与时间控制。
     auto renderWait = [&](double seconds) {
-        for (int f = 0; f < static_cast<int>(seconds); ++f) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            shared::BlockChangeEvent ev;
-            while (businessToRender.pop(ev)) {
-                ++changeEventsReceived;
-                for (const auto& cp : ev.dirtyChunks) dirtyChunksSeen_.insert(cp);
-            }
-            demo::renderFrame(businessWorld.renderSnapshot(), businessWorld.shipX(),
-                              businessWorld.contraptionState(),
-                              static_cast<int>(businessWorld.tickCount()));
-        }
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(static_cast<int>(seconds * 1000.0)));
     };
     auto stage = [&](double globalScale, const char* label) {
         tm.setGlobal(globalScale);
-        std::cout << "\n===== global time_scale = " << globalScale
-                  << "（" << label << "）=====\n";
+        {
+            // 阶段标题与三轨日志共用锁：避免与业务/物理/输入线程的 cout 输出交错。
+            std::lock_guard<std::mutex> lock(core::g_logMutex);
+            std::cout << "\n===== global time_scale = " << globalScale
+                      << "（" << label << "）=====\n";
+        }
         renderWait(3);
         std::lock_guard<std::mutex> lock(core::g_logMutex);
         std::cout << "  -- 业务sim=" << businessWorld.simTime()
@@ -182,10 +184,11 @@ static int runDemo() {
     inputController.setEnabled(true); // 恢复
     const double shipAtT15 = businessWorld.shipX();  // 采样点⑤：禁用阶段末（~15s，已解包冻结）
 
-    // 优雅停止三轨
+    // 优雅停止：模拟三轨先停，渲染线程最后停（第 4 轨只读，不阻塞模拟停止）。
     businessLoop.stop();
     physicsLoop.stop();
     inputLoop.stop();
+    renderLoop.stop();
 
     std::cout << "\n===== 汇总 =====\n"
               << "业务 sim=" << businessWorld.simTime()
@@ -336,9 +339,9 @@ static int runDemo() {
 
     // ---- 变更事件流（数据层 ② 第四项）：业务→渲染增量通道 ----
     {
-        // ① 事件送达：渲染端收到变更事件（业务每 tick 聚合脏 chunk 集合发出）。
-        check(changeEventsReceived > 0,
-              "变更事件流：渲染端收到变更事件（业务→渲染增量通道）");
+        // ① 事件送达：渲染线程（第 4 轨）收到变更事件（业务每 tick 聚合脏 chunk 发出）。
+        check(renderer.changeEventsReceived() > 0,
+              "变更事件流：渲染线程收到变更事件（业务→渲染增量通道）");
         // ② 增量语义正确：解包重建标脏 → 飞船最终位置所在 chunk 应出现在事件流中
         //    （渲染端据此只重建变过的 chunk，不全量重画）。
         bool shipChunkSeen = false;
@@ -348,10 +351,13 @@ static int runDemo() {
                 for (int dz = -1; dz <= 1 && !shipChunkSeen; ++dz) {
                     const auto cp = engine::shared::chunkOf(
                         engine::shared::BlockPos{static_cast<int>(sx) + dx, dy, dz});
-                    if (dirtyChunksSeen_.count(cp)) shipChunkSeen = true;
+                    if (renderer.hasSeenChunk(cp)) shipChunkSeen = true;
                 }
         check(shipChunkSeen,
               "变更事件流：飞船解包重建的 chunk 出现在事件流中（增量语义正确）");
+        // ③ 渲染线程已见过 ≥1 个脏 chunk（增量重建的落点集合非空）。
+        check(renderer.seenChunkCount() >= 1,
+              "渲染线程：脏 chunk 集合已建立（增量重建的依据就绪）");
     }
 
     // 位置插值基座（数据层 ②）：双槽快照 + lerp 验证。
@@ -379,7 +385,7 @@ static int runDemo() {
 
     std::cout << (allPass ? ">>> 全部断言通过\n" : ">>> 存在失败断言！\n");
 
-    std::cout << "三轨消息流 + 刚体积分 + 增量碰撞箱 + 伪渲染骨架运行结束。\n";
+    std::cout << "四轨消息流 + 刚体积分 + 增量碰撞箱 + 渲染线程骨架运行结束。\n";
     return allPass ? 0 : 1; // 退出码可被脚本/CI 使用：0=全部断言通过
 }
 

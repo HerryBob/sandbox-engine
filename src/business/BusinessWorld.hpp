@@ -179,6 +179,7 @@ private:
     std::atomic<long long> removalsRejected_{0};   // 破坏被拒次数
     std::atomic<long long> physicsBlockCount_{0};  // 物理碰撞体数量快照
     std::atomic<long long> collisions_{0};         // 收到碰撞事件次数
+    std::chrono::steady_clock::time_point startWall_; // 墙钟起点（tps 墙钟口径用）
     std::chrono::steady_clock::time_point lastLog_;
 
     // ---- 位置插值基座：双槽快照（业务线程写 / main 渲染读）----

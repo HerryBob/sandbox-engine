@@ -6,7 +6,10 @@
 
 namespace engine::business {
 
-BusinessWorld::BusinessWorld(engine::core::TimeManager& tm): tm_(tm), lastLog_(std::chrono::steady_clock::now()) {
+BusinessWorld::BusinessWorld(engine::core::TimeManager& tm)
+    : tm_(tm),
+      startWall_(std::chrono::steady_clock::now()),
+      lastLog_(std::chrono::steady_clock::now()) {
     // 原型：初始世界放一艘 3×3×3 木头飞船 + 一块飞行路径上的石头障碍物。
     // 数据层 ② 区块化：方块写入 16³ chunk（chunks_ 稀疏映射，空 chunk 不占内存）。
     // 构造时写入初始内容；此后仅业务线程读写（放置/破坏/打包取数），
@@ -66,6 +69,22 @@ bool BusinessWorld::packContraption() {
     // 记录刚体内方块坐标：碰撞裁决保护（刚体自身方块不可被撞毁）。
     packedBlocks_.clear();
     for (const auto& b : packBlocks_) packedBlocks_.insert(b.pos);
+
+    // 物理形态转移（架构 2.7）的业务侧同步：打包 = 方块从主世界转进刚体，
+    // 业务侧 chunk 同步置空——否则打包期间渲染会看到"幽灵飞船"（主世界残留
+    // + 刚体双份），且解包若不清全表会残留旧位置方块。
+    for (const auto& b : packBlocks_) {
+        const auto cp = engine::shared::chunkOf(b.pos);
+        auto it = chunks_.find(cp);
+        if (it != chunks_.end() &&
+            it->second.atWorld(b.pos) !=
+                static_cast<std::uint8_t>(engine::shared::BlockType::Air)) {
+            it->second.atWorld(b.pos) =
+                static_cast<std::uint8_t>(engine::shared::BlockType::Air);
+            it->second.markDirty(0x20);        // 修改跟踪：打包移除标记脏
+            dirtyChunksThisTick_.insert(cp);   // 变更事件流：本 tick 事件源
+        }
+    }
     wantPack_ = true;
     return true;
 }
@@ -182,13 +201,15 @@ void BusinessWorld::receiveFromPhysics(
         case engine::shared::PhysicsResult::Type::ContraptionUnpacked:
             contraptionState_.store(2, std::memory_order_relaxed);
             packedBlocks_.clear(); // 刚体已拆回方块，碰撞保护集合失效
-            // 解包闭环（架构 2.7）：用物理回执的世界坐标方块重建主世界 chunk。
+            // 解包闭环（架构 2.7）：用物理回执的世界坐标方块写入主世界 chunk。
             // 业务权威的坐标与物理回写位置对齐——飞船飞了多远，方块表就记多远，
-            // 不再停留在打包前的局部坐标 (-1..1)。刚体域方块（飞船改造）一并清空
-            // （解包 = 刚体整体拆回主世界，物理回执即为全量权威）。
+            // 不再停留在打包前的局部坐标 (-1..1)。
+            // 注意：不清空 chunks_ 全表——打包时已把飞船旧位置置空（形态转移
+            // 的业务侧同步），主世界其他方块（玩家放置等）必须保留；
+            // 只清空刚体域 bodyBlocks_（解包 = 刚体整体拆回主世界，物理回执
+            // 即为全量权威，改造方块一并失效）。
             {
                 std::lock_guard<std::mutex> lock(blocksMutex_);
-                chunks_.clear();
                 bodyBlocks_.clear();
                 for (const auto& b : res.blocks) {
                     // 回执方块均为世界坐标主世界方块（物理解包填充，见 PhysicsWorld）。
@@ -479,7 +500,11 @@ void BusinessWorld::maybeLog() {
         lastLog_ = now;
         const long long t = tickCount();
         const double sim = simTime_.load(std::memory_order_relaxed);
-        const double tps = sim > 0.0 ? static_cast<double>(t) / sim : 0.0;
+        // tps 按墙钟口径（tick / 墙钟运行秒）：模拟时间受 time_scale 缩放，
+        // 用 sim 做分母在加速/减速时会失真（加速时 tps 虚低、减速时虚高）。
+        const double wall =
+            std::chrono::duration<double>(now - startWall_).count();
+        const double tps = wall > 0.0 ? static_cast<double>(t) / wall : 0.0;
         std::ostringstream os;
         os << "[业务] sim=" << sim << "s tick=" << t
            << " 平均tps=" << tps

@@ -25,6 +25,9 @@ C++ 自研方块沙盒引擎（对标 Minecraft），核心创新：
 - **位置带时间戳 = 插值基座**（2026-09-30）：业务侧双槽快照（`PosSample{simT,x,y,z}` 恒存最近两个）+ `sampleShipPos(simT)` lerp 插值（窗口外钳制）；渲染 60Hz+/无限帧率每帧按渲染时刻插值（帧率越高插值点越密，机制与帧率无关）。顺带修复：物理位置快照原本每墙钟循环重复发（同 simT 发 ~15 次），改为**只在模拟时刻推进时发**（每模拟 tick 一条）
 - **区块化存储**（2026-09-30）：主世界方块 → `unordered_map<ChunkPos, ChunkData>`（16³ 立方体密集 `uint8_t[4096]`，空 chunk 不占内存，定位 O(1)）；刚体域方块独立容器 `bodyBlocks_`（复合体不进 chunk）；`forEachBlockInAABB` 区域查询（同步/LOD/变更广播共用）；修改跟踪 `dirty` 位掩码（Minetest raiseModified 思想）；协议边界保持 vector<Block>，物理侧零改动
 - **变更事件流**（2026-09-30）：业务→渲染增量通道 `BlockChangeEvent{tick, dirtyChunks[]}`——写操作标脏 `dirtyChunksThisTick_`，tick 边界聚合一条发出；渲染端消费标记脏 chunk → 只重建变过的 chunk mesh。与位置快照区分：快照满则丢、变更事件满则不丢（下 tick 重试）
+- **全局代码审查 + 修复**（2026-09-30）：打包时主世界 chunk 未置空（幽灵飞船+解包残留）→ 打包同步置空标脏 0x20；解包 `chunks_.clear()` 全清丢其他方块 → 只清刚体域+写回执；tps 日志改墙钟口径（time_scale≠1 不再失真）
+- **渲染线程骨架（第 4 轨）**（2026-09-30）：`render/Renderer` + ThreadLoop("render") ~60Hz——消费变更事件流 → 标记脏 chunk → `sampleShipPos` 插值刚体位置 → 伪渲染帧（降频 1Hz）；只读消费不向模拟发指令；模拟三轨先停、渲染最后停
+- **渲染依赖接入**（2026-09-30）：vcpkg manifest（vcpkg.json 入库）——glm（数学）/ glfw3（窗口）/ vulkan-headers + volk（Vulkan 免 SDK 动态加载）；CMakePresets 接 vcpkg toolchain，链接验证通过
 - **飞船改造 + 增量最小碰撞箱**：刚体内方块增删（Sable 思想简化落地），`recomputeAABB` 实时贴合（半宽/中心偏移）
 - **伪渲染**：`demo/ConsoleRenderer` 控制台侧视 ASCII 帧（第 4 轨只读，视口跟随飞船），渲染线程落地前的数据通路验证
 - `shared/Block`：BlockType/BlockPos/Block（方块数据层，int 格索引 + 格心 +0.5 语义），初始世界 3×3×3 木头飞船 + 石头障碍物
@@ -65,7 +68,7 @@ Release + 基线：
 ```
 cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/release
-build\release\sandbox_engine.exe > bench\baseline.txt   # 25/25 软断言全过
+build\release\sandbox_engine.exe > bench\baseline.txt   # 26/26 软断言全过
 ```
 
 ## 里程碑
@@ -83,10 +86,13 @@ build\release\sandbox_engine.exe > bench\baseline.txt   # 25/25 软断言全过
 - [x] 位置带时间戳 = 插值基座（业务双槽快照 + sampleShipPos lerp；顺带修复物理位置快照洪水）
 - [x] 区块化存储（16³ chunk 稀疏映射 + 区域查询 + 修改跟踪；复合体不进 chunk）
 - [x] 变更事件流（业务→渲染增量通道，tick 聚合脏 chunk；**数据层 ② 收官**）
+- [x] 全局代码审查（修复打包幽灵方块 / 解包全清丢块 / tps 墙钟口径）
+- [x] 渲染线程骨架（第 4 轨：消费变更事件 + 插值位置 + 伪渲染帧）
+- [x] 渲染依赖接入（vcpkg：glm / glfw3 / vulkan-headers / volk）
 - [x] 解包闭环（物理回执携带世界坐标方块列表，业务重建）
 - [x] 飞船改造（刚体内方块增删）+ 增量最小碰撞箱（Sable 思想简化）
-- [x] 伪渲染（ConsoleRenderer 控制台侧视帧，第 4 轨只读）
-- [x] 定向清理（DemoDriver / 日志分级 / release + 基线，25/25 软断言）
+- [x] 伪渲染（Renderer 线程内 console 侧视帧，第 4 轨只读）
+- [x] 定向清理（DemoDriver / 日志分级 / release + 基线，26/26 软断言）
 - [ ] 极简 TE（业务线程方块逻辑）
 - [ ] 极简渲染（约 5.x，引入 vcpkg + Vulkan + glfw；渲染=第四轨只读快照）
 - [ ] 模组类拦截系统、子复合体、增量更新、结构冻结等（全部后置）

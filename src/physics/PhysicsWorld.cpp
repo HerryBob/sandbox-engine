@@ -8,7 +8,9 @@
 namespace engine::physics {
 
 PhysicsWorld::PhysicsWorld(engine::core::TimeManager& tm)
-    : tm_(tm), lastLog_(std::chrono::steady_clock::now()) {}
+    : tm_(tm),
+      startWall_(std::chrono::steady_clock::now()),
+      lastLog_(std::chrono::steady_clock::now()) {}
 
 void PhysicsWorld::advance(double scale, double wallDt,
                            engine::core::SPSCQueue<engine::shared::InputEvent>& fromInput,
@@ -366,7 +368,11 @@ void PhysicsWorld::maybeLog() {
         lastLog_ = now;
         const long long t = tickCount();
         const double sim = simTime_.load(std::memory_order_relaxed);
-        const double tps = sim > 0.0 ? static_cast<double>(t) / sim : 0.0;
+        // tps 按墙钟口径（tick / 墙钟运行秒）：模拟时间受 time_scale 缩放，
+        // 用 sim 做分母在加速/减速时会失真。
+        const double wall =
+            std::chrono::duration<double>(now - startWall_).count();
+        const double tps = wall > 0.0 ? static_cast<double>(t) / wall : 0.0;
         std::ostringstream os;
         os << "[物理] sim=" << sim << "s tick=" << t
            << " 平均tps=" << tps

@@ -24,8 +24,26 @@ add_executable(sandbox_engine
 
 target_include_directories(sandbox_engine PRIVATE src)
 
-# 显式链接，未来引入 Vulkan 渲染时在此追加
-target_link_libraries(sandbox_engine PRIVATE)
+# ---- 第三方依赖（vcpkg manifest 模式，见 vcpkg.json）----
+# configure 时通过 vcpkg.cmake toolchain 提供（CMakePresets 已接）：
+#   -DCMAKE_TOOLCHAIN_FILE=E:/VS2026/VC/vcpkg/scripts/buildsystems/vcpkg.cmake
+# glm：GL 数学库（header-only）——向量/矩阵/四元数，渲染计算基石
+find_package(glm CONFIG REQUIRED)
+# glfw3：跨平台窗口 + 输入 + 窗口表面（Vulkan 对接用）
+find_package(glfw3 CONFIG REQUIRED)
+# volk：Vulkan meta-loader（运行时动态加载 vulkan-1.dll，免装 LunarG SDK）
+find_package(volk CONFIG REQUIRED)
+# vulkan-headers：Vulkan C API 头文件（与 volk 搭配，无需 SDK 的 .lib）
+find_package(VulkanHeaders CONFIG REQUIRED)
+
+# 显式链接：模拟三轨不依赖图形库；渲染线程骨架暂用 console 输出，
+# glfw/volk/Vulkan 为下一步 GLFW 窗口 + Vulkan 实例做准备（链接验证依赖就绪）
+target_link_libraries(sandbox_engine PRIVATE
+    glm::glm
+    glfw
+    volk::volk
+    Vulkan::Headers
+)
 
 if(MSVC)
     # 源码含中文注释，强制 cl 以 UTF-8 读取（避免 GBK 代码页误解析触发 C4819/语法错）

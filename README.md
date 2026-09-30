@@ -22,9 +22,12 @@ C++ 自研方块沙盒引擎（对标 Minecraft），核心创新：
 - [x] 位置带时间戳 = 插值基座（双槽快照 + sampleShipPos lerp；修复物理位置快照洪水）
 - [x] 区块化存储（16³ chunk 稀疏映射 + 区域查询 + 修改跟踪，空 chunk 不占内存）
 - [x] 变更事件流（业务→渲染增量通道，tick 聚合脏 chunk；**数据层 ② 收官**）
+- [x] 全局代码审查（修复打包幽灵方块 / 解包全清丢块 / tps 墙钟口径 3 个 bug）
+- [x] 渲染线程骨架（**第 4 轨**：ThreadLoop 60Hz 消费变更事件 + 插值位置 + 伪渲染帧）
+- [x] 渲染依赖接入（vcpkg manifest：glm / glfw3 / vulkan-headers / volk，Vulkan 免 SDK）
 - [x] 飞船改造（刚体内方块增删）+ 增量最小碰撞箱（半宽/偏移实时贴合）
-- [x] 伪渲染（ConsoleRenderer 控制台侧视帧，第 4 轨只读）
-- [x] 定向清理（DemoDriver 拆演示 / 日志分级 / release 基线 bench/baseline.txt，25/25 软断言）
+- [x] 伪渲染（Renderer 线程内 console 侧视帧，第 4 轨只读）
+- [x] 定向清理（DemoDriver 拆演示 / 日志分级 / release 基线 bench/baseline.txt，26/26 软断言）
 - [ ] 极简 TE / 极简渲染（Vulkan，约 5.x）
 
 ## 构建

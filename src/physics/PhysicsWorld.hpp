@@ -84,6 +84,7 @@ private:
     std::atomic<int>           blockY_{0};
     std::atomic<int>           blockZ_{0};
     long long                  lastSentProcessed_{0}; // 纯物理线程：上次回传时的处理数
+    std::chrono::steady_clock::time_point startWall_; // 墙钟起点（tps 墙钟口径用）
     std::chrono::steady_clock::time_point lastLog_;
     // 刚体表（纯物理线程独占读写；bodyCount_ 是它的原子投影供 main 读）。
     std::vector<RigidBody>     bodies_;

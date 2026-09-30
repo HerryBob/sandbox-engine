@@ -1,0 +1,12 @@
+{
+  "name": "sandbox-engine",
+  "version": "0.1.0",
+  "description": "自研方块沙盒引擎 - 渲染依赖：glm(数学) / glfw3(窗口) / vulkan-headers+VOLK(Vulkan API 免 SDK 接入)",
+  "dependencies": [
+    "glm",
+    "glfw3",
+    "vulkan-headers",
+    "volk"
+  ],
+  "builtin-baseline": "4cb050be2cfa7a947cdd2dd1a70e24b17774c979"
+}
