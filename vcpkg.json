@@ -5,6 +5,7 @@
   "dependencies": [
     "glm",
     "glfw3",
+    "shaderc",
     "vulkan-headers",
     "volk"
   ],

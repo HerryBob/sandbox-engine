@@ -35,14 +35,16 @@ find_package(glfw3 CONFIG REQUIRED)
 find_package(volk CONFIG REQUIRED)
 # vulkan-headers：Vulkan C API 头文件（与 volk 搭配，无需 SDK 的 .lib）
 find_package(VulkanHeaders CONFIG REQUIRED)
+# shaderc：GLSL → SPIR-V 运行时编译（免 LunarG SDK 的 glslangValidator 命令行）
+find_package(unofficial-shaderc CONFIG REQUIRED)
 
-# 显式链接：模拟三轨不依赖图形库；渲染线程骨架暂用 console 输出，
-# glfw/volk/Vulkan 为下一步 GLFW 窗口 + Vulkan 实例做准备（链接验证依赖就绪）
+# 显式链接：模拟三轨不依赖图形库；渲染层用 GLFW 窗口 + Vulkan + shaderc 着色器编译。
 target_link_libraries(sandbox_engine PRIVATE
     glm::glm
     glfw
     volk::volk
     Vulkan::Headers
+    unofficial::shaderc::shaderc
 )
 
 if(MSVC)

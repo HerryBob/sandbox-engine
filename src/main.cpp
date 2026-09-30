@@ -13,10 +13,12 @@
 #include "input/InputSampler.hpp"
 #include "physics/PhysicsWorld.hpp"
 #include "render/Renderer.hpp"
+#include "render/VulkanContext.hpp"
 #include "shared/Protocol.hpp"
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <sstream>
 #include <iostream>
 #include <mutex>
@@ -40,7 +42,7 @@ using namespace engine;
 // 优雅停止 → 软断言汇总。返回 0 = 全部断言通过，非 0 = 有失败。
 static int runDemo() {
     initConsole();
-    std::cout << "=== 沙盒引擎 · 四轨消息流 + 刚体积分 + 增量碰撞箱 + 渲染线程骨架 ===\n";
+    std::cout << "=== 沙盒引擎 · 四轨消息流 + 刚体积分 + 增量碰撞箱 + 渲染线程骨架 + Vulkan 方块+相机 ===\n";
 
     // 全局 time_scale 单实例，三条轨共享
     core::TimeManager tm;
@@ -58,6 +60,14 @@ static int runDemo() {
     engine::demo::DemoDriver demoDriver(businessWorld); // tick 事件源（演示）
     // 渲染线程（第 4 轨只读观众）：消费变更事件流 + 插值刚体位置 + 伪渲染帧。
     engine::render::Renderer renderer(businessWorld, businessToRender);
+
+    // Vulkan 第一步：GLFW 窗口 + 实例 + 设备枚举 + 逻辑设备（swapchain 下一步）。
+    // 窗口在主线程创建；渲染线程不触碰窗口对象，事件由主线程轮询。
+    engine::render::VulkanContext vkCtx;
+    const bool vkOk = vkCtx.init(1280, 720, "沙盒引擎 · Vulkan 方块+相机");
+    if (vkOk) {
+        std::cout << engine::render::VulkanContext::kCameraHelp;
+    }
 
     // 初始世界内容（2.1 验证）：一艘 3×3×3 木头飞船 + 一块路径上的石头障碍物
     std::cout << "初始世界：方块=" << businessWorld.blockCount()
@@ -112,9 +122,11 @@ static int runDemo() {
 
     // ---- 渲染线程（第 4 轨只读观众，~60Hz）：消费变更事件 + 插值位置 + 伪渲染帧 ----
     // 渲染不向模拟发任何指令；数据源 = businessToRender 事件流（增量）+ 锁内快照 + 位置插值。
+    // 真实渲染：每 tick 调 vkCtx.drawFrame()（acquire→录制→提交→呈现，FIFO vsync 对齐）。
     renderLoop.start([&] {
         while (!renderLoop.shouldStop()) {
             renderer.tick();
+            vkCtx.drawFrame();
             std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60Hz
         }
     });
@@ -122,9 +134,14 @@ static int runDemo() {
     // ---- 主线程：阶段演示 time_scale 效果 ----
     // global 同时缩放业务+物理；域乘数只缩放单轨（见 TimeManager）
     // 伪渲染帧由渲染线程输出（1Hz）；主线程只负责阶段切换与时间控制。
+    // 等待期间轮询 GLFW 窗口事件（窗口保持可拖动/缩放响应）。
     auto renderWait = [&](double seconds) {
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(static_cast<int>(seconds * 1000.0)));
+        const auto end = std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(static_cast<int>(seconds * 1000.0));
+        while (std::chrono::steady_clock::now() < end) {
+            vkCtx.pollEvents();
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        }
     };
     auto stage = [&](double globalScale, const char* label) {
         tm.setGlobal(globalScale);
@@ -383,9 +400,39 @@ static int runDemo() {
         }
     }
 
+    // ---- Vulkan：窗口 + 实例 + 设备 + 交换链（渲染实现的地基）----
+    {
+        check(vkOk && vkCtx.instance() != VK_NULL_HANDLE,
+              "Vulkan：实例创建成功（volk 动态加载 vulkan-1.dll）");
+        check(vkOk && vkCtx.devices().size() >= 1,
+              "Vulkan：枚举到物理设备（显卡可见）");
+        check(vkOk && vkCtx.device() != VK_NULL_HANDLE &&
+                  vkCtx.graphicsQueueFamily() != UINT32_MAX,
+              "Vulkan：逻辑设备 + 图形队列创建成功");
+        check(vkOk && vkCtx.surface() != VK_NULL_HANDLE,
+              "Vulkan：surface 创建成功（窗口↔GPU 连接点）");
+        check(vkOk && vkCtx.swapchain() != VK_NULL_HANDLE &&
+                  vkCtx.swapchainImageCount() >= 2,
+              "Vulkan：交换链创建成功（图像≥2 双缓冲就绪）");
+        check(vkOk && vkCtx.swapchainImageView(0) != VK_NULL_HANDLE,
+              "Vulkan：图像视图创建成功（渲染目标可绑定）");
+        check(vkOk && vkCtx.renderPass() != VK_NULL_HANDLE,
+              "Vulkan：RenderPass 创建成功（CLEAR→画→STORE 呈现规则）");
+        check(vkOk && vkCtx.pipeline() != VK_NULL_HANDLE,
+              "Vulkan：图形管线创建成功（着色器 shaderc 编译 + 装配）");
+        check(vkOk && vkCtx.vertexCount() == 24 && vkCtx.indexCount() == 36,
+              "Vulkan：方块 mesh 就绪（24 顶点 36 索引，6 面独立着色）");
+        check(vkOk && vkCtx.descriptorSet() != VK_NULL_HANDLE,
+              "Vulkan：MVP uniform 就绪（descriptor set + UBO，相机可操作）");
+        check(vkOk && vkCtx.framesPresented() >= 1,
+              "Vulkan：方块帧已呈现（顶点缓冲→索引→drawIndexed→present 闭环）");
+    }
+
+    vkCtx.shutdown(); // 窗口销毁（演示结束）
+
     std::cout << (allPass ? ">>> 全部断言通过\n" : ">>> 存在失败断言！\n");
 
-    std::cout << "四轨消息流 + 刚体积分 + 增量碰撞箱 + 渲染线程骨架运行结束。\n";
+    std::cout << "四轨消息流 + 刚体积分 + 增量碰撞箱 + 渲染线程骨架 + Vulkan 方块+相机运行结束。\n";
     return allPass ? 0 : 1; // 退出码可被脚本/CI 使用：0=全部断言通过
 }
 

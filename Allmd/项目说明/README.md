@@ -27,7 +27,9 @@ C++ 自研方块沙盒引擎（对标 Minecraft），核心创新：
 - **变更事件流**（2026-09-30）：业务→渲染增量通道 `BlockChangeEvent{tick, dirtyChunks[]}`——写操作标脏 `dirtyChunksThisTick_`，tick 边界聚合一条发出；渲染端消费标记脏 chunk → 只重建变过的 chunk mesh。与位置快照区分：快照满则丢、变更事件满则不丢（下 tick 重试）
 - **全局代码审查 + 修复**（2026-09-30）：打包时主世界 chunk 未置空（幽灵飞船+解包残留）→ 打包同步置空标脏 0x20；解包 `chunks_.clear()` 全清丢其他方块 → 只清刚体域+写回执；tps 日志改墙钟口径（time_scale≠1 不再失真）
 - **渲染线程骨架（第 4 轨）**（2026-09-30）：`render/Renderer` + ThreadLoop("render") ~60Hz——消费变更事件流 → 标记脏 chunk → `sampleShipPos` 插值刚体位置 → 伪渲染帧（降频 1Hz）；只读消费不向模拟发指令；模拟三轨先停、渲染最后停
-- **渲染依赖接入**（2026-09-30）：vcpkg manifest（vcpkg.json 入库）——glm（数学）/ glfw3（窗口）/ vulkan-headers + volk（Vulkan 免 SDK 动态加载）；CMakePresets 接 vcpkg toolchain，链接验证通过
+- **渲染依赖接入**（2026-09-30）：vcpkg manifest（vcpkg.json 入库）——glm（数学）/ glfw3（窗口）/ vulkan-headers + volk（Vulkan 免 SDK 动态加载）/ shaderc（GLSL→SPIR-V 运行时编译免 glslangValidator）；CMakePresets 接 vcpkg toolchain，链接验证通过
+- **Vulkan 方块渲染**（2026-09-30）：`render/VulkanContext` 全链路——GLFW 窗口→volk 动态加载→实例→物理设备（RX 6750 GRE）→逻辑设备→surface→交换链→RenderPass→图形管线（shaderc 编译着色器）→顶点/索引缓冲（24 顶点 36 索引，6 面独立着色）→drawIndexed 上屏；36/36 断言
+- **相机 + MVP**（2026-09-30）：descriptor set + UBO（uniform buffer 每帧写矩阵）；glm 透视/视图；WASD 平移 + 空格/Shift 上下 + 鼠标左键拖动旋转 + R 重置；`proj[1][1]*=-1` 适配 Vulkan NDC；默认朝向 -Z（修复黑屏：相机初始方向背离方块）；37/37 断言
 - **飞船改造 + 增量最小碰撞箱**：刚体内方块增删（Sable 思想简化落地），`recomputeAABB` 实时贴合（半宽/中心偏移）
 - **伪渲染**：`demo/ConsoleRenderer` 控制台侧视 ASCII 帧（第 4 轨只读，视口跟随飞船），渲染线程落地前的数据通路验证
 - `shared/Block`：BlockType/BlockPos/Block（方块数据层，int 格索引 + 格心 +0.5 语义），初始世界 3×3×3 木头飞船 + 石头障碍物
@@ -93,6 +95,8 @@ build\release\sandbox_engine.exe > bench\baseline.txt   # 26/26 软断言全过
 - [x] 飞船改造（刚体内方块增删）+ 增量最小碰撞箱（Sable 思想简化）
 - [x] 伪渲染（Renderer 线程内 console 侧视帧，第 4 轨只读）
 - [x] 定向清理（DemoDriver / 日志分级 / release + 基线，26/26 软断言）
+- [x] **Vulkan 方块渲染**（2026-09-30：窗口→实例→设备→交换链→RenderPass→管线→顶点/索引缓冲→drawIndexed 上屏，36/36 断言）
+- [x] **相机 + MVP**（2026-09-30：descriptor set + UBO；glm 透视/视图矩阵；WASD 平移 + 鼠标左键拖动旋转 + R 重置；proj[1][1]*=-1 适配 Vulkan NDC；37/37 断言）
 - [ ] 极简 TE（业务线程方块逻辑）
-- [ ] 极简渲染（约 5.x，引入 vcpkg + Vulkan + glfw；渲染=第四轨只读快照）
+- [ ] chunk mesh（批量绘制 + 相邻面剔除）
 - [ ] 模组类拦截系统、子复合体、增量更新、结构冻结等（全部后置）
