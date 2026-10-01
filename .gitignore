@@ -28,3 +28,6 @@ Allmd/机械动力航空学及其物理引擎源代码/
 # 系统
 Thumbs.db
 Desktop.ini
+
+# 第三方学习资料 PDF（只学不入库）
+Allmd/开源参考/*.pdf

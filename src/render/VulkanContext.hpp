@@ -40,8 +40,7 @@ struct UniformBufferObject {
 
 class VulkanContext {
 public:
-    static constexpr const char* kCameraHelp =
-        "相机控制：WASD=平移 空格/左Shift=上下 鼠标左键拖动=旋转 R=重置视角\n";
+    static constexpr const char* kCameraHelp = "相机控制：WASD=平移 空格/左Shift=上下 鼠标左键拖动=旋转 R=重置视角\n";
 public:
     VulkanContext() = default;
     ~VulkanContext();
@@ -51,6 +50,7 @@ public:
     // 初始化链：glfwInit → 窗口 → volk 加载 → 实例 → surface →
     // 枚举设备（graphics+present 队列族）→ 逻辑设备 → 交换链 + 图像视图。
     // 失败返回 false 并打印原因。
+	//以下四个函数声明就是窗口的四个基本操作，分别是初始化窗口、轮询事件、检查是否关闭窗口以及关闭窗口。
     bool init(int width, int height, const char* title);
 
     // 主线程轮询窗口事件（渲染线程不触碰窗口对象）。
