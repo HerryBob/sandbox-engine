@@ -1,0 +1,19 @@
+# Visual Studio / IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# 构建输出
+build/
+out/
+cmake-build-*/
+
+# 本地备份
+备份/
+
+# 编译产物
+*.obj
+*.o
+*.ilk
+*.pdb

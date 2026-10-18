@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minecraft 开发路径与引擎对照</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' fill='%232F4A3E'/%3E%3Crect x='10' y='10' width='12' height='12' fill='%23E9E4DA'/%3E%3Crect x='14' y='14' width='4' height='4' fill='%232F4A3E'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --ink: #1A1B1C;
+    --sub: #5F6670;
+    --line: #DCD8CE;
+    --bg: #F5F3EF;
+    --card: #FFFFFF;
+    --green: #2F4A3E;
+    --green-bright: #35705A;
+    --amber: #9A6A2F;
+    --red: #A14E50;
+    --blue: #4F6B9A;
+    --axis-w: 24px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.55;
+    font-size: 15px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+
+  /* ===== 头部 ===== */
+  .hero { padding: 8px 0 20px; }
+  .kicker {
+    display: inline-block; font-size: 12.5px; letter-spacing: 0.08em;
+    color: var(--green-bright); font-weight: 700; margin-bottom: 6px;
+  }
+  h1 { font-size: 26px; line-height: 1.25; font-weight: 800; margin-bottom: 8px; }
+  .lead { color: var(--sub); font-size: 14px; max-width: 640px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .badge {
+    font-size: 12.5px; padding: 5px 12px; border-radius: 999px;
+    background: var(--card); border: 1px solid var(--line); color: var(--sub);
+  }
+  .badge b { color: var(--ink); font-weight: 700; }
+  .badge.ok b { color: var(--green-bright); }
+  .badge.now b { color: var(--blue); }
+  .badge.warn b { color: var(--amber); }
+
+  /* ===== 章节标题 ===== */
+  .sec { margin-top: 34px; }
+  .sec h2 {
+    font-size: 19px; font-weight: 800; margin-bottom: 14px;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .sec h2 .no {
+    font-size: 12.5px; color: var(--blue); font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+  .sec-intro { color: var(--sub); font-size: 13.5px; margin: -6px 0 14px; }
+
+  /* ===== 时间轴：每行 grid 三列（时间/轴/内容） ===== */
+  .timeline { }
+  .tl-row {
+    display: grid;
+    grid-template-columns: 64px var(--axis-w) 1fr;
+    gap: 0;
+  }
+  .tl-time {
+    text-align: right; padding: 3px 8px 0 0; font-size: 13px; color: var(--sub);
+  }
+  .tl-time .yr { font-weight: 700; color: var(--ink); font-size: 14px; }
+  .tl-time .ph { font-size: 11.5px; color: var(--sub); display: block; }
+  .tl-axis { position: relative; width: var(--axis-w); justify-self: center; }
+  .tl-axis::before {
+    content: ""; position: absolute;
+    /* 轴线 2px 宽：左缘 = 轴列中心 - 1px，中心恒 = axis-w/2 */
+    left: calc(var(--axis-w) / 2 - 1px);
+    top: 0; bottom: 0; width: 2px; background: var(--line);
+  }
+  .tl-axis .dot {
+    position: absolute; top: 9px;
+    /* 圆点 11px 宽（border-box）：左缘 = 轴列中心 - 5.5px，中心恒 = axis-w/2 */
+    left: calc(var(--axis-w) / 2 - 5.5px);
+    width: 11px; height: 11px; border-radius: 50%;
+    background: var(--blue); border: 2px solid var(--bg);
+  }
+  .tl-axis .dot.ok { background: var(--green-bright); }
+  .tl-axis .dot.warn { background: var(--amber); }
+  .tl-axis .dot.bad { background: var(--red); }
+  .tl-row.first .tl-axis::before { top: 12px; }
+  .tl-row.last .tl-axis::before { bottom: 12px; }
+  .tl-body { padding: 0 0 22px 10px; min-width: 0; overflow-wrap: break-word; }
+  .tl-body .mc { font-size: 13.5px; }
+  .tl-body .mc b { color: var(--ink); }
+  .tl-body .map { font-size: 13.5px; margin-top: 3px; }
+  .tl-body .map b { color: var(--green-bright); }
+  .tl-body .map.warn b { color: var(--amber); }
+
+  /* ===== 对照表 ===== */
+  table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    table-layout: fixed; background: var(--card);
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+  }
+  colgroup col.c1 { width: 14%; }
+  colgroup col.c2 { width: 33%; }
+  colgroup col.c3 { width: 36%; }
+  colgroup col.c4 { width: 17%; }
+  th {
+    text-align: left; padding: 9px 10px; font-size: 12.5px; color: var(--sub);
+    border-bottom: 1px solid var(--line); background: #EFECE4;
+  }
+  td { padding: 9px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+  td:first-child { font-weight: 700; }
+  .st { font-size: 12px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; display: inline-block; }
+  .st.ok { background: #E3EFE8; color: var(--green-bright); }
+  .st.doing { background: #E4EAF3; color: var(--blue); }
+  .st.warn { background: #F3E8DA; color: var(--amber); }
+  .st.todo { background: #EFEDE6; color: var(--sub); }
+
+  /* ===== 三条提示 ===== */
+  .tips { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  .tip {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; display: flex; gap: 12px; align-items: flex-start;
+  }
+  .tip .idx {
+    flex: 0 0 30px; height: 30px; border-radius: 8px;
+    background: var(--green); color: #fff; font-weight: 800;
+    display: flex; align-items: center; justify-content: center; font-size: 14px;
+  }
+  .tip h3 { font-size: 15px; font-weight: 800; margin-bottom: 3px; }
+  .tip p { font-size: 13.5px; color: var(--sub); }
+
+  /* ===== 底部衔接 ===== */
+  .footer {
+    margin-top: 34px; background: var(--green); color: #F2EFE7;
+    border-radius: 10px; padding: 18px 20px; font-size: 13.5px;
+  }
+  .footer b { color: #fff; }
+  .footer a { color: #D9E4DC; }
+
+  @media (min-width: 768px) {
+    .wrap { padding: 40px 32px 64px; }
+    h1 { font-size: 32px; }
+    .lead { font-size: 15px; }
+    .sec h2 { font-size: 21px; }
+    .tips { grid-template-columns: repeat(3, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ===== 头部 ===== -->
+  <div class="hero">
+    <div class="kicker">MinecraftGame2 · 引擎架构对照</div>
+    <h1>Minecraft 开发路径<br>能给我们的引擎什么提示</h1>
+    <p class="lead">MC 的架构演进史是一部"先能玩、后还债"的实录：chunk 先行、服务端权威、渲染长期被拖成短板、数据格式重构代价巨大。下面把每个关键阶段映射到 MinecraftGame2 的对应决策与下一步。</p>
+    <div class="badges">
+      <span class="badge ok"><b>chunk / 权威</b> 已做对</span>
+      <span class="badge now"><b>渲染深化</b> 正当其时</span>
+      <span class="badge warn"><b>数据格式</b> 前车之鉴</span>
+    </div>
+  </div>
+
+  <!-- ===== 时间轴 ===== -->
+  <div class="sec">
+    <h2><span class="no">01</span>MC 关键阶段 → 我们的映射</h2>
+    <div class="timeline">
+
+      <div class="tl-row first">
+        <div class="tl-time"><span class="yr">2009</span><span class="ph">Classic</span></div>
+        <div class="tl-axis"><div class="dot"></div></div>
+        <div class="tl-body">
+          <div class="mc"><b>MC：</b>Notch 原型，Java Applet，glBegin 立即模式逐面画方块，无 chunk、世界极小。</div>
+          <div class="map"><b>→ 我们：</b>固定 2 方块 mesh（48 顶点/72 索引）= MC 的"最小可玩"起步，路线一致。</div>
+        </div>
+      </div>
+
+      <div class="tl-row">
+        <div class="tl-time"><span class="yr">2010</span><span class="ph">Alpha</span></div>
+        <div class="tl-axis"><div class="dot ok"></div></div>
+        <div class="tl-body">
+          <div class="mc"><b>MC：</b>无限世界 + chunk（16×16×高）动态生成/卸载，区块成为一切的地基。</div>
+          <div class="map"><b>→ 我们：</b>chunk 先行（16³ 稀疏 + 脏标记 + 变更事件流），起点比 MC 当年更高。</div>
+        </div>
+      </div>
+
+      <div class="tl-row">
+        <div class="tl-time"><span class="yr">2011</span><span class="ph">1.0</span></div>
+        <div class="tl-axis"><div class="dot ok"></div></div>
+        <div class="tl-body">
+          <div class="mc"><b>MC：</b>正式版 + 多人兴起，服务端权威成形（防作弊 / 一致性）。</div>
+          <div class="map"><b>→ 我们：</b>业务权威（裁决唯一权威 + 指令/回执可追踪），与 MC 服务端权威同思想。</div>
+        </div>
+      </div>
+
+      <div class="tl-row">
+        <div class="tl-time"><span class="yr">2012</span><span class="ph">1.2</span></div>
+        <div class="tl-axis"><div class="dot warn"></div></div>
+        <div class="tl-body">
+          <div class="mc"><b>MC：</b>Anvil 存档格式（region 32×32 chunk、zlib、1KB 对齐）+ 世界高度 128 → 256。</div>
+          <div class="map warn"><b>→ 提醒：</b>存档格式是"改起来最贵的"——我们尚无存档，将来设计时早定结构。</div>
+        </div>
+      </div>
+
+      <div class="tl-row">
+        <div class="tl-time"><span class="yr">2014</span><span class="ph">1.8</span></div>
+        <div class="tl-axis"><div class="dot"></div></div>
+        <div class="tl-body">
+          <div class="mc"><b>MC：</b>渲染 VBO 化——每 chunk 一个批量缓冲，draw call 从"每面一次"降到"每 chunk 一次"。</div>
+          <div class="map"><b>→ 我们：</b>渲染线程深化 = 同一方向（消费脏 chunk 重建网格 → 合并/实例化）。</div>
+        </div>
+      </div>
+
+      <div class="tl-row">
+        <div class="tl-time"><span class="yr">2018</span><span class="ph">1.13</span></div>
+        <div class="tl-axis"><div class="dot warn"></div></div>
+        <div class="tl-body">
+          <div class="mc"><b>MC：</b>扁平化——方块 ID 从硬编码数字 → 命名空间字符串，为数据驱动/模组铺路，迁移代价巨大。</div>
+          <div class="map warn"><b>→ 提醒：</b>我们的 BlockType 是枚举数字——早期把方块定义做成可扩展注册表，省一次大重构。</div>
+        </div>
+      </div>
+
+      <div class="tl-row">
+        <div class="tl-time"><span class="yr">2021</span><span class="ph">1.18</span></div>
+        <div class="tl-axis"><div class="dot warn"></div></div>
+        <div class="tl-body">
+          <div class="mc"><b>MC：</b>世界高度 384（Y=-64..320）——chunk 结构 + 存档格式 + 光照联动修改。</div>
+          <div class="map warn"><b>→ 提醒：</b>我们的 16³ chunk 若未来扩展高度，注意结构与存档的联动成本。</div>
+        </div>
+      </div>
+
+      <div class="tl-row last">
+        <div class="tl-time"><span class="yr">2020s</span><span class="ph">Sodium</span></div>
+        <div class="tl-axis"><div class="dot bad"></div></div>
+        <div class="tl-body">
+          <div class="mc"><b>MC：</b>社区模组用现代渲染器重写 vanilla 渲染，帧率翻倍——渲染是 MC 拖得最久的短板（vanilla 十年未大重构）。</div>
+          <div class="map"><b>→ 我们：</b>渲染线程深化正当其时，别拖到架构定型后再返工。</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ===== 对照表 ===== -->
+  <div class="sec">
+    <h2><span class="no">02</span>MC 决策 ↔ 我们引擎 · 逐项对照</h2>
+    <div class="sec-intro">每行：MC 的做法、我们的对应物、当前状态。状态口径与 <b>ARCHITECTURE.md</b> 一致。</div>
+    <table>
+      <colgroup>
+        <col class="c1"><col class="c2"><col class="c3"><col class="c4">
+      </colgroup>
+      <tr>
+        <th>维度</th><th>MC 的做法</th><th>MinecraftGame2</th><th>状态</th>
+      </tr>
+      <tr>
+        <td>世界组织</td>
+        <td>chunk 16×16×高，动态生成/卸载（Alpha 起）</td>
+        <td>16³ 稀疏 chunk + 脏标记 + 变更事件流</td>
+        <td><span class="st ok">已做</span></td>
+      </tr>
+      <tr>
+        <td>权威模型</td>
+        <td>服务端权威（多人一致性/防作弊）</td>
+        <td>业务权威 + 指令/回执协议，命令零丢失可断言</td>
+        <td><span class="st ok">已做</span></td>
+      </tr>
+      <tr>
+        <td>渲染管线</td>
+        <td>glBegin → VBO → 每 chunk 合并缓冲（1.8）</td>
+        <td>VulkanMesh 固定 2 方块 → 渲染线程深化（chunk 网格重建）</td>
+        <td><span class="st doing">深化中</span></td>
+      </tr>
+      <tr>
+        <td>渲染优化</td>
+        <td>面剔除 / 视锥剔除（后期才系统做）</td>
+        <td>路线图优化里程碑：面剔除 / 网格合并</td>
+        <td><span class="st todo">规划中</span></td>
+      </tr>
+      <tr>
+        <td>方块 ID</td>
+        <td>数字 ID → 命名空间字符串（1.13 扁平化，代价巨大）</td>
+        <td>BlockType 枚举（数字底层值）</td>
+        <td><span class="st warn">前瞻：注册表化</span></td>
+      </tr>
+      <tr>
+        <td>存档格式</td>
+        <td>Anvil region 格式（32×32 chunk、zlib、1KB 对齐）</td>
+        <td>尚无存档需求</td>
+        <td><span class="st warn">早设计</span></td>
+      </tr>
+      <tr>
+        <td>世界高度</td>
+        <td>128 → 256 → 384，chunk/存档/光照联动改</td>
+        <td>16³ 写死（含 Y 轴）</td>
+        <td><span class="st warn">参数化前瞻</span></td>
+      </tr>
+      <tr>
+        <td>呈现 / 帧率</td>
+        <td>vsync 与帧率控制（渲染工程的一部分）</td>
+        <td>FIFO 固定（60Hz 线程 + vsync）</td>
+        <td><span class="st todo">渲染深化时一起做</span></td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- ===== 三条提示 ===== -->
+  <div class="sec">
+    <h2><span class="no">03</span>三条硬提示</h2>
+    <div class="tips">
+      <div class="tip">
+        <div class="idx">1</div>
+        <div>
+          <h3>chunk / 权威先行已做对</h3>
+          <p>MC 证明这两件事是地基。我们起点更高：稀疏 chunk + 事件流 + 指令/回执可追踪。</p>
+        </div>
+      </div>
+      <div class="tip">
+        <div class="idx">2</div>
+        <div>
+          <h3>渲染别拖</h3>
+          <p>MC 十年渲染债被 Sodium 一次还清。我们正在渲染深化阶段，正当其时——这是每帧都跑的层。</p>
+        </div>
+      </div>
+      <div class="tip">
+        <div class="idx">3</div>
+        <div>
+          <h3>数据格式早设计</h3>
+          <p>1.13 扁平化与 1.18 高度扩展都是"改起来最贵"的。BlockType 注册表化 + 存档结构值得前瞻。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 底部衔接 ===== -->
+  <div class="footer">
+    <b>与 ARCHITECTURE.md 衔接：</b>本文是对照视图，架构决策全文见 <a href="ARCHITECTURE.md">docs/ARCHITECTURE.md</a>（15 条决策 + 8 个踩坑记录 + 路线图）。
+    <br><br>
+    <b>下一步（建议顺序）：</b>① 渲染线程深化（伪渲染 → 真实 chunk 网格重建）→ ② 动态方块渲染（网格重建 / GPU 实例化）→ ③ 优化里程碑（mipmap、面剔除、网格合并，遇瓶颈再学）→ ④ 呈现模式与帧率控制（与渲染深化一起做）。
+  </div>
+
+</div>
+</body>
+</html>
