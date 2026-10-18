@@ -33,6 +33,15 @@ cmake --build E:\MinecraftGame2\build --config Debug
 
 依赖：vcpkg manifest（glm / glfw3 / vulkan-headers + volk / shaderc），Vulkan 免 SDK 动态加载。
 
+## AI 协助开发说明
+
+本项目为**作者主导设计、AI 辅助开发**的学习型项目：
+
+- 架构决策（四轨消息流、业务权威裁决、区块化存储、打包/解包复合体等）由作者确定，AI 提供方案比对与权衡分析
+- AI 承担：代码生成辅助、逐行教学讲解、bug 排查建议、文档整理
+- **所有代码均经作者通读、理解、审查后提交**（非原样照搬）；多线程与关键路径逻辑经作者人工 review
+- 公开目的：学习记录 + 能力展示
+
 ## 仓库状态
 
-私有仓库（GitHub：HerryBob/sandbox-engine），原型阶段，个人开发。公开只读前暂不接受 PR。
+公开只读仓库（GitHub：HerryBob/sandbox-engine），原型阶段，个人开发。暂不接受 PR，欢迎 Bug Issue。
