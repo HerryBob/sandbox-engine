@@ -47,7 +47,9 @@ cmake --build E:\MinecraftGame2\build --config Debug
 ## 免责声明
 
 本项目是个人学习项目，**与 Mojang Studios / Minecraft 无任何关联，非官方项目**；"Minecraft" 仅作技术对标引用。本项目不使用、不包含任何 Minecraft 游戏资源（纹理/音效/模型）。
+作者: 只是作为学习项目, 价值并不大, 如果有人想要fork并再开发, 十分欢迎, 但也需告知我一下。
 
 ## 仓库状态
 
 公开只读仓库（GitHub：HerryBob/sandbox-engine），原型阶段，个人开发。暂不接受 PR，欢迎 Bug Issue。
+
