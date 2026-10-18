@@ -1,59 +1,38 @@
 # 沙盒引擎（Sandbox Engine）
 
-C++ 自研方块沙盒引擎（对标 Minecraft），核心创新：
+C++ 自研方块沙盒引擎（对标 Minecraft）：**四线程消息流 + Vulkan 渲染 + 动态复合体**（任意方块打包为单个刚体，对标机械动力航空学）。
 
-- **服务端权威逻辑 + 客户端渲染分离**：服务端只管逻辑与物理，渲染/输入采集全部放客户端
-- **三轨时间机制**：业务线程 20TPS + 物理线程 25TPS + 输入线程墙钟原生（永不缩放），时间系数 = global × 域乘数，可实时慢放/加速
-- **动态复合体**：玩家把任意方块拼成的结构打包成单个刚体，交物理线程模拟（对标机械动力航空学）
+## 当前状态（2026-10-19）
 
-## 当前阶段：原型核心玩法闭环
+- **四轨消息流跑通**：输入墙钟采样 / 物理 25TPS / 业务 25TPS / 渲染只读观众（SPSC 无锁队列，命令零丢失）
+- **区块化存储**：16³ 稀疏 chunk + 脏标记 + 变更事件流（业务 → 渲染增量通道）
+- **Vulkan 全链渲染**：交换链 / MSAA 8x / 深度缓冲 / 背面剔除 / 方块 mesh / 相机 MVP
+- **进行中**：放置/破坏方块交互闭环（准星模式输入 → DDA 射线检测 → 业务裁决 → 变更事件 → mesh 重建）
 
-三轨消息流 + 方块放置/破坏裁决 + 复合体打包飞行 + 碰撞破坏 + 飞船改造 + 伪渲染：
+## 文档导航
 
-- [x] 三轨空转骨架（线程/时间/无锁队列）
-- [x] 三轨真实消息流（命令 / 快照合并 / 回执语义）
-- [x] Block 最小模型（3×3×3 飞船）
-- [x] Contraption 打包/解包（RigidBody 建/拆）
-- [x] 刚体积分（半隐式欧拉，飞船飞行）
-- [x] 推力操控（输入→物理闭环，InputController 可禁玩家）
-- [x] 方块放置/破坏裁决（业务裁决 → 物理执行，重复放置/破坏不存在被拒）
-- [x] 碰撞检测（空间哈希粗相 + 严格区间重叠窄相）→ 碰撞事件回传业务破坏
-- [x] 碰撞事件 = 接触语义（Started 只在接触开始时发，同一障碍物只报 1 次，断言 ==1）
-- [x] 位置带时间戳 = 插值基座（双槽快照 + sampleShipPos lerp；修复物理位置快照洪水）
-- [x] 区块化存储（16³ chunk 稀疏映射 + 区域查询 + 修改跟踪，空 chunk 不占内存）
-- [x] 变更事件流（业务→渲染增量通道，tick 聚合脏 chunk；**数据层 ② 收官**）
-- [x] 全局代码审查（修复打包幽灵方块 / 解包全清丢块 / tps 墙钟口径 3 个 bug）
-- [x] 渲染线程骨架（**第 4 轨**：ThreadLoop 60Hz 消费变更事件 + 插值位置 + 伪渲染帧）
-- [x] 渲染依赖接入（vcpkg manifest：glm / glfw3 / vulkan-headers / volk / shaderc，Vulkan 免 SDK）
-- [x] 飞船改造（刚体内方块增删）+ 增量最小碰撞箱（半宽/偏移实时贴合）
-- [x] 伪渲染（Renderer 线程内 console 侧视帧，第 4 轨只读）
-- [x] 定向清理（DemoDriver 拆演示 / 日志分级 / release 基线 bench/baseline.txt，26/26 软断言）
-- [x] **Vulkan 方块渲染**（窗口→实例→设备→交换链→RenderPass→管线→24 顶点 36 索引 mesh→drawIndexed 上屏，36/36）
-- [x] **相机 + MVP**（descriptor set + UBO；glm 透视/视图；WASD 平移 + 鼠标左键拖动旋转 + R 重置，37/37）
-- [ ] 极简 TE / chunk mesh（批量绘制 + 相邻面剔除）
+| 文档 | 内容 |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 当前架构决策（四轨 / 决策 D1-D15 / 踩坑记录 / 验证基线）——**权威文档** |
+| [docs/vulkan-learning-roadmap.md](docs/vulkan-learning-roadmap.md) | Vulkan 学习路线（三层策略 + 里程碑进度 + 坑记录） |
+| [docs/references/minetest-chunk-mesh-analysis.md](docs/references/minetest-chunk-mesh-analysis.md) | Minetest 区块存储与客户端 Mesh/LOD 参考分析 |
+| [docs/legacy/沙盒引擎架构设计-历史蓝图.md](docs/legacy/沙盒引擎架构设计-历史蓝图.md) | 早期三轨蓝图（已过时，保留远期设计参考） |
 
 ## 构建
 
-VS2026（自带 CMake + Ninja）打开文件夹，或命令行：
+1. **VS2026** → 文件 → 打开 → 文件夹 → 选中本目录（含 `CMakeLists.txt` 这层）
+2. 顶部配置下拉选 `x64-Debug`（或 Release），生成并运行 `minecraft_engine`
+
+命令行：
 
 ```
-call "E:\VS2026\VC\Auxiliary\Build\vcvars64.bat"
-cmake --preset debug
-cmake --build build/debug
-build\debug\sandbox_engine.exe
+cmake --build E:\MinecraftGame2\build --config Debug
+# exe: E:\MinecraftGame2\build\Debug\minecraft_engine.exe
+# 注意：运行工作目录需切到 exe 所在目录，以解析 shaders/ textures/ 相对路径
 ```
 
-Release 构建（性能基线，Debug /RTC1 会扭曲性能 5-10 倍）：
+依赖：vcpkg manifest（glm / glfw3 / vulkan-headers + volk / shaderc），Vulkan 免 SDK 动态加载。
 
-```
-cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build/release
-build\release\sandbox_engine.exe > bench\baseline.txt
-```
+## 仓库状态
 
-> 详细架构设计见 `Allmd/架构与设计/沙盒引擎架构设计文档.md`
-> 项目说明见 `Allmd/项目说明/README.md`
-
-## 状态
-
-原型阶段，私有仓库，仅个人开发。公开只读前暂不接受 PR。
+私有仓库（GitHub：HerryBob/sandbox-engine），原型阶段，个人开发。公开只读前暂不接受 PR。
