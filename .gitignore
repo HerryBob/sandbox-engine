@@ -15,6 +15,9 @@ cmake-build-*/
 # 本地参考源码（第三方项目完整源码，仅本地学习参考，不提交）
 Allmd/
 
+# MC 版权纹理（仅本地使用，不提交公开）
+textures/grass_side.png
+
 # 编译产物
 *.obj
 *.o

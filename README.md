@@ -21,17 +21,19 @@ C++ 自研方块沙盒引擎（对标 Minecraft）：**四线程消息流 + Vulk
 ## 构建
 
 1. **VS2026** → 文件 → 打开 → 文件夹 → 选中本目录（含 `CMakeLists.txt` 这层）
-2. 顶部配置下拉选 `x64-Debug`（或 Release），生成并运行 `minecraft_engine`
+2. 顶部配置下拉选 `x64-Debug`（或 Release），生成并运行 `sandbox_engine`
 
 命令行：
 
 ```
 cmake --build E:\MinecraftGame2\build --config Debug
-# exe: E:\MinecraftGame2\build\Debug\minecraft_engine.exe
+# exe: E:\MinecraftGame2\build\Debug\sandbox_engine.exe
 # 注意：运行工作目录需切到 exe 所在目录，以解析 shaders/ textures/ 相对路径
 ```
 
-依赖：vcpkg manifest（glm / glfw3 / vulkan-headers + volk / shaderc），Vulkan 免 SDK 动态加载。
+依赖（不入库）：LunarG Vulkan SDK（通过 `VULKAN_SDK` 环境变量定位）+ 仓库内置 third_party（GLM / GLFW / stb_image，许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）。
+
+> 公开版仓库**不含纹理资源**（原 MC 版权纹理已移除，本地构建不受影响）；缺纹理时编译不受影响，运行时纹理相关功能需自备贴图。
 
 ## AI 协助开发说明
 
@@ -41,6 +43,10 @@ cmake --build E:\MinecraftGame2\build --config Debug
 - AI 承担：代码生成辅助、逐行教学讲解、bug 排查建议、文档整理
 - **所有代码均经作者通读、理解、审查后提交**（非原样照搬）；多线程与关键路径逻辑经作者人工 review
 - 公开目的：学习记录 + 能力展示
+
+## 免责声明
+
+本项目是个人学习项目，**与 Mojang Studios / Minecraft 无任何关联，非官方项目**；"Minecraft" 仅作技术对标引用。本项目不使用、不包含任何 Minecraft 游戏资源（纹理/音效/模型）。
 
 ## 仓库状态
 

@@ -2,8 +2,8 @@
 rem One-click build + run (ASCII only, cmd code page independent)
 setlocal
 set "CMAKE=E:\VS2026\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-set "BUILD=E:\MinecraftGame2\build"
-set "EXE=E:\MinecraftGame2\build\Debug\minecraft_engine.exe"
+set "BUILD=%~dp0build"
+set "EXE=%BUILD%\Debug\sandbox_engine.exe"
 
 echo [1/2] Building...
 "%CMAKE%" --build "%BUILD%" --config Debug
