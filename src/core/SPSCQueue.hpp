@@ -11,10 +11,10 @@ namespace engine::core {
 template <typename T>
 class SPSCQueue {
 public:
-    explicit SPSCQueue(std::size_t capacity = 1024)
+    explicit SPSCQueue(std::size_t capacity = 1024) 
         : capacity_(capacity), buffer_(capacity + 1) {}
 
-    // 生产者：写入尾部。队列满时返回 false（调用方决定丢或重试）。
+    // 生产者：写入尾部。队列满时返回 false（调用方决定丢或重试）。ddddd
     bool push(const T& item) noexcept {
         const std::size_t tail = tail_.load(std::memory_order_relaxed);
         const std::size_t next = (tail + 1) % (capacity_ + 1);
@@ -45,7 +45,7 @@ public:
 private:
     std::size_t capacity_;
     std::vector<T> buffer_;
-    std::atomic<std::size_t> head_{0}; // 读位置（消费者）
+    std::atomic<std::size_t> head_{0}; // 读位置（消费者） 
     std::atomic<std::size_t> tail_{0}; // 写位置（生产者）
 };
 

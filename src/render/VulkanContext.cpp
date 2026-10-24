@@ -33,8 +33,7 @@ bool VulkanContext::init(int width, int height, const char* title) {
         return false;
     }
     glfwSetWindowUserPointer(window_, this);
-    glfwSetMouseButtonCallback(window_, mouseButtonCb);
-    glfwSetCursorPosCallback(window_, cursorPosCb);
+    // 键盘/鼠标回调由 input::InputSampler::attach 注册（真实输入归输入线程）。
     glfwSetFramebufferSizeCallback(window_, framebufferResizeCallback); // 窗口尺寸变化 → 置位重建标志
     {
         std::ostringstream os;
@@ -43,10 +42,7 @@ bool VulkanContext::init(int width, int height, const char* title) {
     }
     //注册准星
     glfwSetInputMode(window_, GLFW_CURSOR, GLFW_CURSOR_DISABLED);//禁用鼠标光标
-    int cw = 0, ch = 0;//窗口宽高
-    glfwGetWindowSize(window_, &cw, &ch);
-    inputLastX_.store(cw/2.0, std::memory_order_relaxed);
-    inputLastY_.store(ch/2.0, std::memory_order_relaxed);
+    // 光标基准由 input::InputSampler::attach 初始化（真实输入归输入线程）。
 
     if (!createInstance()) return false;
     if (!createSurface()) return false;
@@ -63,7 +59,6 @@ bool VulkanContext::init(int width, int height, const char* title) {
     if (!createRenderPass()) return false;
     if (!createDepthResources()) return false;
     if (!createFramebuffers()) return false;      // ← framebuffers 不依赖 descLayout_，可留前
-    if (!createMeshBuffers()) return false;
     if (!createCommandObjects()) return false;
     if (!createTextureImage()) return false;
     if (!createTextureImageView()) return false;
@@ -618,44 +613,7 @@ bool VulkanContext::createFramebuffers() {
     return true;
 }
 
-// 创建顶点/索引缓冲（host 可见，CPU 直接上传）
-bool VulkanContext::createMeshBuffers() {
-    auto vertsA = mesh::buildCubeVertices({100.0f, 0.0f, 0.0f});
-    auto vertsB = mesh::buildCubeVertices({100.0f, 0.0f, -2.5f});
-    std::vector<Vertex> vertices = std::move(vertsA);
-    vertices.insert(vertices.end(), vertsB.begin(), vertsB.end());
-
-    auto idxA = mesh::buildCubeIndices();
-    auto idxB = mesh::buildCubeIndices();
-    for (auto& i : idxB) i += 24; // 第二方块顶点偏移 24（前 24 个顶点属于方块 A）
-    std::vector<uint32_t> indices = std::move(idxA);
-    indices.insert(indices.end(), idxB.begin(), idxB.end());
-
-    vertexCount_ = static_cast<uint32_t>(vertices.size());
-    indexCount_  = static_cast<uint32_t>(indices.size());
-
-
-    if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * vertexCount_,
-    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    vertexBuffer_, vertexBufferMemory_)) return false;
-    util::mapAndCopy(device_, vertexBufferMemory_, sizeof(Vertex) * vertexCount_, vertices.data());
-
-    if (!util::createBuffer(device_, physicalDevice_, sizeof(uint32_t) * indexCount_,
-    VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-    indexBuffer_, indexBufferMemory_)) return false;
-    util::mapAndCopy(device_, indexBufferMemory_, sizeof(uint32_t) * indexCount_, indices.data());
-
-    {
-        std::ostringstream os;
-        os << "[Vulkan] 方块 mesh 就绪：顶点=" << vertexCount_ << " 索引=" << indexCount_
-           << "（2 方块 × 24 顶点 36 索引，遮挡验证：A=(0,0,0) B=(0,0,-2.5)）";
-        LOG_INFO(os.str());
-    }
-    return true;
-}
-//建立通用索引缓冲
+// 建立通用索引缓冲
 bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Block>& blocks) {
     std::vector<Vertex> vertices;    // 合并所有方块的顶点
     std::vector<uint32_t> indices;   // 合并所有方块的索引
@@ -675,6 +633,7 @@ bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Bloc
         indices.insert(indices.end(), is.begin(), is.end());                // 追加
         vertexOffset += 24; 
     }
+    if (vertices.empty() || indices.empty()) return true;
     if (vertexBuffer_) {
         vkDestroyBuffer(device_, vertexBuffer_, nullptr);
         vertexBuffer_ = VK_NULL_HANDLE;
@@ -708,6 +667,11 @@ bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Bloc
     util::mapAndCopy(device_, indexBufferMemory_, sizeof(uint32_t) * indexCount_, indices.data());
 
     return true;
+}
+
+void VulkanContext::requestMeshRebuild(std::vector<engine::shared::Block> blocks) {
+    pendingRebuildBlocks_ = std::move(blocks);
+    meshRebuildRequested_.store(true, std::memory_order_relaxed);
 }
 
 // 创建命令池 + 每帧命令缓冲（2 条轮转）
@@ -927,26 +891,22 @@ bool VulkanContext::createSyncObjects() {
     return true;
 }
 
-// 按 WASD/鼠标输入更新相机（每帧调用）
-void VulkanContext::updateCamera(double dt) {
-        camYaw_   += static_cast<float>(inputYawDelta_.exchange(0.0, std::memory_order_relaxed));
-        camPitch_ += static_cast<float>(inputPitchDelta_.exchange(0.0, std::memory_order_relaxed));
-        camPitch_ = std::clamp(camPitch_, -1.45f, 1.45f); // ±83°，防翻跟头
-
-    const float speed = 2.5f * static_cast<float>(dt);
-    const glm::vec3 forward(std::sin(camYaw_), 0.0f, -std::cos(camYaw_));
-    const glm::vec3 right(std::cos(camYaw_), 0.0f, std::sin(camYaw_)); // 右手系右向量
-    if (glfwGetKey(window_, GLFW_KEY_W) == GLFW_PRESS) camPos_ += forward * speed;
-    if (glfwGetKey(window_, GLFW_KEY_S) == GLFW_PRESS) camPos_ -= forward * speed;
-    if (glfwGetKey(window_, GLFW_KEY_D) == GLFW_PRESS) camPos_ += right * speed;
-    if (glfwGetKey(window_, GLFW_KEY_A) == GLFW_PRESS) camPos_ -= right * speed;
-    if (glfwGetKey(window_, GLFW_KEY_SPACE) == GLFW_PRESS) camPos_.y += speed;
-    if (glfwGetKey(window_, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) camPos_.y -= speed;
-    if (glfwGetKey(window_, GLFW_KEY_R) == GLFW_PRESS) { // 重置视角
-        camPos_ = {0.0f, 0.0f, 3.5f};
-        camYaw_ = 0.0f;
-        camPitch_ = 0.0f;
+// 每帧从 CameraState 读相机状态 → 计算 MVP → 写 UBO。
+// 相机状态由输入线程（InputSampler）维护；本函数只读，不再处理输入。
+void VulkanContext::updateViewProj(double /*dt*/) {
+    double px = 0.0, py = 0.0, pz = 3.5, pyaw = 0.0, ppitch = 0.0;
+    if (cameraState_) {
+        px = cameraState_->camX.load(std::memory_order_relaxed);
+        py = cameraState_->camY.load(std::memory_order_relaxed);
+        pz = cameraState_->camZ.load(std::memory_order_relaxed);
+        pyaw = cameraState_->yaw.load(std::memory_order_relaxed);
+        ppitch = cameraState_->pitch.load(std::memory_order_relaxed);
     }
+    const float yaw   = static_cast<float>(pyaw);
+    const float pitch = static_cast<float>(ppitch);
+    const glm::vec3 camPos(static_cast<float>(px),
+                           static_cast<float>(py),
+                           static_cast<float>(pz));
 
     const float aspect = static_cast<float>(swapchainExtent_.width) /
                          static_cast<float>(swapchainExtent_.height);
@@ -954,10 +914,10 @@ void VulkanContext::updateCamera(double dt) {
     proj[1][1] *= -1.0f; // Vulkan 的 NDC Y 轴向下；glm 按 OpenGL 设计，需翻转
 
     const glm::vec3 lookDir(
-        std::sin(camYaw_) * std::cos(camPitch_),
-        std::sin(camPitch_),
-        -std::cos(camYaw_) * std::cos(camPitch_)); // -Z 前方，方块默认在视野内
-    const glm::mat4 view = glm::lookAt(camPos_, camPos_ + lookDir, glm::vec3(0.0f, 1.0f, 0.0f));
+        std::sin(yaw) * std::cos(pitch),
+        std::sin(pitch),
+        -std::cos(yaw) * std::cos(pitch)); // -Z 前方，方块默认在视野内
+    const glm::mat4 view = glm::lookAt(camPos, camPos + lookDir, glm::vec3(0.0f, 1.0f, 0.0f));
 
     UniformBufferObject ubo{};
     ubo.model = glm::mat4(1.0f);  // 方块在原点：单位矩阵
@@ -972,7 +932,7 @@ void VulkanContext::updateCamera(double dt) {
 // 每帧绘制：acquire → 录制 → submit → present
 bool VulkanContext::drawFrame() {
     if (!renderObjectsReady_) return false;
-    updateCamera(0.016); // 渲染线程 ~60Hz，固定步长（FIFO vsync 下接近真实 dt）
+    updateViewProj(0.006); // 帧间隔 6.06ms（165Hz 目标；FIFO vsync 拉齐到显示器刷新）
 
     const uint32_t frame =
         static_cast<uint32_t>(framesPresented_) % kMaxFramesInFlight;
@@ -980,6 +940,12 @@ bool VulkanContext::drawFrame() {
     // 注意：vkResetFences 必须在 acquire 成功之后！
     // acquire 失败(OUT_OF_DATE)时 fence 保持 signaled → 下一帧 wait 直接通过
     // 若先 reset，失败帧没有 submit 触发 fence → 下一帧 wait 无限阻塞 → 渲染线程卡死
+
+    if (meshRebuildRequested_.exchange(false, std::memory_order_relaxed)) {
+        vkDeviceWaitIdle(device_);
+        rebuildMeshFromBlocks(pendingRebuildBlocks_);
+        pendingRebuildBlocks_.clear();
+    }
 
     uint32_t imageIndex = 0;
     VkResult r = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
@@ -995,6 +961,11 @@ bool VulkanContext::drawFrame() {
         return false;
     }
     vkResetFences(device_, 1, &inFlightFences_[frame]); // acquire 成功后才重置
+
+    if (!vertexBuffer_ || indexCount_ == 0) {
+        // 网格未就绪（业务世界为空或首帧尚未重建）：跳过本帧，避免绑定空句柄。
+        return true;
+    }
 
     vkResetCommandBuffer(cmdBuffers_[frame], 0);
     VkCommandBufferBeginInfo beginInfo{};
@@ -1029,7 +1000,7 @@ bool VulkanContext::drawFrame() {
     VkDeviceSize vbOffset = 0;
     vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &vertexBuffer_, &vbOffset);
     vkCmdBindIndexBuffer(cmdBuffers_[frame], indexBuffer_, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(cmdBuffers_[frame], indexCount_, 1, 0, 0, 0); // 双方块：72 索引
+    vkCmdDrawIndexed(cmdBuffers_[frame], indexCount_, 1, 0, 0, 0); // 绘制当前 mesh（每方块 36 索引）
     vkCmdEndRenderPass(cmdBuffers_[frame]);
     if (vkEndCommandBuffer(cmdBuffers_[frame]) != VK_SUCCESS) {
         LOG_ERROR("[Vulkan] vkEndCommandBuffer 失败");
@@ -1088,32 +1059,8 @@ void VulkanContext::framebufferResizeCallback(GLFWwindow* w, int, int) {
     }
 }
 
-// GLFW 鼠标移动回调（更新偏航/俯仰）
-void VulkanContext::cursorPosCb(GLFWwindow* w, double x, double y) {
-    auto* self = static_cast<VulkanContext*>(glfwGetWindowUserPointer(w));
-    constexpr double kSens = 0.005; // 拖动灵敏度（弧度/像素）
-    const double dx = x - self->inputLastX_.load(std::memory_order_relaxed);
-    const double dy = y - self->inputLastY_.load(std::memory_order_relaxed);
-    self->inputYawDelta_.fetch_add(dx * kSens, std::memory_order_relaxed);
-    self->inputPitchDelta_.fetch_add(-dy * kSens, std::memory_order_relaxed);
-    self->inputLastX_.store(x, std::memory_order_relaxed);
-    self->inputLastY_.store(y, std::memory_order_relaxed);
-}
-//鼠标按键回调
-void VulkanContext::mouseButtonCb(GLFWwindow* w, int button, int action, int) {
-    auto* self = static_cast<VulkanContext*>(glfwGetWindowUserPointer(w));
-    if (!self->playerInput_) return;
-    if (action != GLFW_PRESS) return;
-    if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        self->playerInput_->clickButton.store(0, std::memory_order_relaxed);
-        self->playerInput_->clickSeq.fetch_add(1, std::memory_order_relaxed);
-
-    }
-    else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        self->playerInput_->clickButton.store(1, std::memory_order_relaxed);
-        self->playerInput_->clickSeq.fetch_add(1, std::memory_order_relaxed);
-    }
-}
+// GLFW 鼠标/键盘回调已移交 input::InputSampler（真实输入归输入线程），
+// 本类只保留窗口尺寸回调（framebufferResizeCallback，见 init 注册处）。
 
 
 // 释放描述符池/布局/UBO 缓冲

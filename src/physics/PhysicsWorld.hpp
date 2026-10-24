@@ -31,16 +31,15 @@ struct RigidBody {
 
 // 物理世界（25TPS，dt=0.04s）。
 // 用累积待处理模拟时间(accumulator)驱动，不硬绑定业务 tick 次数。
-// 原型阶段：积分 + 消费输入队列 + 处理业务指令
+// 原型阶段：积分 + 处理业务指令
 //（MoveBlock / SyncBlockSet 全量同步 / Place/RemoveBlock 放置破坏 / Contraption 打包解包）。
 class PhysicsWorld {
 public:
     explicit PhysicsWorld(engine::core::TimeManager& tm);
 
     // 每墙钟帧调用一次：accumulator += wall_dt * time_scale，
-    // 然后 while(accumulator>=0.04) 执行物理 tick（消费输入 + 处理业务指令）。
+    // 然后 while(accumulator>=0.04) 执行物理 tick（处理业务指令）。
     void advance(double scale, double wallDt,
-                 engine::core::SPSCQueue<engine::shared::InputEvent>& fromInput,
                  engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness);
 
     // 物理 → 业务：先发打包回执（逐条，不合并），再发位置快照（合并语义）。
@@ -48,8 +47,6 @@ public:
 
     double     simTime() const;
     long long  tickCount() const;
-    long long  inputConsumed() const;
-    long long  inputValid() const;
     long long  processedCommands() const;  // 累计处理的业务指令数
     int        blockX() const;             // 演示用"方块"的最新坐标（指令驱动）
     int        blockY() const;
@@ -70,9 +67,6 @@ private:
     // 同时更新原子投影供 main 线程运行中采样。
     void recomputeAABB(RigidBody& b);
 
-    // 推力加速度（格/s²，沿 x 正方向；原型只推 x 轴）。
-    static constexpr double kThrust_ = 1.0;
-
     // tick 银行上限：单帧最多补跑 5 个物理 tick（=200ms 模拟时间）。
     // 超过说明本帧严重落后（卡顿/掉帧），剩余累积时间直接丢弃，
     // 防止"越落后越要补、越补越落后"的螺旋死亡（spiral of death）。
@@ -82,8 +76,6 @@ private:
     double                     accumulator_{0.0};
     std::atomic<double>        simTime_{0.0};
     std::atomic<long long>     ticks_{0};
-    std::atomic<long long>     inputConsumed_{0};
-    std::atomic<long long>     inputValid_{0};
     std::atomic<long long>     processedCommands_{0};
     std::atomic<int>           blockX_{0};
     std::atomic<int>           blockY_{0};
@@ -102,7 +94,6 @@ private:
     std::vector<engine::shared::PhysicsResult> pendingReceipts_; // 待发回执（纯物理线程）
     std::vector<engine::shared::PhysicsResult> pendingCollisions_; // 待发碰撞事件（纯物理线程）
     std::atomic<long long> collisions_{0};  // 累计碰撞次数（main 读）
-    bool                       thrustActive_{false}; // 本 tick 推力状态（纯物理线程私有）
     double lastPosSentSimT_ = -1.0; // 纯物理线程：上次已发位置快照的模拟时刻。
                                     // 物理循环每墙钟帧调 syncToBusiness，但模拟 tick 只
                                     // 25Hz——同一模拟时刻的位置被重复发 ~15 次（旧行为）。

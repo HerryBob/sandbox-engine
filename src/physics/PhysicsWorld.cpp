@@ -13,7 +13,6 @@ PhysicsWorld::PhysicsWorld(engine::core::TimeManager& tm)
       lastLog_(std::chrono::steady_clock::now()) {}
 
 void PhysicsWorld::advance(double scale, double wallDt,
-                           engine::core::SPSCQueue<engine::shared::InputEvent>& fromInput,
                            engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness) {
     // 累积待处理模拟时间（文档 2.2）：残差持续保留，自动处理非整数配比。
     accumulator_ += wallDt * scale;
@@ -22,18 +21,6 @@ void PhysicsWorld::advance(double scale, double wallDt,
     // 跑满仍超限 → 丢弃剩余累积时间（本帧已尽力，落后不欠账）。
     int steps = 0;
     while (accumulator_ >= 0.04 && steps < kMaxStepsPerFrame_) { // 25TPS, dt=0.04
-        // 读输入队列：施加推力（2.3.1 真实施力，不再只计数）。
-        // 每个 tick 重置推力状态：只有本 tick 消费到"按住推力键"的 valid 事件才施力。
-        thrustActive_ = false;
-        engine::shared::InputEvent ev;
-        while (fromInput.pop(ev)) {
-            if (ev.valid) {
-                inputValid_.fetch_add(1, std::memory_order_relaxed);
-                if (ev.keyState == 1) thrustActive_ = true; // 按住 → 本 tick 开推力
-            }
-            inputConsumed_.fetch_add(1, std::memory_order_relaxed);
-        }
-
         // 处理业务指令：放置/破坏/全量同步 → 静态碰撞体集合；
         // Pack/UnpackContraption → 刚体建/拆 + 碰撞体形态转移。
         // 物理消费速率 = 25×scale TPS；业务生产速率固定 20/s 墙钟——
@@ -151,15 +138,13 @@ void PhysicsWorld::advance(double scale, double wallDt,
             processedCommands_.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // ---- 半隐式欧拉积分（2.3.1 推力）：v += a×dt，x += v×dt ----
-        // 推力：按住推力键（输入有效）→ 沿 x 加速；松手/禁用 → 无加速度，惯性滑行。
-        // dt=0.04 固定步长，加速度恒定（原型无重力/阻尼）。
+        // ---- 刚体位置积分 ----
+        // 推力模拟已删除（飞船推力输入移除）；刚体按当前速度匀速运动
+        //（v 无变化，只有 x += v×dt）。dt=0.04 固定步长（原型无重力/阻尼）。
         for (auto& b : bodies_) {
-            const double ax = thrustActive_ ? kThrust_ : 0.0;
-            b.vx += ax * 0.04;   // 先更新速度（半隐式：用新速度算位置）
-            b.x  += b.vx * 0.04; // 再更新位置
-            b.y  += b.vy * 0.04;
-            b.z  += b.vz * 0.04;
+            b.x += b.vx * 0.04;
+            b.y += b.vy * 0.04;
+            b.z += b.vz * 0.04;
         }
 
         // ---- 单 AABB 碰撞检测与响应（架构 4.3，原型只处理 x 方向运动）----
@@ -313,12 +298,6 @@ double PhysicsWorld::simTime() const {
 long long PhysicsWorld::tickCount() const {
     return ticks_.load(std::memory_order_relaxed);
 }
-long long PhysicsWorld::inputConsumed() const {
-    return inputConsumed_.load(std::memory_order_relaxed);
-}
-long long PhysicsWorld::inputValid() const {
-    return inputValid_.load(std::memory_order_relaxed);
-}
 long long PhysicsWorld::processedCommands() const {
     return processedCommands_.load(std::memory_order_relaxed);
 }
@@ -387,13 +366,10 @@ void PhysicsWorld::maybeLog() {
         os << "[物理] sim=" << sim << "s tick=" << t
            << " 平均tps=" << tps
            << " 残差acc=" << accumulator_
-           << " 消费输入=" << inputConsumed()
-           << " 有效输入=" << inputValid()
            << " 处理指令=" << processedCommands()
            << " 刚体=" << bodyCount()
            << " 碰撞体=" << colliders_.size()
            << " 碰撞=" << collisions()
-           << " 推力=" << (thrustActive_ ? "开" : "关")
            << " 方块=(" << blockX() << "," << blockY() << "," << blockZ() << ")"
            << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Physics);
         engine::core::log(engine::core::LogLevel::Info, os.str());

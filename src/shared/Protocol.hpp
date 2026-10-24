@@ -6,13 +6,6 @@
 
 namespace engine::shared {
 
-// 输入事件：输入线程墙钟采样，带时间戳，不受 time_scale 影响。
-struct InputEvent {
-    double wallTimestamp; // 墙钟秒（采集时刻）
-    int    keyState;      // 原型占位：0=无操作，1=按住推力键
-    bool   valid;         // 服务端输入使能：false=玩家当前不可操控，事件不施力
-};
-
 // 业务 → 物理：业务 Tick 边界下发的指令。
 // 原型指令：MoveBlock（移动演示）+ SyncBlockSet（全量同步方块→碰撞体）
 //          + PlaceBlock/RemoveBlock（放置/破坏，业务裁决通过后下发）

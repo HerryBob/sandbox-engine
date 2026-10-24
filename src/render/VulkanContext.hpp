@@ -20,7 +20,7 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 //用户输入
-#include "shared/PlayerInput.hpp"
+#include "shared/CameraState.hpp"
 namespace engine::render {
 
 // 体素顶点：位置 + 颜色（纹理阶段再扩展 UV）。
@@ -42,8 +42,7 @@ struct UniformBufferObject {
 
 class VulkanContext {
 public:
-    static constexpr const char* kCameraHelp = "相机控制：WASD=平移 空格/左Shift=上下 鼠标左键拖动=旋转 R=重置视角\n";
-    void attachPlayerInput(engine::shared::PlayerInput* input) { playerInput_ = input; }
+    void attachCameraState(engine::shared::CameraState* camera) { cameraState_ = camera; }
 public:
     VulkanContext() = default;
     ~VulkanContext();
@@ -88,7 +87,7 @@ public:
     uint32_t      vertexCount() const { return vertexCount_; }
     uint32_t      indexCount() const { return indexCount_; }
     bool rebuildMeshFromBlocks(const std::vector<engine::shared::Block>& blocks); // 重建顶点/索引缓冲：从主世界读取方块数据
-
+    void requestMeshRebuild(std::vector<engine::shared::Block> blocks); //请求 mesh 重建
 
 private:
     bool createInstance();
@@ -104,7 +103,6 @@ private:
     bool createDepthResources();
     bool createPipeline();
     bool createFramebuffers();
-    bool createMeshBuffers();
     bool createCommandObjects();
     bool createSyncObjects();
     void destroyRenderObjects();
@@ -113,18 +111,18 @@ private:
     bool createTextureImage();      // staging 搬运：CPU 写临时缓冲 → GPU 拷进显存
     bool createTextureImageView();  // 视图：图像 → 可采样视图
     bool createTextureSampler();    // 采样器：告诉 GPU 怎么取样（过滤/寻址）
-    void updateCamera(double dt); // 读输入更新相机状态 + 写 UBO（drawFrame 开头调用）
+    void updateViewProj(double dt); // 从 CameraState 读相机状态 → 算 MVP 写 UBO（drawFrame 开头调用，只读不处理输入）
     void destroyUniformObjects();
     
 
     // GLFW 回调（static 成员：可作 C 函数指针传参，同时能访问私有成员）。
-    static void mouseButtonCb(GLFWwindow* w, int button, int action, int mods);
-    static void cursorPosCb(GLFWwindow* w, double x, double y);
+    // 键盘/鼠标回调已移交 input::InputSampler（真实输入归输入线程），
+    // 本类只保留窗口尺寸回调（swapchain 重建触发）。
     static void framebufferResizeCallback(GLFWwindow* w, int width, int height);
 
     
     //用户输入
-    engine::shared::PlayerInput* playerInput_ = nullptr; // 玩家输入共享槽（外部挂载，非拥有）
+    engine::shared::CameraState* cameraState_ = nullptr; // 相机状态共享槽（外部挂载，非拥有；渲染只读算 MVP）
     GLFWwindow* window_ = nullptr;
     bool        glfwInitialized_ = false;
     VkInstance  instance_ = VK_NULL_HANDLE;
@@ -174,17 +172,12 @@ private:
     std::uint64_t        framesPresented_ = 0;
 
     // ---- 相机（MVP uniform）----
-    glm::vec3  camPos_{0.0f, 0.0f, 3.5f};
-    float      camYaw_ = 0.0f;    // 左右旋转（弧度）——仅渲染线程写
-    float      camPitch_ = 0.0f;  // 上下旋转（弧度，clamp ±85°）——仅渲染线程写
+    // 相机状态由输入线程（InputSampler）维护并写 PlayerInput；
+    // 本类不再持有 camPos/yaw/pitch，updateViewProj 从 CameraState 只读。
 
-    // ---- 输入槽
+    std::vector<engine::shared::Block> pendingRebuildBlocks_;  // 待重建快照
+    std::atomic<bool> meshRebuildRequested_{ false };            // 重建请求标志
 
-    std::atomic<bool>   inputDragging_{false}; // 左键是否按下（回调写）
-    std::atomic<double> inputLastX_{0.0};      // 上次光标位置（回调写）
-    std::atomic<double> inputLastY_{0.0};
-    std::atomic<double> inputYawDelta_{0.0};   // 待消费旋转增量（回调累加 / 渲染 exchange 取走）
-    std::atomic<double> inputPitchDelta_{0.0};
     VkBuffer             uboBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory       uboMemory_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descLayout_ = VK_NULL_HANDLE;

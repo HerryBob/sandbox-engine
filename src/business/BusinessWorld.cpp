@@ -10,30 +10,23 @@ BusinessWorld::BusinessWorld(engine::core::TimeManager& tm)
     : tm_(tm),
       startWall_(std::chrono::steady_clock::now()),
       lastLog_(std::chrono::steady_clock::now()) {
-    // 原型：初始世界放一艘 3×3×3 木头飞船 + 一块飞行路径上的石头障碍物。
+    // 初始世界：16×16 石头平台（x,z ∈ [-8,7]，y=0，占 [0,1] 顶面 y=1，玩家站上面）。
     // 数据层 ② 区块化：方块写入 16³ chunk（chunks_ 稀疏映射，空 chunk 不占内存）。
-    // 构造时写入初始内容；此后仅业务线程读写（放置/破坏/打包取数），
-    // main 只在三轨停止后读取 blockCount/findBlock，无并发写。
     auto setBlock = [&](int x, int y, int z, engine::shared::BlockType t) {
         const engine::shared::BlockPos p{x, y, z};
         auto& c = chunks_[engine::shared::chunkOf(p)]; // operator[] 缺省构造新 chunk
         c.atWorld(p) = static_cast<std::uint8_t>(t);
-        c.markDirty(0x01); // 修改跟踪：初始装载标记脏（变更事件流种子，见文档 7.6）
+        c.markDirty(0x01); // 修改跟踪：初始装载标记脏（变更事件流种子）
     };
-    for (int x = -1; x <= 1; ++x)
-        for (int y = -1; y <= 1; ++y)
-            for (int z = -1; z <= 1; ++z)
-                setBlock(x, y, z, engine::shared::BlockType::Wood);
-    // 障碍物放在飞船起飞路径 (50,0,0)：飞船撞上 → 碰撞事件 → 业务裁决破坏它。
-    // 打包指令只打包飞船区域方块，障碍物留在静态世界（打包 = 选择子集，架构 2.7）。
-    setBlock(50, 0, 0, engine::shared::BlockType::Stone);
+    for (int x = -8; x <= 7; ++x)
+        for (int z = -8; z <= 7; ++z)
+            setBlock(x, 0, z, engine::shared::BlockType::Stone);
 }
 
 void BusinessWorld::advanceTick(double scale) {
     // 25TPS：每个业务 tick 推进 dt=0.04s，受 time_scale 缩放（与物理线程统一 25/25）。
     // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
-    // 演示事件（放置/打包/改造）由 demo::DemoDriver 在业务 tick 边界驱动，
-    // 本类只负责世界状态推进与裁决。
+    // 本类只负责世界状态推进与裁决；事件由调用方在 tick 边界自行驱动。
     simTime_.store(simTime_.load(std::memory_order_relaxed) + 0.04 * scale,
                    std::memory_order_relaxed);
     ticks_.fetch_add(1, std::memory_order_relaxed);
@@ -43,64 +36,14 @@ void BusinessWorld::advanceTick(double scale) {
 bool BusinessWorld::syncAll() {
     // 请求全量同步：排队一条 SyncBlockSet（初始世界/世界重建时用）。
     // 返回 false 表示已有待发指令（原型：一次只排一条，防止覆盖）。
-    if (wantSync_ || wantPack_ || wantUnpack_ || wantPlace_ || wantRemove_) return false;
+    if (wantSync_ || wantPlace_ || wantRemove_) return false;
     wantSync_ = true;
     return true;
-}
-bool BusinessWorld::packContraption() {
-    // 请求打包：此刻从主世界 chunk 快照"飞船区域"方块（|x|,|y|,|z|<=1，业务裁决
-    // 选择哪些方块进刚体），排队一条 PackContraption 指令。
-    // 障碍物等主世界静态方块留在静态碰撞体集合（架构 2.7 物理形态转移）。
-    // 区块化后直接按坐标查询 27 格（chunk 定位 O(1)），不再线性遍历全表。
-    if (wantSync_ || wantPack_ || wantUnpack_) return false;
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    packBlocks_.clear();
-    for (int x = -1; x <= 1; ++x)
-        for (int y = -1; y <= 1; ++y)
-            for (int z = -1; z <= 1; ++z) {
-                const engine::shared::BlockPos p{x, y, z};
-                const auto it = chunks_.find(engine::shared::chunkOf(p));
-                if (it == chunks_.end()) continue;
-                const std::uint8_t t = it->second.atWorld(p);
-                if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air)) continue;
-                packBlocks_.push_back(
-                    engine::shared::Block{static_cast<engine::shared::BlockType>(t), p, -1});
-            }
-    // 记录刚体内方块坐标：碰撞裁决保护（刚体自身方块不可被撞毁）。
-    packedBlocks_.clear();
-    for (const auto& b : packBlocks_) packedBlocks_.insert(b.pos);
-
-    // 物理形态转移（架构 2.7）的业务侧同步：打包 = 方块从主世界转进刚体，
-    // 业务侧 chunk 同步置空——否则打包期间渲染会看到"幽灵飞船"（主世界残留
-    // + 刚体双份），且解包若不清全表会残留旧位置方块。
-    for (const auto& b : packBlocks_) {
-        const auto cp = engine::shared::chunkOf(b.pos);
-        auto it = chunks_.find(cp);
-        if (it != chunks_.end() &&
-            it->second.atWorld(b.pos) !=
-                static_cast<std::uint8_t>(engine::shared::BlockType::Air)) {
-            it->second.atWorld(b.pos) =
-                static_cast<std::uint8_t>(engine::shared::BlockType::Air);
-            it->second.markDirty(0x20);        // 修改跟踪：打包移除标记脏
-            dirtyChunksThisTick_.insert(cp);   // 变更事件流：本 tick 事件源
-        }
-    }
-    wantPack_ = true;
-    return true;
-}
-bool BusinessWorld::unpackContraption() {
-    // 请求解包：排队一条 UnpackContraption（目标刚体 ID 来自打包回执）。
-    if (wantSync_ || wantPack_ || wantUnpack_) return false;
-    wantUnpack_ = true;
-    return true;
-}
-int BusinessWorld::packedId() const {
-    return packedId_;
 }
 
 void BusinessWorld::syncToPhysics(engine::core::SPSCQueue<engine::shared::PhysicsCommand>& q) {
     // 业务 Tick 边界：下发指令。一次只发一条（原型节奏），
-    // 优先级：全量同步 → 打包 → 解包 → 放置 → 破坏 → 常规移动。
+    // 优先级：全量同步 → 放置 → 破坏 → 常规移动。
     engine::shared::PhysicsCommand cmd;
     if (wantSync_) {
         // 全量同步：把业务世界所有方块（含类型/坐标）下发，物理重建静态碰撞体集合。
@@ -111,40 +54,21 @@ void BusinessWorld::syncToPhysics(engine::core::SPSCQueue<engine::shared::Physic
             commandsSent_.fetch_add(1, std::memory_order_relaxed);
             wantSync_ = false;
         }
-    } else if (wantPack_) {
-        // 打包指令：方块列表在 packContraption 时已从 blocks_ 快照（飞船区域），
-        // 物理把对应静态碰撞体转移进刚体（架构 2.7 物理形态转移）。
-        cmd.type = engine::shared::PhysicsCommand::Type::PackContraption;
-        cmd.ivx = 1.0; // 业务裁决：飞船以 1 格/秒 沿 x 方向飞行
-        cmd.blocks = packBlocks_;
-        cmd.blockCount = static_cast<int>(packBlocks_.size());
-        if (q.push(cmd)) {
-            commandsSent_.fetch_add(1, std::memory_order_relaxed);
-            wantPack_ = false;
-        }
-    } else if (wantUnpack_) {
-        // 解包指令：把刚体拆回方块（目标刚体 ID 来自打包回执）。
-        cmd.type = engine::shared::PhysicsCommand::Type::UnpackContraption;
-        cmd.contraptionId = packedId_;
-        if (q.push(cmd)) {
-            commandsSent_.fetch_add(1, std::memory_order_relaxed);
-            wantUnpack_ = false;
-        }
     } else if (wantPlace_) {
-        // 放置指令：业务裁决已通过（位置合法），物理按目标域建碰撞体/加入刚体。
+        // 放置指令：业务裁决已通过（位置合法），物理建静态碰撞体。
         cmd.type = engine::shared::PhysicsCommand::Type::PlaceBlock;
         cmd.x = placePos_.x; cmd.y = placePos_.y; cmd.z = placePos_.z;
         cmd.blockType = placeType_;
-        cmd.contraptionId = placeCid_; // -1=主世界，≥0=刚体（飞船改造）
+        cmd.contraptionId = -1; // 主世界静态方块（无刚体域）
         if (q.push(cmd)) {
             commandsSent_.fetch_add(1, std::memory_order_relaxed);
             wantPlace_ = false;
         }
     } else if (wantRemove_) {
-        // 破坏指令：业务裁决已通过（方块存在），物理按目标域删碰撞体/刚体方块。
+        // 破坏指令：业务裁决已通过（方块存在），物理删静态碰撞体。
         cmd.type = engine::shared::PhysicsCommand::Type::RemoveBlock;
         cmd.x = removePos_.x; cmd.y = removePos_.y; cmd.z = removePos_.z;
-        cmd.contraptionId = removeCid_; // -1=主世界，≥0=刚体（飞船改造）
+        cmd.contraptionId = -1; // 主世界静态方块（无刚体域）
         if (q.push(cmd)) {
             commandsSent_.fetch_add(1, std::memory_order_relaxed);
             wantRemove_ = false;
@@ -164,8 +88,6 @@ void BusinessWorld::flushChanges(
     engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& q) {
     // 业务 Tick 边界：把本 tick 变脏的 chunk 聚合为一条变更事件发出（数据层 ② 第四项）。
     // 事件源 = dirtyChunksThisTick_（写操作插入，自动去重）；发完清空。
-    // 刚体域（bodyBlocks_）变更不进此流：渲染端把复合体当动态渲染单元，
-    // 其状态由物理 RigidBodyPos 位置快照驱动（已有通道）。
     std::lock_guard<std::mutex> lock(blocksMutex_);
     if (dirtyChunksThisTick_.empty()) return;
     engine::shared::BlockChangeEvent ev;
@@ -184,7 +106,7 @@ long long BusinessWorld::changeEventsSent() const {
 
 void BusinessWorld::receiveFromPhysics(
     engine::core::SPSCQueue<engine::shared::PhysicsResult>& q) {
-    // 业务 Tick 边界：收物理结果（位置快照 + 打包回执）。
+    // 业务 Tick 边界：收物理结果（位置快照/碰撞体数量）。
     engine::shared::PhysicsResult res;
     while (q.pop(res)) {
         resultsReceived_.fetch_add(1, std::memory_order_relaxed);
@@ -194,80 +116,12 @@ void BusinessWorld::receiveFromPhysics(
             blockY_.store(res.y, std::memory_order_relaxed);
             blockZ_.store(res.z, std::memory_order_relaxed);
             break;
-        case engine::shared::PhysicsResult::Type::ContraptionPacked:
-            packedId_ = res.contraptionId;
-            contraptionState_.store(1, std::memory_order_relaxed);
-            break;
-        case engine::shared::PhysicsResult::Type::ContraptionUnpacked:
-            contraptionState_.store(2, std::memory_order_relaxed);
-            packedBlocks_.clear(); // 刚体已拆回方块，碰撞保护集合失效
-            // 解包闭环（架构 2.7）：用物理回执的世界坐标方块写入主世界 chunk。
-            // 业务权威的坐标与物理回写位置对齐——飞船飞了多远，方块表就记多远，
-            // 不再停留在打包前的局部坐标 (-1..1)。
-            // 注意：不清空 chunks_ 全表——打包时已把飞船旧位置置空（形态转移
-            // 的业务侧同步），主世界其他方块（玩家放置等）必须保留；
-            // 只清空刚体域 bodyBlocks_（解包 = 刚体整体拆回主世界，物理回执
-            // 即为全量权威，改造方块一并失效）。
-            {
-                std::lock_guard<std::mutex> lock(blocksMutex_);
-                bodyBlocks_.clear();
-                for (const auto& b : res.blocks) {
-                    // 回执方块均为世界坐标主世界方块（物理解包填充，见 PhysicsWorld）。
-                    const auto cp = engine::shared::chunkOf(b.pos);
-                    auto& c = chunks_[cp];
-                    c.atWorld(b.pos) = static_cast<std::uint8_t>(b.type);
-                    c.markDirty(0x02); // 修改跟踪：解包重建标记脏（持久留档）
-                    dirtyChunksThisTick_.insert(cp); // 变更事件流：本 tick 事件源（去重）
-                }
-            }
-            break;
-        case engine::shared::PhysicsResult::Type::RigidBodyPos:
-            // 刚体（飞船）位置快照：业务视角更新飞船坐标（日志/伪渲染用最新值）。
-            // 同时写入插值基座双槽：保留最近两个带模拟时间戳的快照（渲染 lerp 用）。
-            shipX_.store(res.rx, std::memory_order_relaxed);
-            shipY_.store(res.ry, std::memory_order_relaxed);
-            shipZ_.store(res.rz, std::memory_order_relaxed);
-            {
-                std::lock_guard<std::mutex> lock(posMutex_);
-                const int other = (posNewest_ == 0) ? 1 : 0; // 写非最新槽（覆盖最旧）
-                posSamples_[other] = PosSample{res.simTime, res.rx, res.ry, res.rz};
-                posNewest_ = other;
-                ++posCount_;
-            }
-            break;
         case engine::shared::PhysicsResult::Type::BlockSetSize:
             // 物理静态碰撞体数量快照（合并语义：只留最新值）。
             physicsBlockCount_.store(res.blockSetSize, std::memory_order_relaxed);
             break;
-        case engine::shared::PhysicsResult::Type::CollisionEvent: {
-            // 碰撞事件（架构 7.3 撞击破坏）：业务裁决直接破坏被撞的静态方块。
-            // 与玩家 removeBlock 不同：重复碰撞事件不算"玩家请求被拒"，不计数；
-            // 也计入 collisions_ 供演示/断言观测。
-            collisions_.fetch_add(1, std::memory_order_relaxed);
-            // 刚体内方块不可被撞毁（飞船自身结构不因撞击塌陷，原型）。
-            if (contraptionState_.load(std::memory_order_relaxed) == 1 &&
-                packedBlocks_.count(engine::shared::BlockPos{res.cx, res.cy, res.cz}))
-                break;
-            const engine::shared::BlockPos cp{res.cx, res.cy, res.cz};
-            {
-                std::lock_guard<std::mutex> lock(blocksMutex_);
-                // 区块化后主世界破坏 O(1)：chunk 定位 → 置 Air。只破坏主世界静态方块
-                // （刚体自身方块受 packedBlocks_ 保护，已在上面拦截）。
-                auto it = chunks_.find(engine::shared::chunkOf(cp));
-                if (it != chunks_.end() &&
-                    it->second.atWorld(cp) !=
-                        static_cast<std::uint8_t>(engine::shared::BlockType::Air)) {
-                    it->second.atWorld(cp) =
-                        static_cast<std::uint8_t>(engine::shared::BlockType::Air);
-                    it->second.markDirty(0x04);        // 修改跟踪：碰撞破坏标记脏
-                    dirtyChunksThisTick_.insert(it->first); // 变更事件流：本 tick 事件源
-                    wantRemove_ = true;
-                    removePos_ = cp; // 下发 RemoveBlock：物理删碰撞体
-                    removeCid_ = -1;
-                }
-            }
-            break;
-        }
+        // 无刚体后物理不再发 CollisionEvent（碰撞事件只有刚体撞静态方块才有），
+        // 收到也按未知类型忽略（switch 无匹配 case 直接跳过）。
         }
     }
 }
@@ -290,10 +144,10 @@ int BusinessWorld::blockZ() const { return blockZ_.load(std::memory_order_relaxe
 
 std::vector<engine::shared::Block> BusinessWorld::renderSnapshot() const {
     // 第 4 轨只读：与业务线程结构性修改并发，锁内生成一份安全快照。
-    // 数据层 ② 区块化：遍历所有已加载 chunk 的非空气方块 + 刚体域方块。
+    // 数据层 ② 区块化：遍历所有已加载 chunk 的非空气方块。
     std::lock_guard<std::mutex> lock(blocksMutex_);
     std::vector<engine::shared::Block> out;
-    out.reserve(chunks_.size() * 64 + bodyBlocks_.size()); // 粗略预留，减少扩容
+    out.reserve(chunks_.size() * 64); // 粗略预留，减少扩容
     for (const auto& [cp, data] : chunks_) {
         const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4; // chunk 起点世界坐标
         for (int i = 0; i < engine::shared::CHUNK_VOLUME; ++i) {
@@ -305,19 +159,18 @@ std::vector<engine::shared::Block> BusinessWorld::renderSnapshot() const {
                 -1}); // 主世界方块 contraptionId 恒 -1（chunk 不存该字段）
         }
     }
-    for (const auto& [pos, b] : bodyBlocks_) out.push_back(b);
     return out;
 }
 std::size_t BusinessWorld::blockCount() const {
-    // main 线程伪渲染/断言与业务线程结构性修改可能并发——加锁读。
-    // 区块化后 = chunk 非空气方块数 + 刚体域方块数。
+    // main 线程只读（日志/断言）与业务线程结构性修改可能并发——加锁读。
+    // 区块化后 = chunk 非空气方块数。
     std::lock_guard<std::mutex> lock(blocksMutex_);
     std::size_t n = 0;
     for (const auto& [cp, data] : chunks_) {
         for (const std::uint8_t t : data.blocks)
             if (t != static_cast<std::uint8_t>(engine::shared::BlockType::Air)) ++n;
     }
-    return n + bodyBlocks_.size();
+    return n;
 }
 std::size_t BusinessWorld::chunkCount() const {
     std::lock_guard<std::mutex> lock(blocksMutex_);
@@ -348,133 +201,131 @@ std::uint32_t BusinessWorld::chunkDirtyFlags(const engine::shared::ChunkPos& cp)
     return it == chunks_.end() ? 0u : it->second.dirty;
 }
 std::optional<engine::shared::Block> BusinessWorld::findBlock(
-    const engine::shared::BlockPos& p, int contraptionId) const {
+    const engine::shared::BlockPos& p) const {
     // 调用方需保证无并发写（业务线程持锁调用 / main 在三轨停止后调用）。
-    // 区块化后按域分流：主世界 → chunk 定位 O(1)；刚体域 → bodyBlocks_。
-    if (contraptionId < 0) {
-        const auto it = chunks_.find(engine::shared::chunkOf(p));
-        if (it == chunks_.end()) return std::nullopt;
-        const std::uint8_t t = it->second.atWorld(p);
-        if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air))
-            return std::nullopt;
-        return engine::shared::Block{
-            static_cast<engine::shared::BlockType>(t), p, -1};
-    }
-    const auto it = bodyBlocks_.find(p);
-    return it == bodyBlocks_.end() ? std::nullopt
-                                   : std::optional<engine::shared::Block>(it->second);
+    // 主世界 → chunk 定位 O(1)（chunk 存储只存类型，返回现场构造的 Block）。
+    const auto it = chunks_.find(engine::shared::chunkOf(p));
+    if (it == chunks_.end()) return std::nullopt;
+    const std::uint8_t t = it->second.atWorld(p);
+    if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air))
+        return std::nullopt;
+    return engine::shared::Block{static_cast<engine::shared::BlockType>(t), p, -1};
 }
 bool BusinessWorld::placeBlock(const engine::shared::BlockPos& p,
-                               engine::shared::BlockType type, int contraptionId) {
-    // 裁决①：目标域是刚体时飞船必须处于打包状态（刚体存在性）。
-    // 飞船改造语义：打包期间主世界与刚体空间的方块增删都允许（不再结构冻结），
-    // 刚体域变更由物理侧增量重算碰撞箱（Sable 思想）。
-    if (contraptionId >= 0 &&
-        contraptionState_.load(std::memory_order_relaxed) != 1) {
-        placementsRejected_.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
+                               engine::shared::BlockType type) {
     std::lock_guard<std::mutex> lock(blocksMutex_);
-    // 裁决②：同域位置已被占用（主世界与刚体空间相互独立，坐标可重叠）。
-    if (findBlock(p, contraptionId).has_value()) {
+    // 裁决：位置已被占用 → 拒绝放置。
+    if (findBlock(p).has_value()) {
         placementsRejected_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    // 区块化：主世界 → chunk 写入（16³ 密集数组，O(1)）；刚体域 → bodyBlocks_。
-    if (contraptionId < 0) {
-        const auto cp = engine::shared::chunkOf(p);
-        auto& c = chunks_[cp];
-        c.atWorld(p) = static_cast<std::uint8_t>(type);
-        c.markDirty(0x08);      // 修改跟踪：放置标记脏（持久留档）
-        dirtyChunksThisTick_.insert(cp); // 变更事件流：本 tick 事件源
-    } else {
-        bodyBlocks_.emplace(p, engine::shared::Block{type, p, contraptionId});
-    }
+    // 区块化：主世界 → chunk 写入（16³ 密集数组，O(1)）。
+    const auto cp = engine::shared::chunkOf(p);
+    auto& c = chunks_[cp];
+    c.atWorld(p) = static_cast<std::uint8_t>(type);
+    c.markDirty(0x08);              // 修改跟踪：放置标记脏（持久留档）
+    dirtyChunksThisTick_.insert(cp); // 变更事件流：本 tick 事件源
     blocksPlaced_.fetch_add(1, std::memory_order_relaxed);
     // 自动排队 PlaceBlock 指令（下次 syncToPhysics 发出）。
     // 原型注意：若上一条指令因队列满未发出，本请求会覆盖待发坐标（低概率，接受）。
     wantPlace_ = true;
     placePos_ = p;
     placeType_ = static_cast<int>(type);
-    placeCid_ = contraptionId;
     return true;
 }
 
-bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p, int contraptionId) {
-    // 裁决①：目标域是刚体时飞船必须处于打包状态（刚体存在性）。
-    if (contraptionId >= 0 &&
-        contraptionState_.load(std::memory_order_relaxed) != 1) {
+bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p) {
+    std::lock_guard<std::mutex> lock(blocksMutex_);
+    // 裁决：目标方块必须存在。主世界 → chunk 定位 O(1) 删除。
+    auto it = chunks_.find(engine::shared::chunkOf(p));
+    if (it == chunks_.end() ||
+        it->second.atWorld(p) ==
+            static_cast<std::uint8_t>(engine::shared::BlockType::Air)) {
         removalsRejected_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    // 裁决②：目标方块必须存在。区块化后按域分流 O(1) 删除。
-    if (contraptionId < 0) {
-        auto it = chunks_.find(engine::shared::chunkOf(p));
-        if (it == chunks_.end() ||
-            it->second.atWorld(p) ==
-                static_cast<std::uint8_t>(engine::shared::BlockType::Air)) {
-            removalsRejected_.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-        it->second.atWorld(p) =
-            static_cast<std::uint8_t>(engine::shared::BlockType::Air);
-        it->second.markDirty(0x10);        // 修改跟踪：破坏标记脏（持久留档）
-        dirtyChunksThisTick_.insert(it->first); // 变更事件流：本 tick 事件源
-    } else {
-        const auto it = bodyBlocks_.find(p);
-        if (it == bodyBlocks_.end()) {
-            removalsRejected_.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-        bodyBlocks_.erase(it);
-    }
+    it->second.atWorld(p) =
+        static_cast<std::uint8_t>(engine::shared::BlockType::Air);
+    it->second.markDirty(0x10);              // 修改跟踪：破坏标记脏（持久留档）
+    dirtyChunksThisTick_.insert(it->first);  // 变更事件流：本 tick 事件源
     blocksRemoved_.fetch_add(1, std::memory_order_relaxed);
     // 自动排队 RemoveBlock 指令（下次 syncToPhysics 发出）。
     wantRemove_ = true;
     removePos_ = p;
-    removeCid_ = contraptionId;
     return true;
 }
 
-int BusinessWorld::contraptionState() const {
-    return contraptionState_.load(std::memory_order_relaxed);
-}
-double BusinessWorld::shipX() const { return shipX_.load(std::memory_order_relaxed); }
-double BusinessWorld::shipY() const { return shipY_.load(std::memory_order_relaxed); }
-double BusinessWorld::shipZ() const { return shipZ_.load(std::memory_order_relaxed); }
+//// 玩家输入：DDA 射线检测 → 放置/破坏
+// 相机来自 CameraState（输入线程写），点击来自 PlayerInput（鼠标回调写）。
+void BusinessWorld::processPlayerInput(const engine::shared::CameraState& cam,
+                                       const engine::shared::PlayerInput& clicks){
+    const long long seq = clicks.clickSeq.load(std::memory_order_relaxed);
+    if(seq == lastProcessedClickSeq_) return;
+    lastProcessedClickSeq_ = seq;   //修复重复射线
+    const int button = clicks.clickButton.load(std::memory_order_relaxed);
 
-bool BusinessWorld::sampleShipPos(double simT, double& x, double& y, double& z) const {
-    // 渲染插值基座：按查询模拟时刻在最近两个快照间线性插值。
-    // 窗口外钳制：晚于最新 → 返回最新（无未来数据，等下一快照）；早于最旧 → 返回最旧。
-    std::lock_guard<std::mutex> lock(posMutex_);
-    if (posNewest_ < 0) return false;                 // 尚无任何快照
-    const PosSample& n = posSamples_[posNewest_];    // 最新
-    if (posCount_ < 2) {                              // 只有一个快照：无插值窗口
-        x = n.x; y = n.y; z = n.z;
-        return true;
+    //读取相机槽
+    const double cx = cam.camX.load(std::memory_order_relaxed);
+    const double cy = cam.camY.load(std::memory_order_relaxed);
+    const double cz = cam.camZ.load(std::memory_order_relaxed);
+    const double yaw = cam.yaw.load(std::memory_order_relaxed);
+    const double pitch = cam.pitch.load(std::memory_order_relaxed);
+
+    //实现方向必须和渲染端完全一致
+    const double cosP = std::cos(pitch);
+    const double dx = std::sin(yaw) * cosP;
+    const double dy = std::sin(pitch);
+    const double dz = -std::cos(yaw) * cosP;
+
+    //DDA初始化
+    const double ox = std::floor(cx), oy = std::floor(cy), oz = std::floor(cz);
+    double tMaxX = (dx > 0 ? (ox + 1 - cx) / dx : (dx < 0 ? (ox - cx) / dx : 1e30));
+    double tMaxY = (dy > 0 ? (oy + 1 - cy) / dy : (dy < 0 ? (oy - cy) / dy : 1e30));
+    double tMaxZ = (dz > 0 ? (oz + 1 - cz) / dz : (dz < 0 ? (oz - cz) / dz : 1e30));
+    const double tDeltaX = (dx != 0.0 ? std::abs(1.0 / dx) : 1e30);
+    const double tDeltaY = (dy != 0.0 ? std::abs(1.0 / dy) : 1e30);
+    const double tDeltaZ = (dz != 0.0 ? std::abs(1.0 / dz) : 1e30);
+    const int stepX = (dx > 0 ? 1 : -1);
+    const int stepY = (dy > 0 ? 1 : -1);
+    const int stepZ = (dz > 0 ? 1 : -1);
+
+    int ix = static_cast<int>(ox), iy = static_cast<int>(oy), iz = static_cast<int>(oz);
+    int dirX = 0, dirY = 0, dirZ = 0;   // 进入命中格的推进方向（反推放置位用）
+    bool hit = false;
+    int hx = 0, hy = 0, hz = 0;         // 命中格（左键破坏目标）
+    int px = ix, py = iy, pz = iz;      // 放置位（默认 = 起点格）
+    
+    // ⑤ DDA 推进：最多 8 格（射线距离上限）。每次选最小的 tMax 推进对应轴
+    for (int s = 0; s < 8; ++s) {
+        if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+            tMaxX += tDeltaX; ix += stepX; dirX = stepX; dirY = 0; dirZ = 0;
+        }
+        else if (tMaxY < tMaxZ) {
+            tMaxY += tDeltaY; iy += stepY; dirX = 0; dirY = stepY; dirZ = 0;
+        }
+        else {
+            tMaxZ += tDeltaZ; iz += stepZ; dirX = 0; dirY = 0; dirZ = stepZ;
+        }
+        if (findBlock(engine::shared::BlockPos{ ix, iy, iz }).has_value()) {
+            hit = true;
+            hx = ix; hy = iy; hz = iz;
+            px = ix - dirX; py = iy - dirY; pz = iz - dirZ;  // 放置位 = 命中格前一格
+            break;
+        }
     }
-    const PosSample& o = posSamples_[1 - posNewest_]; // 次新
-    if (n.simT <= o.simT) { x = n.x; y = n.y; z = n.z; return true; } // 防御：时间倒序
-    if (simT >= n.simT) { x = n.x; y = n.y; z = n.z; return true; }   // 钳最新
-    if (simT <= o.simT) { x = o.x; y = o.y; z = o.z; return true; }   // 钳最旧
-    const double k = (simT - o.simT) / (n.simT - o.simT);             // 0~1 插值比例
-    x = o.x + (n.x - o.x) * k;
-    y = o.y + (n.y - o.y) * k;
-    z = o.z + (n.z - o.z) * k;
-    return true;
+
+    playerActions_.fetch_add(1, std::memory_order_relaxed);
+    if (!hit) return;  // 8 格内没碰到方块：点击已消费，无事可做
+
+    if (button == 0) {  // 左键：破坏命中格
+        removeBlock(engine::shared::BlockPos{ hx, hy, hz });
+    }
+    else if (button == 1) {  // 右键：在放置位放 Stone
+        placeBlock(engine::shared::BlockPos{ px, py, pz },
+            engine::shared::BlockType::Stone);
+    }
 }
-bool BusinessWorld::lastTwoPosSamples(PosSample& old, PosSample& latest) const {
-    std::lock_guard<std::mutex> lock(posMutex_);
-    if (posNewest_ < 0 || posCount_ < 2) return false;
-    latest = posSamples_[posNewest_];
-    old    = posSamples_[1 - posNewest_];
-    return true;
-}
-int BusinessWorld::posSampleCount() const {
-    std::lock_guard<std::mutex> lock(posMutex_);
-    return posCount_;
-}
+
 long long BusinessWorld::blocksPlaced() const {
     return blocksPlaced_.load(std::memory_order_relaxed);
 }
@@ -489,9 +340,6 @@ long long BusinessWorld::removalsRejected() const {
 }
 long long BusinessWorld::physicsBlockCount() const {
     return physicsBlockCount_.load(std::memory_order_relaxed);
-}
-long long BusinessWorld::collisions() const {
-    return collisions_.load(std::memory_order_relaxed);
 }
 
 void BusinessWorld::maybeLog() {
@@ -512,9 +360,6 @@ void BusinessWorld::maybeLog() {
            << " 物理碰撞体=" << physicsBlockCount()
            << " 放置/破坏=" << blocksPlaced() << "/" << blocksRemoved()
            << "(拒" << placementsRejected() << "/" << removalsRejected() << ")"
-           << " 碰撞=" << collisions()
-           << " 打包状态=" << contraptionState()
-           << " 飞船=(" << shipX() << "," << shipY() << "," << shipZ() << ")"
            << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Business);
         engine::core::log(engine::core::LogLevel::Info, os.str());
     }

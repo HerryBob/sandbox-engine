@@ -10,11 +10,11 @@ namespace engine::core {
 // tick 节奏由传入的 body 自行控制（见各轨实现），body 内应周期检查 shouldStop()。
 class ThreadLoop {
 public:
-    explicit ThreadLoop(std::string name) : name_(std::move(name)) {}
+    explicit ThreadLoop(std::string name) : name_(std::move(name)) {} //初始化和防止隐式转换
     ThreadLoop(const ThreadLoop&) = delete;
     ThreadLoop& operator=(const ThreadLoop&) = delete;
-
     ~ThreadLoop() { stop(); }
+    //线程单一化 负责线程控制
 
     void start(std::function<void()> body) {
         running_.store(true, std::memory_order_relaxed);
