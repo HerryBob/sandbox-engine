@@ -43,7 +43,7 @@ bool BusinessWorld::syncAll() {
 
 void BusinessWorld::syncToPhysics(engine::core::SPSCQueue<engine::shared::PhysicsCommand>& q) {
     // 业务 Tick 边界：下发指令。一次只发一条（原型节奏），
-    // 优先级：全量同步 → 放置 → 破坏 → 常规移动。
+    // 优先级：全量同步 → 放置 → 破坏（MoveBlock 演示已移除，物理不再收到移动指令）。
     engine::shared::PhysicsCommand cmd;
     if (wantSync_) {
         // 全量同步：把业务世界所有方块（含类型/坐标）下发，物理重建静态碰撞体集合。
@@ -73,15 +73,7 @@ void BusinessWorld::syncToPhysics(engine::core::SPSCQueue<engine::shared::Physic
             commandsSent_.fetch_add(1, std::memory_order_relaxed);
             wantRemove_ = false;
         }
-    } else {
-        // 常规演示指令：移动方块。
-        cmd.type = engine::shared::PhysicsCommand::Type::MoveBlock;
-        cmd.dx   = 1;
-        if (q.push(cmd)) {
-            commandsSent_.fetch_add(1, std::memory_order_relaxed);
-        }
-        // push 失败（队列满）则丢弃：慢放时物理消化变慢、命令堆积，可观察水位现象。
-    }
+    } 
 }
 
 void BusinessWorld::flushChanges(
