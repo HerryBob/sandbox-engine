@@ -15,6 +15,9 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+//相邻面剔除相关
+#include "render/optimization/meshing/FaceCulling.hpp"
+#include <unordered_set>
 
 namespace engine::render {
 
@@ -618,22 +621,38 @@ bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Bloc
     std::vector<Vertex> vertices;    // 合并所有方块的顶点
     std::vector<uint32_t> indices;   // 合并所有方块的索引
 
-    uint32_t vertexOffset = 0;   // 已拼接的顶点数 = 下一个方块的索引偏移
+
+    std::unordered_set<engine::shared::BlockPos> solid;
+    solid.reserve(blocks.size());
+    for (const auto& b : blocks) {
+        if (b.type != engine::shared::BlockType::Air && b.contraptionId == -1)
+            solid.insert(b.pos);
+    }
+
+    uint32_t vertexOffset = 0;
+    uint32_t blockCount = 0;
 
     for (const auto& block : blocks) {
         if(block.type == engine::shared::BlockType::Air) continue;
         if(block.contraptionId != -1) continue;
+        ++blockCount;
 
-        glm::vec3 center{ block.pos.x + 0.5f, block.pos.y + 0.5f, block.pos.z + 0.5f };  // int → vec3
-        auto vs = mesh::buildCubeVertices(center);                          // 24 顶点
-        vertices.insert(vertices.end(), vs.begin(), vs.end());              // 追加
-
-        auto is = mesh::buildCubeIndices();      
-        for (auto& i : is) i += vertexOffset;    // ← 关键：索引偏移 = 已拼顶点数
-        indices.insert(indices.end(), is.begin(), is.end());                // 追加
-        vertexOffset += 24; 
+        //查询6邻居 
+        const glm::vec3 center{block.pos.x + 0.5f, block.pos.y + 0.5f, block.pos.z + 0.5f };
+        const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
+        auto vs = mesh::buildCubeVertices(center, faceMask);
+        vertices.insert(vertices.end(), vs.begin(), vs.end());
+        //顶点索引
+        const uint32_t faceCount = static_cast<uint32_t>(vs.size() / 4);
+        for (uint32_t f = 0; f < faceCount; ++f) {
+            const uint32_t b = vertexOffset + f * 4;
+            indices.push_back(b + 0); indices.push_back(b + 1); indices.push_back(b + 2);
+            indices.push_back(b + 0); indices.push_back(b + 2); indices.push_back(b + 3);
+        }
+        vertexOffset += static_cast<uint32_t>(vs.size());
     }
-    if (vertices.empty() || indices.empty()) return true;
+    if(vertices.empty()||indices.empty()) return true;
+
     if (vertexBuffer_) {
         vkDestroyBuffer(device_, vertexBuffer_, nullptr);
         vertexBuffer_ = VK_NULL_HANDLE;
@@ -653,7 +672,13 @@ bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Bloc
 
     vertexCount_ = static_cast<uint32_t>(vertices.size());
     indexCount_ = static_cast<uint32_t>(indices.size());
-
+    // 重建日志（验证面剔除效果 + 以后调性能用）——必须在赋值之后读
+    {
+        std::ostringstream os;
+        os << "[Vulkan] 网格重建：方块=" << blockCount << " 面=" << indexCount_ / 6
+            << " 顶点=" << vertexCount_;
+        LOG_INFO(os.str());
+    }
     if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * vertexCount_,
         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,

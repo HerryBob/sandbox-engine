@@ -1,5 +1,5 @@
 #include "VulkanMesh.hpp"
-
+#include <bit>
 namespace engine::render::mesh {
 
     // ---- 方块几何：24 顶点 + 36 索引（每面独立 4 顶点、独立颜色）----
@@ -16,7 +16,7 @@ namespace engine::render::mesh {
         {0,0,1}, {0,1,0}, {1,0,0}, {0,0,1}, {0,1,0}, {1,0,0}
     }; // 副轴
 
-    std::vector<Vertex> buildCubeVertices(const glm::vec3& offset) {
+    std::vector<Vertex> buildCubeVertices(const glm::vec3& offset, std::uint8_t faceMask) {
         const glm::vec2 faceUV[4] = {                 // 每面 4 角的纹理坐标
             {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}
         };
@@ -30,32 +30,20 @@ namespace engine::render::mesh {
         };
         const float h = 0.5f; // 半边长
         std::vector<Vertex> verts;
-        verts.reserve(24);
+        verts.reserve(static_cast<size_t>(std::popcount(faceMask))*4);
         for (int f = 0; f < 6; ++f) {
-            const glm::vec3 center = offset + kFaceN[f] * h;  // 面心
-            const glm::vec3 p[4] = {                           // 四角（从外看逆时针环）
-                center + (-kFaceU[f] - kFaceV[f]) * h,   // 左下
-                center + (+kFaceU[f] - kFaceV[f]) * h,   // 右下
-                center + (+kFaceU[f] + kFaceV[f]) * h,   // 右上
-                center + (-kFaceU[f] + kFaceV[f]) * h,   // 左上
-            };
-            for (int i = 0; i < 4; ++i)
-                verts.push_back(Vertex{ p[i], c[f], faceUV[i] });
-        }
+            if (!(faceMask & (1u << f))) continue;
+
+                const glm::vec3 center = offset + kFaceN[f] * h;  // 面心
+                const glm::vec3 p[4] = {                           // 四角（从外看逆时针环）
+                    center + (-kFaceU[f] - kFaceV[f]) * h,   // 左下
+                    center + (+kFaceU[f] - kFaceV[f]) * h,   // 右下
+                    center + (+kFaceU[f] + kFaceV[f]) * h,   // 右上
+                    center + (-kFaceU[f] + kFaceV[f]) * h,   // 左上
+                };
+                for (int i = 0; i < 4; ++i)
+                    verts.push_back(Vertex{ p[i], c[f], faceUV[i] });
+            }
         return verts;
     }
-
-    // 方块索引：36 索引（每面 2 三角形，标准绕序，cache 友好）
-    std::vector<uint32_t> buildCubeIndices() {
-        std::vector<uint32_t> idx;
-        idx.reserve(36);
-        for (uint32_t f = 0; f < 6; ++f) {
-            const uint32_t b = f * 4;
-            idx.push_back(b + 0); idx.push_back(b + 1); idx.push_back(b + 2);
-            idx.push_back(b + 0); idx.push_back(b + 2); idx.push_back(b + 3);
-        }
-        return idx;
-    }
-
-
 } // namespace engine::render::mesh
