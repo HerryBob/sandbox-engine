@@ -1084,9 +1084,6 @@ void VulkanContext::framebufferResizeCallback(GLFWwindow* w, int, int) {
     }
 }
 
-// GLFW 鼠标/键盘回调已移交 input::InputSampler（真实输入归输入线程），
-// 本类只保留窗口尺寸回调（framebufferResizeCallback，见 init 注册处）。
-
 
 // 释放描述符池/布局/UBO 缓冲
 void VulkanContext::destroyUniformObjects() {

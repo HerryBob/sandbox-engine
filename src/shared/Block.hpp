@@ -20,8 +20,10 @@ struct BlockPos {
     int y = 0;
     int z = 0;
 
-    // C++20 默认比较：自动生成 ==/!=（坐标映射 key 需要）。
-    bool operator==(const BlockPos&) const = default;
+    // 手写逐成员比较（显式清晰；坐标映射 key 需要）。
+    bool operator==(const BlockPos& rhs) const {
+        return x == rhs.x && y == rhs.y && z == rhs.z;
+    }
 };
 
 // 一个方块 = 类型 + 位置 + 所属域。
@@ -51,7 +53,11 @@ struct ChunkPos {
     int x = 0;
     int y = 0;
     int z = 0;
-    bool operator==(const ChunkPos&) const = default;
+
+    // 手写逐成员比较（与 BlockPos 一致，显式清晰）。
+    bool operator==(const ChunkPos& rhs) const {
+        return x == rhs.x && y == rhs.y && z == rhs.z;
+    }
 };
 
 // 一个 chunk 的方块数据：16³ 密集数组（默认全 Air=0）。

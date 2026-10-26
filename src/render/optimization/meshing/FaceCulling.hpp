@@ -38,10 +38,11 @@ inline std::uint8_t computeFaceMask(
     std::uint8_t mask = 0;
     for (int f = 0; f < 6; ++f) {
         const engine::shared::BlockPos nb{
-            pos.x + kNeighbor[f][0],
+            pos.x + kNeighbor[f][0],    
             pos.y + kNeighbor[f][1],
             pos.z + kNeighbor[f][2] };
-        if (!solid.contains(nb)) mask |= static_cast<std::uint8_t>(1u << f);
+        if (!solid.contains(nb)) 
+            mask |= static_cast<std::uint8_t>(1u << f);
     }
     return mask;
 }
