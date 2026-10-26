@@ -18,8 +18,8 @@ BusinessWorld::BusinessWorld(engine::core::TimeManager& tm)
         c.atWorld(p) = static_cast<std::uint8_t>(t);
         c.markDirty(0x01); // 修改跟踪：初始装载标记脏（变更事件流种子）
     };
-    for (int x = -8; x <= 7; ++x)
-        for (int z = -8; z <= 7; ++z)
+    for (int x = -24; x <= 23; ++x)
+        for (int z = -24; z <= 23; ++z)
             setBlock(x, 0, z, engine::shared::BlockType::Stone);
 }
 
