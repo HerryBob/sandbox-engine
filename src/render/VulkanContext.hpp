@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <glm/glm.hpp>
 #include "shared/Block.hpp"
@@ -38,6 +40,18 @@ struct UniformBufferObject {
     glm::mat4 model;
     glm::mat4 view;
     glm::mat4 proj;
+};
+
+// 一个 chunk 的网格（GPU 资源 + 计数）。key = ChunkPos（Block.hpp 已提供 hash）。
+// 增量重建：每个 chunk 独立持有自己的顶点/索引缓冲，脏 chunk 只重建自己那份；
+// 全量接口保留为"重建全部 chunk"（首帧/世界重建用）。
+struct ChunkMesh {
+    VkBuffer       vertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+    VkBuffer       indexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+    uint32_t       vertexCount = 0;
+    uint32_t       indexCount = 0;
 };
 
 class VulkanContext {
@@ -84,10 +98,11 @@ public:
     VkRenderPass  renderPass() const { return renderPass_; }
     VkPipeline    pipeline() const { return pipeline_; }
     VkDescriptorSet descriptorSet() const { return descSet_; }
-    uint32_t      vertexCount() const { return vertexCount_; }
-    uint32_t      indexCount() const { return indexCount_; }
-    bool rebuildMeshFromBlocks(const std::vector<engine::shared::Block>& blocks); // 重建顶点/索引缓冲：从主世界读取方块数据
-    void requestMeshRebuild(std::vector<engine::shared::Block> blocks); //请求 mesh 重建
+    bool rebuildMeshFromBlocks(const std::vector<engine::shared::Block>& blocks); // 修改为增量重建chunk
+    void requestChunkRebuild(const std::vector<engine::shared::Block>& blocks,
+        const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks); // 请求 mesh 重建
+    bool rebuildChunkMeshes(const std::vector<engine::shared::Block>& blocks, const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks); // 增量重建：只重建 dirtyChunks 里的 chunk
+
 
 private:
     bool createInstance();
@@ -157,12 +172,8 @@ private:
     VkPipeline           pipeline_ = VK_NULL_HANDLE;
     bool                 framebufferResized_ = false; // 窗口尺寸变化标志（GLFW 回调置位）
     std::vector<VkFramebuffer> framebuffers_;
-    VkBuffer             vertexBuffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory       vertexBufferMemory_ = VK_NULL_HANDLE;
-    VkBuffer             indexBuffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory       indexBufferMemory_ = VK_NULL_HANDLE;
-    uint32_t             vertexCount_ = 0;
-    uint32_t             indexCount_ = 0;
+    // 增量重建：每 chunk 一份网格（旧全局 buffer 逐步替换；chunk 空则无条目）。
+    std::unordered_map<engine::shared::ChunkPos, ChunkMesh> chunkMeshes_;
     VkCommandPool        cmdPool_ = VK_NULL_HANDLE;
     VkCommandBuffer      cmdBuffers_[kMaxFramesInFlight]{}; // 每帧槽一条（2 组轮转）
     VkSemaphore          imageAvailable_[kMaxFramesInFlight]{}; // acquire 信号量：2 组轮转
@@ -176,7 +187,9 @@ private:
     // 本类不再持有 camPos/yaw/pitch，updateViewProj 从 CameraState 只读。
 
     std::vector<engine::shared::Block> pendingRebuildBlocks_;  // 待重建快照
-    std::atomic<bool> meshRebuildRequested_{ false };            // 重建请求标志
+
+    std::unordered_set<engine::shared::ChunkPos> pendingDirtyChunks_; // 待重建的脏 chunk 集
+    std::atomic<bool> chunkRebuildRequested_{ false };                // 增量重建请求标志
 
     VkBuffer             uboBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory       uboMemory_ = VK_NULL_HANDLE;

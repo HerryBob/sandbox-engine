@@ -618,86 +618,127 @@ bool VulkanContext::createFramebuffers() {
 
 // 建立通用索引缓冲
 bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Block>& blocks) {
-    std::vector<Vertex> vertices;    // 合并所有方块的顶点
-    std::vector<uint32_t> indices;   // 合并所有方块的索引
+    // 全量重建 = 增量重建的特例：推导出全部 chunk → 逐个重建（首帧/世界重建用）。
+    std::unordered_set<engine::shared::ChunkPos> allChunks;
+    for (const auto& b : blocks) {
+        if (b.type == engine::shared::BlockType::Air || b.contraptionId != -1) continue;
+        allChunks.insert(engine::shared::chunkOf(b.pos)); // 现成工具：BlockPos → ChunkPos
+    }
+    if (allChunks.empty()) return true;
+    return rebuildChunkMeshes(blocks, allChunks);
+}
 
 
+void VulkanContext::requestChunkRebuild(const std::vector<engine::shared::Block>& blocks,
+    const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks) {
+    pendingRebuildBlocks_ = blocks;   // 快照拷贝：重建时世界数据可能已变，必须定格
+    pendingDirtyChunks_ = dirtyChunks;
+    chunkRebuildRequested_.store(true, std::memory_order_relaxed);
+}
+
+//销毁一个chunk的GPU资源
+static void destroyChunkMesh(VkDevice device, ChunkMesh& m) {
+    if (m.vertexBuffer) vkDestroyBuffer(device, m.vertexBuffer, nullptr);
+    if (m.vertexMemory) vkFreeMemory(device, m.vertexMemory, nullptr);
+    if (m.indexBuffer)  vkDestroyBuffer(device, m.indexBuffer, nullptr);
+    if (m.indexMemory)  vkFreeMemory(device, m.indexMemory, nullptr);
+    m = {}; // 全部回零
+}
+
+//dirtychunks 更新
+bool VulkanContext::rebuildChunkMeshes(
+    const std::vector<engine::shared::Block>& blocks, 
+    const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks) {
+        
+    vkDeviceWaitIdle(device_); // GPU 安全点：等所有在飞命令完成，才能安全销毁旧 buffer
+    //待重建集合
+    std::unordered_set<engine::shared::ChunkPos> rebuildSet = dirtyChunks;
+    for (const auto& cp : dirtyChunks) {
+        rebuildSet.insert({ cp.x + 1, cp.y, cp.z });
+        rebuildSet.insert({ cp.x - 1, cp.y, cp.z });
+        rebuildSet.insert({ cp.x, cp.y + 1, cp.z });
+        rebuildSet.insert({ cp.x, cp.y - 1, cp.z });
+        rebuildSet.insert({ cp.x, cp.y, cp.z + 1 });
+        rebuildSet.insert({ cp.x, cp.y, cp.z - 1 });
+    }
+
+    //solid集合
     std::unordered_set<engine::shared::BlockPos> solid;
     solid.reserve(blocks.size());
     for (const auto& b : blocks) {
-        if (b.type != engine::shared::BlockType::Air && b.contraptionId == -1)
+        if(b.type != engine::shared::BlockType::Air && b.contraptionId == -1)
             solid.insert(b.pos);
     }
-
-    uint32_t vertexOffset = 0;
-    uint32_t blockCount = 0;
-
-    for (const auto& block : blocks) {
-        if(block.type == engine::shared::BlockType::Air) continue;
-        if(block.contraptionId != -1) continue;
-        ++blockCount;
-
-        //查询6邻居 
-        const glm::vec3 center{block.pos.x + 0.5f, block.pos.y + 0.5f, block.pos.z + 0.5f };
-        const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
-        auto vs = mesh::buildCubeVertices(center, faceMask);
-        vertices.insert(vertices.end(), vs.begin(), vs.end());
-        //顶点索引
-        const uint32_t faceCount = static_cast<uint32_t>(vs.size() / 4);
-        for (uint32_t f = 0; f < faceCount; ++f) {
-            const uint32_t b = vertexOffset + f * 4;
-            indices.push_back(b + 0); indices.push_back(b + 1); indices.push_back(b + 2);
-            indices.push_back(b + 0); indices.push_back(b + 2); indices.push_back(b + 3);
+    //逐个chunk重建
+    for (const auto& cp : rebuildSet) {
+        const int bx = cp.x << 4,
+            by = cp.y << 4,
+            bz = cp.z << 4;
+        std::vector<engine::shared::Block> chunkBlocks;
+        for (const auto& b : blocks) {
+            if (b.type == engine::shared::BlockType::Air || b.contraptionId != -1) continue;
+            if (b.pos.x >= bx && b.pos.x < bx + 16 &&
+                b.pos.y >= by && b.pos.y < by + 16 &&
+                b.pos.z >= bz && b.pos.z < bz + 16)
+                chunkBlocks.push_back(b);
         }
-        vertexOffset += static_cast<uint32_t>(vs.size());
-    }
-    if(vertices.empty()||indices.empty()) return true;
+        //生成chunk的顶点和索引
+        std::vector<Vertex> vertices;
+        std::vector<uint32_t> indices;
+        uint32_t vertexOffset = 0;
+        for (const auto& block : chunkBlocks) {
+            const glm::vec3 center{block.pos.x + 0.5f, block.pos.y + 0.5f, block.pos.z + 0.5f};
+            const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
+            auto vs = mesh::buildCubeVertices(center, faceMask);
+            vertices.insert(vertices.end(), vs.begin(), vs.end());
+            const uint32_t faceCount = static_cast<uint32_t>(vs.size() / 4);
+            for (uint32_t f = 0; f < faceCount; ++f) {
+                const uint32_t b0 = vertexOffset + f * 4;
+                indices.push_back(b0 + 0); indices.push_back(b0 + 1); indices.push_back(b0 + 2);
+                indices.push_back(b0 + 0); indices.push_back(b0 + 2); indices.push_back(b0 + 3);
+            }
+            vertexOffset += static_cast<uint32_t>(vs.size());
+        }
+        //无chunk 删除旧网格, 继续下一个
+        auto it =  chunkMeshes_.find(cp);
+        if (vertices.empty()) {
+            if (it != chunkMeshes_.end()) {
+                destroyChunkMesh(device_, it->second);
+                chunkMeshes_.erase(it);
+            }
+            continue;
+        }
+        //有网格
+        if (it != chunkMeshes_.end()) {
+            destroyChunkMesh(device_, it->second);
+            chunkMeshes_.erase(it);
+        }
+        ChunkMesh m;
+        if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * vertices.size(),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            m.vertexBuffer, m.vertexMemory)) return false;
+        util::mapAndCopy(device_, m.vertexMemory, sizeof(Vertex) * vertices.size(), vertices.data());
+        if (!util::createBuffer(device_, physicalDevice_, sizeof(uint32_t) * indices.size(),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            m.indexBuffer, m.indexMemory)) return false;
+        util::mapAndCopy(device_, m.indexMemory, sizeof(uint32_t) * indices.size(), indices.data());
+        m.vertexCount = static_cast<uint32_t>(vertices.size());
+        m.indexCount = static_cast<uint32_t>(indices.size());
+        chunkMeshes_[cp] = m;
 
-    if (vertexBuffer_) {
-        vkDestroyBuffer(device_, vertexBuffer_, nullptr);
-        vertexBuffer_ = VK_NULL_HANDLE;
+        //重建日志
+        {
+            std::ostringstream os;
+            os << "[Vulkan] 重建 chunk=(" << cp.x << "," << cp.y << "," << cp.z
+                << ") 面=" << m.indexCount / 6 << " 顶点=" << m.vertexCount;
+            LOG_INFO(os.str());
+        }
     }
-    if (vertexBufferMemory_) {
-        vkFreeMemory(device_, vertexBufferMemory_, nullptr);
-        vertexBufferMemory_ = VK_NULL_HANDLE;
-    }
-    if (indexBuffer_) {
-        vkDestroyBuffer(device_, indexBuffer_, nullptr);
-        indexBuffer_ = VK_NULL_HANDLE;
-    }
-    if (indexBufferMemory_) {
-        vkFreeMemory(device_, indexBufferMemory_, nullptr);
-        indexBufferMemory_ = VK_NULL_HANDLE;
-    }
-
-    vertexCount_ = static_cast<uint32_t>(vertices.size());
-    indexCount_ = static_cast<uint32_t>(indices.size());
-    // 重建日志（验证面剔除效果 + 以后调性能用）——必须在赋值之后读
-    {
-        std::ostringstream os;
-        os << "[Vulkan] 网格重建：方块=" << blockCount << " 面=" << indexCount_ / 6
-            << " 顶点=" << vertexCount_;
-        LOG_INFO(os.str());
-    }
-    if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * vertexCount_,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        vertexBuffer_, vertexBufferMemory_)) return false;
-    util::mapAndCopy(device_, vertexBufferMemory_, sizeof(Vertex) * vertexCount_, vertices.data());
-
-    if (!util::createBuffer(device_, physicalDevice_, sizeof(uint32_t) * indexCount_,
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        indexBuffer_, indexBufferMemory_)) return false;
-    util::mapAndCopy(device_, indexBufferMemory_, sizeof(uint32_t) * indexCount_, indices.data());
-
     return true;
 }
 
-void VulkanContext::requestMeshRebuild(std::vector<engine::shared::Block> blocks) {
-    pendingRebuildBlocks_ = std::move(blocks);
-    meshRebuildRequested_.store(true, std::memory_order_relaxed);
-}
 
 // 创建命令池 + 每帧命令缓冲（2 条轮转）
 bool VulkanContext::createCommandObjects() {
@@ -966,10 +1007,11 @@ bool VulkanContext::drawFrame() {
     // acquire 失败(OUT_OF_DATE)时 fence 保持 signaled → 下一帧 wait 直接通过
     // 若先 reset，失败帧没有 submit 触发 fence → 下一帧 wait 无限阻塞 → 渲染线程卡死
 
-    if (meshRebuildRequested_.exchange(false, std::memory_order_relaxed)) {
-        vkDeviceWaitIdle(device_);
-        rebuildMeshFromBlocks(pendingRebuildBlocks_);
+    // 增量重建请求：只重建脏 chunk（∪6 邻居由 rebuildChunkMeshes 内部展开）
+    if (chunkRebuildRequested_.exchange(false, std::memory_order_relaxed)) {
+        rebuildChunkMeshes(pendingRebuildBlocks_, pendingDirtyChunks_);
         pendingRebuildBlocks_.clear();
+        pendingDirtyChunks_.clear();
     }
 
     uint32_t imageIndex = 0;
@@ -987,9 +1029,8 @@ bool VulkanContext::drawFrame() {
     }
     vkResetFences(device_, 1, &inFlightFences_[frame]); // acquire 成功后才重置
 
-    if (!vertexBuffer_ || indexCount_ == 0) {
-        // 网格未就绪（业务世界为空或首帧尚未重建）：跳过本帧，避免绑定空句柄。
-        return true;
+    if (chunkMeshes_.empty()) {
+        return true; // 没有任何 chunk 网格 → 跳过本帧
     }
 
     vkResetCommandBuffer(cmdBuffers_[frame], 0);
@@ -1022,10 +1063,14 @@ bool VulkanContext::drawFrame() {
     vkCmdSetScissor(cmdBuffers_[frame], 0, 1, &scissor);
     vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &descSet_, 0, nullptr);
-    VkDeviceSize vbOffset = 0;
-    vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &vertexBuffer_, &vbOffset);
-    vkCmdBindIndexBuffer(cmdBuffers_[frame], indexBuffer_, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(cmdBuffers_[frame], indexCount_, 1, 0, 0, 0); // 绘制当前 mesh（每方块 36 索引）
+
+    for (const auto& [cp, m] : chunkMeshes_) {
+        VkDeviceSize vbOffset = 0;
+        vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &m.vertexBuffer, &vbOffset);
+        vkCmdBindIndexBuffer(cmdBuffers_[frame], m.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmdBuffers_[frame], m.indexCount, 1, 0, 0, 0); // 每个 chunk 一个 draw
+    }
+
     vkCmdEndRenderPass(cmdBuffers_[frame]);
     if (vkEndCommandBuffer(cmdBuffers_[frame]) != VK_SUCCESS) {
         LOG_ERROR("[Vulkan] vkEndCommandBuffer 失败");
@@ -1083,8 +1128,6 @@ void VulkanContext::framebufferResizeCallback(GLFWwindow* w, int, int) {
         LOG_INFO(os.str());
     }
 }
-
-
 // 释放描述符池/布局/UBO 缓冲
 void VulkanContext::destroyUniformObjects() {
     if (descPool_) { vkDestroyDescriptorPool(device_, descPool_, nullptr); descPool_ = VK_NULL_HANDLE; }
@@ -1092,6 +1135,8 @@ void VulkanContext::destroyUniformObjects() {
     if (uboBuffer_) { vkDestroyBuffer(device_, uboBuffer_, nullptr); uboBuffer_ = VK_NULL_HANDLE; }
     if (uboMemory_) { vkFreeMemory(device_, uboMemory_, nullptr); uboMemory_ = VK_NULL_HANDLE; }
 }
+
+
 
 // 释放深度图像/视图/显存
 void VulkanContext::destroyDepthResources() {
@@ -1116,10 +1161,9 @@ void VulkanContext::destroyRenderObjects() {
     for (auto fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
     framebuffers_.clear();
     destroyDepthResources(); // 深度资源：帧缓冲之后、管线之前
-    if (indexBuffer_) { vkDestroyBuffer(device_, indexBuffer_, nullptr); indexBuffer_ = VK_NULL_HANDLE; }
-    if (indexBufferMemory_) { vkFreeMemory(device_, indexBufferMemory_, nullptr); indexBufferMemory_ = VK_NULL_HANDLE; }
-    if (vertexBuffer_) { vkDestroyBuffer(device_, vertexBuffer_, nullptr); vertexBuffer_ = VK_NULL_HANDLE; }
-    if (vertexBufferMemory_) { vkFreeMemory(device_, vertexBufferMemory_, nullptr); vertexBufferMemory_ = VK_NULL_HANDLE; }
+    // 增量重建：销毁所有 chunk 网格（每 chunk 的 GPU 资源）
+    for (auto& [cp, m] : chunkMeshes_) destroyChunkMesh(device_, m);
+    chunkMeshes_.clear();
     if (textureSampler_) { vkDestroySampler(device_, textureSampler_, nullptr); textureSampler_ = VK_NULL_HANDLE; }
     if (textureImageView_) { vkDestroyImageView(device_, textureImageView_, nullptr); textureImageView_ = VK_NULL_HANDLE; }
     if (textureImage_) { vkDestroyImage(device_, textureImage_, nullptr); textureImage_ = VK_NULL_HANDLE; }

@@ -13,9 +13,9 @@ void Renderer::tick() {
         changeEventsReceived_.fetch_add(1, std::memory_order_relaxed);
         for (const auto& cp : ev.dirtyChunks) dirtyChunks_.insert(cp);
     }
-    // 有脏 chunk → 请求全量重建（真正销毁/重建由 drawFrame 在 GPU 安全点执行）
+    // 有脏 chunk → 请求增量重建（脏 chunk ∪ 6 邻居，drawFrame 在 GPU 安全点执行）
     if (!dirtyChunks_.empty()) {
-        vk_.requestMeshRebuild(world_.renderSnapshot());
+        vk_.requestChunkRebuild(world_.renderSnapshot(), dirtyChunks_);
         dirtyChunks_.clear();
     }
 }
