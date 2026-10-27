@@ -1,6 +1,6 @@
 #pragma once
-#include "shared/CameraState.hpp"
-#include "shared/PlayerInput.hpp"
+#include "shared/state/CameraState.hpp"
+#include "shared/state/PlayerInput.hpp"
 
 #include <atomic>
 #include <chrono>

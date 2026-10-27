@@ -1,7 +1,7 @@
 #pragma once
 #include "core/SPSCQueue.hpp"
 #include "core/TimeManager.hpp"
-#include "shared/Protocol.hpp"
+#include "shared/protocol/Protocol.hpp"
 
 #include <atomic>
 #include <chrono>

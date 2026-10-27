@@ -11,7 +11,7 @@
 #include <unordered_set>
 
 #include <glm/glm.hpp>
-#include "shared/Block.hpp"
+#include "shared/block/Block.hpp"
 
 // 依赖方案 A：LunarG SDK 直连（find_package(Vulkan) + vulkan-1.lib 静态链接）。
 // 不再用 volk 动态加载（旧引擎 volk 方案在迁移时切换为 SDK 直连）。
@@ -22,7 +22,7 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 //用户输入
-#include "shared/CameraState.hpp"
+#include "shared/state/CameraState.hpp"
 namespace engine::render {
 
 // 体素顶点：位置 + 颜色（纹理阶段再扩展 UV）。

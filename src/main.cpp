@@ -10,9 +10,10 @@
 #include "physics/PhysicsWorld.hpp"
 #include "render/Renderer.hpp"
 #include "render/VulkanContext.hpp"
-#include "shared/CameraState.hpp"
-#include "shared/Protocol.hpp"
-#include "shared/PlayerInput.hpp"
+#include "shared/state/CameraState.hpp"
+#include "shared/protocol/Protocol.hpp"
+#include "shared/state/PlayerInput.hpp"
+#include "registry/BlockRegistry.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -64,6 +65,8 @@ static int run() {
     if (vkOk) {
         std::cout << kCameraHelp;
     }
+    //方块注册表
+    engine::registry::initBlockRegistry();
 
     // 全局 time_scale 单实例，三条轨共享
     core::TimeManager tm;

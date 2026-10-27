@@ -1,7 +1,7 @@
 #pragma once
 #include "core/SPSCQueue.hpp"
-#include "shared/Block.hpp"
-#include "shared/Protocol.hpp"
+#include "shared/block/Block.hpp"
+#include "shared/protocol/Protocol.hpp"
 #include "VulkanContext.hpp"
 #include <atomic>
 #include <cstddef>

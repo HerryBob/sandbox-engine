@@ -192,8 +192,8 @@ std::uint32_t BusinessWorld::chunkDirtyFlags(const engine::shared::ChunkPos& cp)
     const auto it = chunks_.find(cp);
     return it == chunks_.end() ? 0u : it->second.dirty;
 }
-std::optional<engine::shared::Block> BusinessWorld::findBlock(
-    const engine::shared::BlockPos& p) const {
+std::optional<engine::shared::Block> BusinessWorld::findBlock
+(const engine::shared::BlockPos& p) const {
     // 调用方需保证无并发写（业务线程持锁调用 / main 在三轨停止后调用）。
     // 主世界 → chunk 定位 O(1)（chunk 存储只存类型，返回现场构造的 Block）。
     const auto it = chunks_.find(engine::shared::chunkOf(p));
@@ -216,7 +216,15 @@ bool BusinessWorld::placeBlock(const engine::shared::BlockPos& p,
     auto& c = chunks_[cp];
     c.atWorld(p) = static_cast<std::uint8_t>(type);
     c.markDirty(0x08);              // 修改跟踪：放置标记脏（持久留档）
+    // 脏区块边界写入
     dirtyChunksThisTick_.insert(cp); // 变更事件流：本 tick 事件源
+    const int lx = p.x & 15, ly = p.y & 15, lz = p.z & 15;
+    if (lx == 0)  dirtyChunksThisTick_.insert({ cp.x - 1, cp.y, cp.z });
+    if (lx == 15) dirtyChunksThisTick_.insert({ cp.x + 1, cp.y, cp.z });
+    if (ly == 0)  dirtyChunksThisTick_.insert({ cp.x, cp.y - 1, cp.z });
+    if (ly == 15) dirtyChunksThisTick_.insert({ cp.x, cp.y + 1, cp.z });
+    if (lz == 0)  dirtyChunksThisTick_.insert({ cp.x, cp.y, cp.z - 1 });
+    if (lz == 15) dirtyChunksThisTick_.insert({ cp.x, cp.y, cp.z + 1 });
     blocksPlaced_.fetch_add(1, std::memory_order_relaxed);
     // 自动排队 PlaceBlock 指令（下次 syncToPhysics 发出）。
     // 原型注意：若上一条指令因队列满未发出，本请求会覆盖待发坐标（低概率，接受）。
@@ -239,7 +247,16 @@ bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p) {
     it->second.atWorld(p) =
         static_cast<std::uint8_t>(engine::shared::BlockType::Air);
     it->second.markDirty(0x10);              // 修改跟踪：破坏标记脏（持久留档）
-    dirtyChunksThisTick_.insert(it->first);  // 变更事件流：本 tick 事件源
+    const auto cp = it->first;
+    dirtyChunksThisTick_.insert(cp);  // 变更事件流：本 tick 事件源
+    //判断是否边界写入
+    const int lx = p.x & 15, ly = p.y & 15, lz = p.z & 15;
+    if (lx == 0)  dirtyChunksThisTick_.insert({ cp.x - 1, cp.y, cp.z });
+    if (lx == 15) dirtyChunksThisTick_.insert({ cp.x + 1, cp.y, cp.z });
+    if (ly == 0)  dirtyChunksThisTick_.insert({ cp.x, cp.y - 1, cp.z });
+    if (ly == 15) dirtyChunksThisTick_.insert({ cp.x, cp.y + 1, cp.z });
+    if (lz == 0)  dirtyChunksThisTick_.insert({ cp.x, cp.y, cp.z - 1 });
+    if (lz == 15) dirtyChunksThisTick_.insert({ cp.x, cp.y, cp.z + 1 });
     blocksRemoved_.fetch_add(1, std::memory_order_relaxed);
     // 自动排队 RemoveBlock 指令（下次 syncToPhysics 发出）。
     wantRemove_ = true;

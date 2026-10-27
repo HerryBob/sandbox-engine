@@ -1,10 +1,10 @@
 #pragma once
 #include "core/SPSCQueue.hpp"
 #include "core/TimeManager.hpp"
-#include "shared/Block.hpp"
-#include "shared/CameraState.hpp"
-#include "shared/Protocol.hpp"
-#include "shared/PlayerInput.hpp"
+#include "shared/block/Block.hpp"
+#include "shared/state/CameraState.hpp"
+#include "shared/protocol/Protocol.hpp"
+#include "shared/state/PlayerInput.hpp"
 
 #include <atomic>
 #include <chrono>

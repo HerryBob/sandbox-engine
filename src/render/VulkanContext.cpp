@@ -8,7 +8,7 @@
 #include "stb_image.h"
 #include <glm/gtc/matrix_transform.hpp>
 //导入方块类
-#include "shared/Block.hpp"   
+#include "shared/block/Block.hpp"   
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
@@ -18,7 +18,7 @@
 //相邻面剔除相关
 #include "render/optimization/meshing/FaceCulling.hpp"
 #include <unordered_set>
-
+#include "registry/BlockRegistry.hpp"
 namespace engine::render {
 
 // 初始化渲染上下文：窗口→实例→设备→交换链→管线→每帧对象，任一失败返回 false
@@ -628,7 +628,6 @@ bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Bloc
     return rebuildChunkMeshes(blocks, allChunks);
 }
 
-
 void VulkanContext::requestChunkRebuild(const std::vector<engine::shared::Block>& blocks,
     const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks) {
     pendingRebuildBlocks_ = blocks;   // 快照拷贝：重建时世界数据可能已变，必须定格
@@ -653,21 +652,18 @@ bool VulkanContext::rebuildChunkMeshes(
     vkDeviceWaitIdle(device_); // GPU 安全点：等所有在飞命令完成，才能安全销毁旧 buffer
     //待重建集合
     std::unordered_set<engine::shared::ChunkPos> rebuildSet = dirtyChunks;
-    for (const auto& cp : dirtyChunks) {
-        rebuildSet.insert({ cp.x + 1, cp.y, cp.z });
-        rebuildSet.insert({ cp.x - 1, cp.y, cp.z });
-        rebuildSet.insert({ cp.x, cp.y + 1, cp.z });
-        rebuildSet.insert({ cp.x, cp.y - 1, cp.z });
-        rebuildSet.insert({ cp.x, cp.y, cp.z + 1 });
-        rebuildSet.insert({ cp.x, cp.y, cp.z - 1 });
-    }
-
     //solid集合
     std::unordered_set<engine::shared::BlockPos> solid;
     solid.reserve(blocks.size());
     for (const auto& b : blocks) {
-        if(b.type != engine::shared::BlockType::Air && b.contraptionId == -1)
-            solid.insert(b.pos);
+        if (b.contraptionId == -1) {
+            //查询注册表: 注册过且 opaque = true 
+            const auto* info = engine::registry::g_blockRegistry.find(
+                static_cast<std::uint8_t>(b.type));
+            if (info && info->opaque) {
+                solid.insert(b.pos);
+            }
+        }
     }
     //逐个chunk重建
     for (const auto& cp : rebuildSet) {

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "shared/Block.hpp"
+#include "shared/block/Block.hpp"
 
 #include <vector>
 

@@ -19,7 +19,7 @@
 #include <cstdint>
 #include <unordered_set>
 
-#include "shared/Block.hpp"
+#include "shared/block/Block.hpp"
 
 namespace engine::render::optimization::meshing {
 
