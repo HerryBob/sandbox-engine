@@ -6,12 +6,13 @@
 
 namespace engine::shared {
 
-// 方块类型（原型最小集：先有 4 种，后续按需扩充）。
+// 方块类型（原型最小集：先有 5 种，后续按需扩充）。
 enum class BlockType : std::uint8_t {
     Air = 0,   // 空气（无方块）
     Stone,     // 石头
     Wood,      // 木头
     Dirt,      // 泥土
+    Brick,     // 砖块（注册表扩展性验收：新增方块只动枚举+注册表）
 };
 
 // 方块坐标：整数格坐标（世界格子坐标系）。
