@@ -1,4 +1,5 @@
 #pragma once
+#include "business/World.hpp"
 #include "core/SPSCQueue.hpp"
 #include "core/TimeManager.hpp"
 #include "shared/block/Block.hpp"
@@ -9,18 +10,17 @@
 #include <atomic>
 #include <chrono>
 #include <functional> // std::function（forEachBlockInAABB 回调）
-#include <mutex>
 #include <optional>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace engine::business {
 
-// 业务世界（25TPS，dt=0.04s）：世界状态的唯一权威。
-// 职责：推进 sim_time/tick、裁决方块存在性与类型、放置/破坏（主世界静态方块）。
-// 工作模式：请求 → 裁决 → 排队指令 → syncToPhysics 在 tick 边界发出。
+// 业务世界（25TPS，dt=0.04s）：业务线程的调度器。
+// 职责：推进 sim_time/tick、裁决方块存在性与类型（委托 World）、
+//       编排三座桥（物理指令/回执、渲染变更事件）与玩家输入消费。
 // 本类只提供命令式接口，事件源（玩家/脚本/后续模组）自行调用。
+// 工作模式：请求 → 委托 World 裁决 → 排队指令 → syncToPhysics 在 tick 边界发出。
+// 数据真源在 World（world_）；本类不含任何方块存储与锁。
 class BusinessWorld {
 public:
     explicit BusinessWorld(engine::core::TimeManager& tm);
@@ -51,7 +51,7 @@ public:
     int        blockY() const;
     int        blockZ() const;
 
-    // 方块查询：主世界静态方块 → chunks_（16³ chunk，世界坐标，定位 O(1)）。
+    // 方块查询：委托 World（数据真源；16³ chunk，世界坐标，定位 O(1)）。
     std::size_t blockCount() const;
     // 渲染快照：锁内拷贝全量方块列表（供渲染线程安全调用）。
     std::vector<engine::shared::Block> renderSnapshot() const;
@@ -77,11 +77,11 @@ public:
     // （下次 syncToPhysics 发出）。
     bool placeBlock(const engine::shared::BlockPos& p, engine::shared::BlockType type);
     bool removeBlock(const engine::shared::BlockPos& p);
+
     // 玩家输入消费：DDA 射线检测 → 命中则放置/破坏。
     void processPlayerInput(const engine::shared::CameraState& cam,
                             const engine::shared::PlayerInput& clicks);
     long long playerActionsProcessed() const;  // 已处理玩家点击次数（断言/诊断）
-
     long long blocksPlaced() const;        // 成功放置次数
     long long blocksRemoved() const;       // 成功破坏次数
     long long placementsRejected() const;  // 放置被拒次数
@@ -91,6 +91,9 @@ public:
 private:
     void maybeLog();
 
+    // 世界（状态层）：方块数据 + 锁 + 查询 + 动作入口（World 内部加锁）。
+    engine::business::World world_;
+
     engine::core::TimeManager& tm_;
     std::atomic<double>        simTime_{ 0.0 };
     std::atomic<long long>     ticks_{0};
@@ -99,14 +102,6 @@ private:
     std::atomic<int>           blockX_{0};
     std::atomic<int>           blockY_{0};
     std::atomic<int>           blockZ_{0};
-    // 方块存储：主世界静态方块 → chunks_（16³ 密集 uint8，空 chunk 不占内存，
-    // 定位 O(1)）。仅业务线程结构性修改；main 线程只读在锁内 ——blocksMutex_ 保护。
-    std::unordered_map<engine::shared::ChunkPos, engine::shared::ChunkData> chunks_;
-    mutable std::mutex blocksMutex_; // const 读函数也要能加锁（blockCount/renderSnapshot）
-
-    // 变更事件流的事件源：本 tick 变脏的 chunk 集合（写操作插入，自动去重）。
-    // flushChanges 在 tick 边界采集打包为 BlockChangeEvent 后清空。
-    std::unordered_set<engine::shared::ChunkPos> dirtyChunksThisTick_;
     std::atomic<long long> changeEventsSent_{0}; // 已发变更事件数
 
     // 待发指令状态机（纯业务线程私有，无需原子）：

@@ -10,17 +10,7 @@ BusinessWorld::BusinessWorld(engine::core::TimeManager& tm)
     : tm_(tm),
       startWall_(std::chrono::steady_clock::now()),
       lastLog_(std::chrono::steady_clock::now()) {
-    // 初始世界：16×16 石头平台（x,z ∈ [-8,7]，y=0，占 [0,1] 顶面 y=1，玩家站上面）。
-    // 数据层 ② 区块化：方块写入 16³ chunk（chunks_ 稀疏映射，空 chunk 不占内存）。
-    auto setBlock = [&](int x, int y, int z, engine::shared::BlockType t) {
-        const engine::shared::BlockPos p{x, y, z};
-        auto& c = chunks_[engine::shared::chunkOf(p)]; // operator[] 缺省构造新 chunk
-        c.atWorld(p) = static_cast<std::uint8_t>(t);
-        c.markDirty(0x01); // 修改跟踪：初始装载标记脏（变更事件流种子）
-    };
-    for (int x = -24; x <= 23; ++x)
-        for (int z = -24; z <= 23; ++z)
-            setBlock(x, 0, z, engine::shared::BlockType::Stone);
+    // 初始世界（48×48 石头平台）由 World 构造函数创建（世界域职责）。
 }
 
 void BusinessWorld::advanceTick(double scale) {
@@ -49,7 +39,7 @@ void BusinessWorld::syncToPhysics(engine::core::SPSCQueue<engine::shared::Physic
         // 全量同步：把业务世界所有方块（含类型/坐标）下发，物理重建静态碰撞体集合。
         // 区块化后从 chunks_ + bodyBlocks_ 现场生成全量列表（协议边界保持 vector<Block>）。
         cmd.type = engine::shared::PhysicsCommand::Type::SyncBlockSet;
-        cmd.blocks = renderSnapshot();
+        cmd.blocks = world_.renderSnapshot();
         if (q.push(cmd)) {
             commandsSent_.fetch_add(1, std::memory_order_relaxed);
             wantSync_ = false;
@@ -79,14 +69,14 @@ void BusinessWorld::syncToPhysics(engine::core::SPSCQueue<engine::shared::Physic
 void BusinessWorld::flushChanges(
     engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& q) {
     // 业务 Tick 边界：把本 tick 变脏的 chunk 聚合为一条变更事件发出（数据层 ② 第四项）。
-    // 事件源 = dirtyChunksThisTick_（写操作插入，自动去重）；发完清空。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    if (dirtyChunksThisTick_.empty()) return;
+    // 事件源 = World 的脏集合（动作写入，自动去重）；push 成功才清空。
+    auto dirty = world_.peekDirtyChunks();
+    if (dirty.empty()) return;
     engine::shared::BlockChangeEvent ev;
     ev.tick = ticks_.load(std::memory_order_relaxed);
-    ev.dirtyChunks.assign(dirtyChunksThisTick_.begin(), dirtyChunksThisTick_.end());
+    ev.dirtyChunks.assign(dirty.begin(), dirty.end());
     if (q.push(ev)) {
-        dirtyChunksThisTick_.clear();
+        world_.clearDirtyChunks();
         changeEventsSent_.fetch_add(1, std::memory_order_relaxed);
     }
     // push 失败（队列满）不清空：下 tick 重试。变更事件可延迟送达，
@@ -134,133 +124,55 @@ int BusinessWorld::blockX() const { return blockX_.load(std::memory_order_relaxe
 int BusinessWorld::blockY() const { return blockY_.load(std::memory_order_relaxed); }
 int BusinessWorld::blockZ() const { return blockZ_.load(std::memory_order_relaxed); }
 
+// ---- 查询：转发 World（数据真源在 World，锁在 World 内部）----
 std::vector<engine::shared::Block> BusinessWorld::renderSnapshot() const {
-    // 第 4 轨只读：与业务线程结构性修改并发，锁内生成一份安全快照。
-    // 数据层 ② 区块化：遍历所有已加载 chunk 的非空气方块。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    std::vector<engine::shared::Block> out;
-    out.reserve(chunks_.size() * 64); // 粗略预留，减少扩容
-    for (const auto& [cp, data] : chunks_) {
-        const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4; // chunk 起点世界坐标
-        for (int i = 0; i < engine::shared::CHUNK_VOLUME; ++i) {
-            const std::uint8_t t = data.blocks[i];
-            if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air)) continue;
-            out.push_back(engine::shared::Block{
-                static_cast<engine::shared::BlockType>(t),
-                engine::shared::BlockPos{bx + (i & 15), by + ((i >> 4) & 15), bz + (i >> 8)},
-                -1}); // 主世界方块 contraptionId 恒 -1（chunk 不存该字段）
-        }
-    }
-    return out;
+    return world_.renderSnapshot();
 }
 std::size_t BusinessWorld::blockCount() const {
-    // main 线程只读（日志/断言）与业务线程结构性修改可能并发——加锁读。
-    // 区块化后 = chunk 非空气方块数。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    std::size_t n = 0;
-    for (const auto& [cp, data] : chunks_) {
-        for (const std::uint8_t t : data.blocks)
-            if (t != static_cast<std::uint8_t>(engine::shared::BlockType::Air)) ++n;
-    }
-    return n;
+    return world_.blockCount();
 }
 std::size_t BusinessWorld::chunkCount() const {
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    return chunks_.size();
+    return world_.chunkCount();
 }
 void BusinessWorld::forEachBlockInAABB(
     const engine::shared::BlockPos& min, const engine::shared::BlockPos& max,
     const std::function<void(const engine::shared::BlockPos&,
                              engine::shared::BlockType)>& fn) const {
-    // 区域查询（跨 chunk；同步/LOD 生成/变更广播共用）：遍历区域内每个坐标，
-    // chunk 定位 O(1)。原型按坐标遍历（区域通常 = chunk 级 16³=4096 次查询，可接受；
-    // 渲染端想烘焙 mesh 时扩展 1 格拉邻居即可，Minetest retrieveBlocks 同思想）。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    for (int x = min.x; x <= max.x; ++x)
-        for (int y = min.y; y <= max.y; ++y)
-            for (int z = min.z; z <= max.z; ++z) {
-                const engine::shared::BlockPos p{x, y, z};
-                const auto it = chunks_.find(engine::shared::chunkOf(p));
-                if (it == chunks_.end()) continue;
-                const std::uint8_t t = it->second.atWorld(p);
-                if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air)) continue;
-                fn(p, static_cast<engine::shared::BlockType>(t));
-            }
+    world_.forEachBlockInAABB(min, max, fn);
 }
 std::uint32_t BusinessWorld::chunkDirtyFlags(const engine::shared::ChunkPos& cp) const {
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    const auto it = chunks_.find(cp);
-    return it == chunks_.end() ? 0u : it->second.dirty;
+    return world_.chunkDirtyFlags(cp);
 }
 std::optional<engine::shared::Block> BusinessWorld::findBlock
 (const engine::shared::BlockPos& p) const {
-    // 调用方需保证无并发写（业务线程持锁调用 / main 在三轨停止后调用）。
-    // 主世界 → chunk 定位 O(1)（chunk 存储只存类型，返回现场构造的 Block）。
-    const auto it = chunks_.find(engine::shared::chunkOf(p));
-    if (it == chunks_.end()) return std::nullopt;
-    const std::uint8_t t = it->second.atWorld(p);
-    if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air))
-        return std::nullopt;
-    return engine::shared::Block{static_cast<engine::shared::BlockType>(t), p, -1};
+    return world_.findBlock(p);
 }
+
+// ---- 动作：薄壳（裁决/写入/标脏在 World→base；这里只管计数 + 排队指令）----
 bool BusinessWorld::placeBlock(const engine::shared::BlockPos& p,
                                engine::shared::BlockType type) {
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    // 裁决：位置已被占用 → 拒绝放置。
-    if (findBlock(p).has_value()) {
+    if (!world_.placeBlock(p, type)) {
         placementsRejected_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    // 区块化：主世界 → chunk 写入（16³ 密集数组，O(1)）。
-    const auto cp = engine::shared::chunkOf(p);
-    auto& c = chunks_[cp];
-    c.atWorld(p) = static_cast<std::uint8_t>(type);
-    c.markDirty(0x08);              // 修改跟踪：放置标记脏（持久留档）
-    // 脏区块边界写入
-    dirtyChunksThisTick_.insert(cp); // 变更事件流：本 tick 事件源
-    const int lx = p.x & 15, ly = p.y & 15, lz = p.z & 15;
-    if (lx == 0)  dirtyChunksThisTick_.insert({ cp.x - 1, cp.y, cp.z });
-    if (lx == 15) dirtyChunksThisTick_.insert({ cp.x + 1, cp.y, cp.z });
-    if (ly == 0)  dirtyChunksThisTick_.insert({ cp.x, cp.y - 1, cp.z });
-    if (ly == 15) dirtyChunksThisTick_.insert({ cp.x, cp.y + 1, cp.z });
-    if (lz == 0)  dirtyChunksThisTick_.insert({ cp.x, cp.y, cp.z - 1 });
-    if (lz == 15) dirtyChunksThisTick_.insert({ cp.x, cp.y, cp.z + 1 });
-    blocksPlaced_.fetch_add(1, std::memory_order_relaxed);
     // 自动排队 PlaceBlock 指令（下次 syncToPhysics 发出）。
     // 原型注意：若上一条指令因队列满未发出，本请求会覆盖待发坐标（低概率，接受）。
     wantPlace_ = true;
     placePos_ = p;
     placeType_ = static_cast<int>(type);
+    blocksPlaced_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
 bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p) {
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    // 裁决：目标方块必须存在。主世界 → chunk 定位 O(1) 删除。
-    auto it = chunks_.find(engine::shared::chunkOf(p));
-    if (it == chunks_.end() ||
-        it->second.atWorld(p) ==
-            static_cast<std::uint8_t>(engine::shared::BlockType::Air)) {
+    if (!world_.removeBlock(p)) {
         removalsRejected_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    it->second.atWorld(p) =
-        static_cast<std::uint8_t>(engine::shared::BlockType::Air);
-    it->second.markDirty(0x10);              // 修改跟踪：破坏标记脏（持久留档）
-    const auto cp = it->first;
-    dirtyChunksThisTick_.insert(cp);  // 变更事件流：本 tick 事件源
-    //判断是否边界写入
-    const int lx = p.x & 15, ly = p.y & 15, lz = p.z & 15;
-    if (lx == 0)  dirtyChunksThisTick_.insert({ cp.x - 1, cp.y, cp.z });
-    if (lx == 15) dirtyChunksThisTick_.insert({ cp.x + 1, cp.y, cp.z });
-    if (ly == 0)  dirtyChunksThisTick_.insert({ cp.x, cp.y - 1, cp.z });
-    if (ly == 15) dirtyChunksThisTick_.insert({ cp.x, cp.y + 1, cp.z });
-    if (lz == 0)  dirtyChunksThisTick_.insert({ cp.x, cp.y, cp.z - 1 });
-    if (lz == 15) dirtyChunksThisTick_.insert({ cp.x, cp.y, cp.z + 1 });
-    blocksRemoved_.fetch_add(1, std::memory_order_relaxed);
     // 自动排队 RemoveBlock 指令（下次 syncToPhysics 发出）。
     wantRemove_ = true;
     removePos_ = p;
+    blocksRemoved_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
