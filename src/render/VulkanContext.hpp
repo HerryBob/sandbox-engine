@@ -45,13 +45,23 @@ struct UniformBufferObject {
 // 一个 chunk 的网格（GPU 资源 + 计数）。key = ChunkPos（Block.hpp 已提供 hash）。
 // 增量重建：每个 chunk 独立持有自己的顶点/索引缓冲，脏 chunk 只重建自己那份；
 // 全量接口保留为"重建全部 chunk"（首帧/世界重建用）。
+// 分桶：一个 chunk 可同时持有 Solid 桶 + Cutout 桶两组网格（玻璃等），
+//       重建/销毁同一个对象，生命周期原子化（不拆两个 map）。
 struct ChunkMesh {
+    // Solid 桶（不透明，默认桶）
     VkBuffer       vertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
     VkBuffer       indexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory indexMemory = VK_NULL_HANDLE;
     uint32_t       vertexCount = 0;
     uint32_t       indexCount = 0;
+    // Cutout 桶（镂空/透明方块，如玻璃）：独立一组 GPU 资源 + 计数
+    VkBuffer       cutoutVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory cutoutVertexMemory = VK_NULL_HANDLE;
+    VkBuffer       cutoutIndexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory cutoutIndexMemory = VK_NULL_HANDLE;
+    uint32_t       cutoutVertexCount = 0;
+    uint32_t       cutoutIndexCount = 0;
 };
 
 class VulkanContext {
@@ -97,6 +107,7 @@ public:
     std::uint64_t framesPresented() const { return framesPresented_; }
     VkRenderPass  renderPass() const { return renderPass_; }
     VkPipeline    pipeline() const { return pipeline_; }
+    VkPipeline    cutoutPipeline() const { return cutoutPipeline_; }
     VkDescriptorSet descriptorSet() const { return descSet_; }
     bool rebuildMeshFromBlocks(const std::vector<engine::shared::Block>& blocks); // 修改为增量重建chunk
     void requestChunkRebuild(const std::vector<engine::shared::Block>& blocks,
@@ -170,6 +181,7 @@ private:
     VkRenderPass         renderPass_ = VK_NULL_HANDLE;
     VkPipelineLayout     pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline           pipeline_ = VK_NULL_HANDLE;
+    VkPipeline           cutoutPipeline_ = VK_NULL_HANDLE;  // Cutout 桶管线（cull NONE 双面）
     bool                 framebufferResized_ = false; // 窗口尺寸变化标志（GLFW 回调置位）
     std::vector<VkFramebuffer> framebuffers_;
     // 增量重建：每 chunk 一份网格（旧全局 buffer 逐步替换；chunk 空则无条目）。

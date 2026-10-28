@@ -13,6 +13,7 @@ enum class BlockType : std::uint8_t {
     Wood,      // 木头
     Dirt,      // 泥土
     Brick,     // 砖块（注册表扩展性验收：新增方块只动枚举+注册表）
+    Glass,     // 玻璃
 };
 
 // 方块坐标：整数格坐标（世界格子坐标系）。

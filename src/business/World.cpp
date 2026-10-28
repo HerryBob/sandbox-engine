@@ -18,6 +18,8 @@ World::World() {
     for (int x = -24; x <= 23; ++x)
         for (int z = -24; z <= 23; ++z)
             setBlock(x, 0, z, engine::shared::BlockType::Stone);
+    // 测试块：玻璃（Cutout 分桶验证——悬浮平台上方一格，6 面全暴露）
+    setBlock(0, 1, 0, engine::shared::BlockType::Glass);
 }
 
 std::size_t World::blockCount() const {

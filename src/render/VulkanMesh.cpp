@@ -16,7 +16,8 @@ namespace engine::render::mesh {
         {0,0,1}, {0,1,0}, {1,0,0}, {0,0,1}, {0,1,0}, {1,0,0}
     }; // 副轴
 
-    std::vector<Vertex> buildCubeVertices(const glm::vec3& offset, std::uint8_t faceMask) {
+    std::vector<Vertex> buildCubeVertices(const glm::vec3& offset, std::uint8_t faceMask,
+                                          const std::optional<glm::vec3>& tint) {
         const glm::vec2 faceUV[4] = {                 // 每面 4 角的纹理坐标
             {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}
         };
@@ -41,8 +42,9 @@ namespace engine::render::mesh {
                     center + (+kFaceU[f] + kFaceV[f]) * h,   // 右上
                     center + (-kFaceU[f] + kFaceV[f]) * h,   // 左上
                 };
+                const glm::vec3 col = tint.value_or(c[f]);  // 无 tint = 默认逐面色
                 for (int i = 0; i < 4; ++i)
-                    verts.push_back(Vertex{ p[i], c[f], faceUV[i] });
+                    verts.push_back(Vertex{ p[i], col, faceUV[i] });
             }
         return verts;
     }

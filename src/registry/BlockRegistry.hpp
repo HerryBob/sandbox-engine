@@ -10,16 +10,19 @@ namespace engine::registry {
     inline void initBlockRegistry() {
         g_blockRegistry.add(
             static_cast<std::uint8_t>(engine::shared::BlockType::Stone),
-            { "stone", true, 1.5f });
+            { "stone", true, 1.5f, RenderType::Solid });
         g_blockRegistry.add(
             static_cast<std::uint8_t>(engine::shared::BlockType::Wood),
-            { "wood", true, 2.0f });
+            { "wood", true, 2.0f, RenderType::Solid });
         g_blockRegistry.add(
             static_cast<std::uint8_t>(engine::shared::BlockType::Dirt),
-            { "dirt", true, 0.5f });
+            { "dirt", true, 0.5f, RenderType::Solid });
         g_blockRegistry.add(
             static_cast<std::uint8_t>(engine::shared::BlockType::Brick),
-            { "brick", true, 2.0f });
+            { "brick", true, 2.0f, RenderType::Solid });
+        g_blockRegistry.add(
+           static_cast<std::uint8_t>(engine::shared::BlockType::Glass),
+            {"glass", false, 0.5f, RenderType::Cutout});
         g_blockRegistry.freeze();   // 锁表（免锁读前提）
     }
 }

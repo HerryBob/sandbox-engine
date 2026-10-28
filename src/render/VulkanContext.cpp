@@ -574,7 +574,13 @@ bool VulkanContext::createPipeline() {
     pipelineInfo.renderPass = renderPass_;
     pipelineInfo.subpass = 0;
 
-    const VkResult r = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_);
+    // 双管线批量创建：Solid（cull BACK）+ Cutout（cull NONE，双面——玻璃薄片两面可见）
+    VkPipelineRasterizationStateCreateInfo cutoutRasterizer = rasterizer;
+    cutoutRasterizer.cullMode = VK_CULL_MODE_NONE;
+    VkGraphicsPipelineCreateInfo pipelines[2] = { pipelineInfo, pipelineInfo };
+    pipelines[1].pRasterizationState = &cutoutRasterizer;
+    VkPipeline out[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    const VkResult r = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 2, pipelines, nullptr, out);
     vkDestroyShaderModule(device_, vert, nullptr);
     vkDestroyShaderModule(device_, frag, nullptr);
     if (r != VK_SUCCESS) {
@@ -583,7 +589,9 @@ bool VulkanContext::createPipeline() {
         LOG_ERROR(os.str());
         return false;
     }
-    LOG_INFO("[Vulkan] 图形管线创建成功（顶点着色器/片元着色器已编译）");
+    pipeline_ = out[0];
+    cutoutPipeline_ = out[1];
+    LOG_INFO("[Vulkan] 图形管线创建成功（Solid + Cutout 双管线）");
     return true;
 }
 
@@ -635,13 +643,19 @@ void VulkanContext::requestChunkRebuild(const std::vector<engine::shared::Block>
     chunkRebuildRequested_.store(true, std::memory_order_relaxed);
 }
 
-//销毁一个chunk的GPU资源
+//销毁一个chunk的GPU资源（Solid + Cutout 两组都销毁）
 static void destroyChunkMesh(VkDevice device, ChunkMesh& m) {
+    // Solid 组
     if (m.vertexBuffer) vkDestroyBuffer(device, m.vertexBuffer, nullptr);
     if (m.vertexMemory) vkFreeMemory(device, m.vertexMemory, nullptr);
     if (m.indexBuffer)  vkDestroyBuffer(device, m.indexBuffer, nullptr);
     if (m.indexMemory)  vkFreeMemory(device, m.indexMemory, nullptr);
-    m = {}; // 全部回零
+    // Cutout 组
+    if (m.cutoutVertexBuffer) vkDestroyBuffer(device, m.cutoutVertexBuffer, nullptr);
+    if (m.cutoutVertexMemory) vkFreeMemory(device, m.cutoutVertexMemory, nullptr);
+    if (m.cutoutIndexBuffer)  vkDestroyBuffer(device, m.cutoutIndexBuffer, nullptr);
+    if (m.cutoutIndexMemory)  vkFreeMemory(device, m.cutoutIndexMemory, nullptr);
+    m = {}; // 全部回零（Solid + Cutout 一并）
 }
 
 //dirtychunks 更新
@@ -678,26 +692,39 @@ bool VulkanContext::rebuildChunkMeshes(
                 b.pos.z >= bz && b.pos.z < bz + 16)
                 chunkBlocks.push_back(b);
         }
-        //生成chunk的顶点和索引
-        std::vector<Vertex> vertices;
-        std::vector<uint32_t> indices;
+        //生成chunk的顶点和索引（分桶：Solid 默认组 / Cutout 透明组）
+        std::vector<Vertex> vertices;           // Solid 组顶点
+        std::vector<uint32_t> indices;          // Solid 组索引
+        std::vector<Vertex> cutoutVerts;        // Cutout 组顶点（玻璃等）
+        std::vector<uint32_t> cutoutIndices;    // Cutout 组索引
         uint32_t vertexOffset = 0;
+        uint32_t cutoutVertexOffset = 0;
         for (const auto& block : chunkBlocks) {
             const glm::vec3 center{block.pos.x + 0.5f, block.pos.y + 0.5f, block.pos.z + 0.5f};
+            // 查注册表：renderType 决定进哪个桶（认属性不认方块身份）
+            const auto* info = engine::registry::g_blockRegistry.find(
+                static_cast<std::uint8_t>(block.type));
+            const bool isCutout = info && info->renderType == engine::registry::RenderType::Cutout;
+            auto& dstVerts   = isCutout ? cutoutVerts : vertices;
+            auto& dstIndices = isCutout ? cutoutIndices : indices;
+            auto& dstOffset  = isCutout ? cutoutVertexOffset : vertexOffset;
+            // 玻璃整体淡蓝；solid 不传 tint 用默认逐面色
+            const std::optional<glm::vec3> tint =
+                isCutout ? std::optional<glm::vec3>{glm::vec3{0.55f, 0.75f, 0.95f}} : std::nullopt;
             const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
-            auto vs = mesh::buildCubeVertices(center, faceMask);
-            vertices.insert(vertices.end(), vs.begin(), vs.end());
+            auto vs = mesh::buildCubeVertices(center, faceMask, tint);
+            dstVerts.insert(dstVerts.end(), vs.begin(), vs.end());
             const uint32_t faceCount = static_cast<uint32_t>(vs.size() / 4);
             for (uint32_t f = 0; f < faceCount; ++f) {
-                const uint32_t b0 = vertexOffset + f * 4;
-                indices.push_back(b0 + 0); indices.push_back(b0 + 1); indices.push_back(b0 + 2);
-                indices.push_back(b0 + 0); indices.push_back(b0 + 2); indices.push_back(b0 + 3);
+                const uint32_t b0 = dstOffset + f * 4;
+                dstIndices.push_back(b0 + 0); dstIndices.push_back(b0 + 1); dstIndices.push_back(b0 + 2);
+                dstIndices.push_back(b0 + 0); dstIndices.push_back(b0 + 2); dstIndices.push_back(b0 + 3);
             }
-            vertexOffset += static_cast<uint32_t>(vs.size());
+            dstOffset += static_cast<uint32_t>(vs.size());
         }
         //无chunk 删除旧网格, 继续下一个
         auto it =  chunkMeshes_.find(cp);
-        if (vertices.empty()) {
+        if (vertices.empty() && cutoutVerts.empty()) {
             if (it != chunkMeshes_.end()) {
                 destroyChunkMesh(device_, it->second);
                 chunkMeshes_.erase(it);
@@ -710,6 +737,7 @@ bool VulkanContext::rebuildChunkMeshes(
             chunkMeshes_.erase(it);
         }
         ChunkMesh m;
+        // Solid 组 buffer
         if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * vertices.size(),
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -722,13 +750,29 @@ bool VulkanContext::rebuildChunkMeshes(
         util::mapAndCopy(device_, m.indexMemory, sizeof(uint32_t) * indices.size(), indices.data());
         m.vertexCount = static_cast<uint32_t>(vertices.size());
         m.indexCount = static_cast<uint32_t>(indices.size());
+        // Cutout 组 buffer（无 cutout 面则跳过，保持 NULL 句柄）
+        if (!cutoutVerts.empty()) {
+            if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * cutoutVerts.size(),
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                m.cutoutVertexBuffer, m.cutoutVertexMemory)) return false;
+            util::mapAndCopy(device_, m.cutoutVertexMemory, sizeof(Vertex) * cutoutVerts.size(), cutoutVerts.data());
+            if (!util::createBuffer(device_, physicalDevice_, sizeof(uint32_t) * cutoutIndices.size(),
+                VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                m.cutoutIndexBuffer, m.cutoutIndexMemory)) return false;
+            util::mapAndCopy(device_, m.cutoutIndexMemory, sizeof(uint32_t) * cutoutIndices.size(), cutoutIndices.data());
+            m.cutoutVertexCount = static_cast<uint32_t>(cutoutVerts.size());
+            m.cutoutIndexCount = static_cast<uint32_t>(cutoutIndices.size());
+        }
         chunkMeshes_[cp] = m;
 
-        //重建日志
+        //重建日志（面数 = Solid + Cutout）
         {
             std::ostringstream os;
             os << "[Vulkan] 重建 chunk=(" << cp.x << "," << cp.y << "," << cp.z
-                << ") 面=" << m.indexCount / 6 << " 顶点=" << m.vertexCount;
+                << ") 面=" << (m.indexCount + m.cutoutIndexCount) / 6
+                << " 顶点=" << (m.vertexCount + m.cutoutVertexCount);
             LOG_INFO(os.str());
         }
     }
@@ -1047,7 +1091,6 @@ bool VulkanContext::drawFrame() {
     renderPassBeginInfo.clearValueCount = 2;
     renderPassBeginInfo.pClearValues = clears;
     vkCmdBeginRenderPass(cmdBuffers_[frame], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     // 动态 viewport/scissor：用当前交换链尺寸（resize 后自动适配，管线无需重建）
     VkViewport vp{};
     vp.x = 0.0f; vp.y = 0.0f;
@@ -1057,14 +1100,28 @@ bool VulkanContext::drawFrame() {
     vkCmdSetViewport(cmdBuffers_[frame], 0, 1, &vp);
     VkRect2D scissor{{0, 0}, swapchainExtent_};
     vkCmdSetScissor(cmdBuffers_[frame], 0, 1, &scissor);
+    // 描述符（UBO+纹理）：双管线共用同一 layout/descSet，绑定一次即可
     vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &descSet_, 0, nullptr);
 
+    // 第一趟：Solid 桶（不透明先画，写深度建立遮挡基准）
+    vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     for (const auto& [cp, m] : chunkMeshes_) {
+        if (m.vertexCount == 0) continue;   // 无 Solid 面跳过
         VkDeviceSize vbOffset = 0;
         vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &m.vertexBuffer, &vbOffset);
         vkCmdBindIndexBuffer(cmdBuffers_[frame], m.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmdBuffers_[frame], m.indexCount, 1, 0, 0, 0); // 每个 chunk 一个 draw
+        vkCmdDrawIndexed(cmdBuffers_[frame], m.indexCount, 1, 0, 0, 0);
+    }
+
+    // 第二趟：Cutout 桶（透明/镂空后画，双面 cull NONE）
+    vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, cutoutPipeline_);
+    for (const auto& [cp, m] : chunkMeshes_) {
+        if (m.cutoutVertexCount == 0) continue;   // 无 Cutout 面跳过
+        VkDeviceSize vbOffset = 0;
+        vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &m.cutoutVertexBuffer, &vbOffset);
+        vkCmdBindIndexBuffer(cmdBuffers_[frame], m.cutoutIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmdBuffers_[frame], m.cutoutIndexCount, 1, 0, 0, 0);
     }
 
     vkCmdEndRenderPass(cmdBuffers_[frame]);
@@ -1165,6 +1222,7 @@ void VulkanContext::destroyRenderObjects() {
     if (textureImage_) { vkDestroyImage(device_, textureImage_, nullptr); textureImage_ = VK_NULL_HANDLE; }
     if (textureImageMemory_) { vkFreeMemory(device_, textureImageMemory_, nullptr); textureImageMemory_ = VK_NULL_HANDLE; }
     if (pipeline_) { vkDestroyPipeline(device_, pipeline_, nullptr); pipeline_ = VK_NULL_HANDLE; }
+    if (cutoutPipeline_) { vkDestroyPipeline(device_, cutoutPipeline_, nullptr); cutoutPipeline_ = VK_NULL_HANDLE; }
     if (pipelineLayout_) { vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr); pipelineLayout_ = VK_NULL_HANDLE; }
     if (renderPass_) { vkDestroyRenderPass(device_, renderPass_, nullptr); renderPass_ = VK_NULL_HANDLE; }
     destroyUniformObjects(); // UBO/描述符（在管线/命令之后释放）
