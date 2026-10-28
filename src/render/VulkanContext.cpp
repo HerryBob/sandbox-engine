@@ -709,10 +709,8 @@ bool VulkanContext::rebuildChunkMeshes(
             auto& dstIndices = isCutout ? cutoutIndices : indices;
             auto& dstOffset  = isCutout ? cutoutVertexOffset : vertexOffset;
             // 玻璃整体淡蓝；solid 不传 tint 用默认逐面色
-            const std::optional<glm::vec3> tint =
-                isCutout ? std::optional<glm::vec3>{glm::vec3{0.55f, 0.75f, 0.95f}} : std::nullopt;
             const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
-            auto vs = mesh::buildCubeVertices(center, faceMask, tint);
+            auto vs = mesh::buildCubeVertices(center, faceMask);
             dstVerts.insert(dstVerts.end(), vs.begin(), vs.end());
             const uint32_t faceCount = static_cast<uint32_t>(vs.size() / 4);
             for (uint32_t f = 0; f < faceCount; ++f) {
@@ -806,7 +804,7 @@ bool VulkanContext::createCommandObjects() {
 // 纹理图像：staging 搬运（加载 PNG → 上传显存 → 转 SHADER_READ_ONLY）
 bool VulkanContext::createTextureImage() {
     int w = 0, h = 0, ch = 0;
-    stbi_uc* pixels = stbi_load("textures/grass_side.png", &w, &h, &ch, STBI_rgb_alpha);
+    stbi_uc* pixels = stbi_load("textures/default.png", &w, &h, &ch, STBI_rgb_alpha);
     if (!pixels) { LOG_ERROR("[Vulkan] stbi_load 纹理失败"); return false; }
     texWidth_ = static_cast<uint32_t>(w);
     texHeight_ = static_cast<uint32_t>(h);

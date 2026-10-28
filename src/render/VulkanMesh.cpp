@@ -16,19 +16,13 @@ namespace engine::render::mesh {
         {0,0,1}, {0,1,0}, {1,0,0}, {0,0,1}, {0,1,0}, {1,0,0}
     }; // 副轴
 
-    std::vector<Vertex> buildCubeVertices(const glm::vec3& offset, std::uint8_t faceMask,
-                                          const std::optional<glm::vec3>& tint) {
+    std::vector<Vertex> buildCubeVertices(const glm::vec3& offset, std::uint8_t faceMask) {
         const glm::vec2 faceUV[4] = {                 // 每面 4 角的纹理坐标
             {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}
         };
-        const glm::vec3 c[6] = {
-            {1.00f, 0.55f, 0.20f}, // +X 橙（木面）
-            {0.55f, 0.35f, 0.15f}, // -X 深棕
-            {0.75f, 0.60f, 0.35f}, // +Y 浅棕（顶）
-            {0.45f, 0.30f, 0.15f}, // -Y 深棕（底）
-            {0.85f, 0.50f, 0.25f}, // +Z 中棕
-            {0.35f, 0.22f, 0.12f}, // -Z 最深棕
-        };
+        // 颜色责任已移交纹理（片元着色器仅采样纹理，不读顶点色）。
+        // 顶点色保留 {1,1,1} 白色作为占位调制因子，未来光照/调色可复用。
+        const glm::vec3 color{1.0f, 1.0f, 1.0f};
         const float h = 0.5f; // 半边长
         std::vector<Vertex> verts;
         verts.reserve(static_cast<size_t>(std::popcount(faceMask))*4);
@@ -42,9 +36,8 @@ namespace engine::render::mesh {
                     center + (+kFaceU[f] + kFaceV[f]) * h,   // 右上
                     center + (-kFaceU[f] + kFaceV[f]) * h,   // 左上
                 };
-                const glm::vec3 col = tint.value_or(c[f]);  // 无 tint = 默认逐面色
                 for (int i = 0; i < 4; ++i)
-                    verts.push_back(Vertex{ p[i], col, faceUV[i] });
+                    verts.push_back(Vertex{ p[i], color, faceUV[i] });
             }
         return verts;
     }

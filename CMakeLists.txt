@@ -73,9 +73,9 @@ add_custom_command(TARGET sandbox_engine POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:sandbox_engine>/textures"
 )
 # 纹理为可选资源：公开仓库不含 MC 版权纹理，本机构建时存在则复制（缺省不影响编译）
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/textures/grass_side.png")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/textures/default.png")
     add_custom_command(TARGET sandbox_engine POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/textures/grass_side.png" "$<TARGET_FILE_DIR:sandbox_engine>/textures/grass_side.png"
+            "${CMAKE_CURRENT_SOURCE_DIR}/textures/default.png" "$<TARGET_FILE_DIR:sandbox_engine>/textures/default.png"
     )
 endif()
