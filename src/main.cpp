@@ -2,8 +2,9 @@
 // 引擎本体在 core/business/physics/input/render；本文件只做装配：
 //   Vulkan 上下文 → 进程内 SPSC 队列 → 四线程启动 → 主线程 GLFW 事件循环 → 优雅停止。
 #include "business/BusinessWorld.hpp"
+#include "business/PhysicsBridge.hpp"
+#include "business/RenderBridge.hpp"
 #include "core/Log.hpp"
-#include "core/SPSCQueue.hpp"
 #include "core/ThreadLoop.hpp"
 #include "core/TimeManager.hpp"
 #include "input/InputSampler.hpp"
@@ -70,11 +71,11 @@ static int run() {
 
     // 全局 time_scale 单实例，三条轨共享
     core::TimeManager tm;
-    // 进程内无锁队列（单机模式）
-    core::SPSCQueue<shared::PhysicsCommand> businessToPhysics(512);
-    core::SPSCQueue<shared::PhysicsResult>  physicsToBusiness(512);
-    // 业务 → 渲染变更事件流（第 4 轨只读增量通道）
-    core::SPSCQueue<shared::BlockChangeEvent> businessToRender(256);
+    // 桥（通信层）：跨线程数据唯一通道，由装配层创建并分发端点。
+    //   PhysicsBridge = B1 物理指令（业务→物理）+ B2 回执（物理→业务）+ 指令状态机
+    //   RenderBridge  = B3 变更事件（业务→渲染）
+    business::PhysicsBridge physicsBridge;
+    business::RenderBridge  renderBridge;
 
     // 玩家输入共享槽（按职责拆分）：
     //   CameraState：相机位置/视角（输入线程写；渲染算 MVP、业务做射线，只读）；
@@ -83,12 +84,12 @@ static int run() {
     shared::PlayerInput  playerInput;
     vkCtx.attachCameraState(&cameraState);
 
-    business::BusinessWorld businessWorld(tm);
+    business::BusinessWorld businessWorld(tm, physicsBridge, renderBridge);
     physics::PhysicsWorld   physicsWorld(tm);
     input::InputSampler inputSampler;
     inputSampler.attach(vkCtx.window(), &cameraState, &playerInput); // 注册键盘/鼠标回调（真实输入，主线程安全）
     // 渲染线程（第 4 轨只读观众）：消费变更事件流 + 绘制。
-    engine::render::Renderer renderer(businessWorld, businessToRender, vkCtx);
+    engine::render::Renderer renderer(businessWorld, renderBridge.changeEventQueue(), vkCtx);
 
     // 初始世界：飞船演示数据已删除（2026-10-24），地形生成后在此填充。
     std::cout << "初始世界：方块=" << businessWorld.blockCount() << "\n";
@@ -104,9 +105,9 @@ static int run() {
         while (!businessLoop.shouldStop()) {
             businessWorld.advanceTick(tm.effectiveScale(core::Domain::Business));
             businessWorld.processPlayerInput(cameraState, playerInput);  // 玩家点击 → DDA → 放置/破坏
-            businessWorld.syncToPhysics(businessToPhysics);       // 发指令 → 物理
-            businessWorld.receiveFromPhysics(physicsToBusiness);  // 收结果 ← 物理
-            businessWorld.flushChanges(businessToRender);         // 变更事件 → 渲染
+            businessWorld.syncToPhysics();       // 发指令 → 物理（经 PhysicsBridge）
+            businessWorld.receiveFromPhysics();  // 收结果 ← 物理（经 PhysicsBridge）
+            businessWorld.flushChanges();        // 变更事件 → 渲染（经 RenderBridge）
             next += std::chrono::milliseconds(40);
             std::this_thread::sleep_until(next);
         }
@@ -121,8 +122,8 @@ static int run() {
                 std::chrono::duration<double>(now - prev).count();
             prev = now;
             physicsWorld.advance(tm.effectiveScale(core::Domain::Physics), wallDt,
-                                 businessToPhysics);
-            physicsWorld.syncToBusiness(physicsToBusiness);
+                                 physicsBridge.commandQueue());
+            physicsWorld.syncToBusiness(physicsBridge.resultQueue());
             std::this_thread::sleep_for(std::chrono::milliseconds(1)); // 避免忙等
         }
     });

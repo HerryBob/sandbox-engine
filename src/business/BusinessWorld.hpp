@@ -1,10 +1,10 @@
 #pragma once
+#include "business/PhysicsBridge.hpp"
+#include "business/RenderBridge.hpp"
 #include "business/World.hpp"
-#include "core/SPSCQueue.hpp"
 #include "core/TimeManager.hpp"
 #include "shared/block/Block.hpp"
 #include "shared/state/CameraState.hpp"
-#include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerInput.hpp"
 
 #include <atomic>
@@ -17,26 +17,29 @@ namespace engine::business {
 
 // 业务世界（25TPS，dt=0.04s）：业务线程的调度器。
 // 职责：推进 sim_time/tick、裁决方块存在性与类型（委托 World）、
-//       编排三座桥（物理指令/回执、渲染变更事件）与玩家输入消费。
+//       编排两座桥（PhysicsBridge B1+B2、RenderBridge B3）与玩家输入消费。
 // 本类只提供命令式接口，事件源（玩家/脚本/后续模组）自行调用。
-// 工作模式：请求 → 委托 World 裁决 → 排队指令 → syncToPhysics 在 tick 边界发出。
-// 数据真源在 World（world_）；本类不含任何方块存储与锁。
+// 工作模式：请求 → 委托 World 裁决 → 委托 PhysicsBridge 排队 → tick 边界发桥。
+// 数据真源在 World（world_）；跨线程通道在桥（physicsBridge_/renderBridge_）；
+// 本类不含任何方块存储、锁与队列。
 class BusinessWorld {
 public:
-    explicit BusinessWorld(engine::core::TimeManager& tm);
+    BusinessWorld(engine::core::TimeManager& tm,
+                  PhysicsBridge& physicsBridge,
+                  RenderBridge& renderBridge);
 
     // 推进一个业务 tick：simTime += 0.04 * scale（scale 来自 TimeManager::effectiveScale）。
     void advanceTick(double scale);
 
-    // tick 边界：把本 tick 排队的指令（全量同步/放置/破坏）发给物理线程。
-    void syncToPhysics(engine::core::SPSCQueue<engine::shared::PhysicsCommand>& q);
+    // tick 边界：委托 PhysicsBridge 把待发指令（全量同步/放置/破坏）发给物理线程。
+    void syncToPhysics();
 
-    // tick 边界：收取物理回执（位置快照/碰撞体数量）。
-    void receiveFromPhysics(engine::core::SPSCQueue<engine::shared::PhysicsResult>& q);
+    // tick 边界：委托 PhysicsBridge 收取物理回执（位置快照/碰撞体数量）。
+    void receiveFromPhysics();
 
-    // tick 边界：把本 tick 变脏的 chunk 聚合为一条变更事件发给渲染端（第 4 轨只读）。
-    // 渲染端消费后只重建变过的 chunk mesh，不做全量重绘。
-    void flushChanges(engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& q);
+    // tick 边界：委托 RenderBridge 把本 tick 变脏的 chunk 聚合为一条变更事件
+    // 发给渲染端（第 4 轨只读）。渲染端消费后只重建变过的 chunk mesh。
+    void flushChanges();
     long long changeEventsSent() const; // 已发变更事件数（断言/诊断）
 
     // ---- 命令式接口（演示/玩家/脚本事件源共用）----
@@ -93,26 +96,14 @@ private:
 
     // 世界（状态层）：方块数据 + 锁 + 查询 + 动作入口（World 内部加锁）。
     engine::business::World world_;
+    // 桥（通信层）：跨线程数据唯一通道。由装配层（main）创建并注入，
+    // 本类只负责在 tick 边界委托调用（syncToPhysics/receiveFromPhysics/flushChanges）。
+    engine::business::PhysicsBridge& physicsBridge_;
+    engine::business::RenderBridge&  renderBridge_;
 
     engine::core::TimeManager& tm_;
     std::atomic<double>        simTime_{ 0.0 };
     std::atomic<long long>     ticks_{0};
-    std::atomic<long long>     commandsSent_{0};
-    std::atomic<long long>     resultsReceived_{0};
-    std::atomic<int>           blockX_{0};
-    std::atomic<int>           blockY_{0};
-    std::atomic<int>           blockZ_{0};
-    std::atomic<long long> changeEventsSent_{0}; // 已发变更事件数
-
-    // 待发指令状态机（纯业务线程私有，无需原子）：
-    bool wantSync_ = false;      // 待发全量同步指令（syncAll）
-
-    // 放置/破坏待发指令（裁决通过后自动排队，下次 syncToPhysics 发出）：
-    bool wantPlace_ = false;                  // 待发放置指令
-    engine::shared::BlockPos placePos_;       // 放置坐标
-    int  placeType_ = 0;                      // 放置类型（BlockType 底层值）
-    bool wantRemove_ = false;                 // 待发破坏指令
-    engine::shared::BlockPos removePos_;      // 破坏坐标
 
     long long lastProcessedClickSeq_ = 0;      // 上次已处理点击序号（去重：一帧只处理一次）
     std::atomic<long long> playerActions_{ 0 };  // 已处理玩家点击计数
@@ -121,7 +112,6 @@ private:
     std::atomic<long long> blocksRemoved_{0};      // 成功破坏次数
     std::atomic<long long> placementsRejected_{0}; // 放置被拒次数
     std::atomic<long long> removalsRejected_{0};   // 破坏被拒次数
-    std::atomic<long long> physicsBlockCount_{0};  // 物理碰撞体数量快照
     std::chrono::steady_clock::time_point startWall_; // 墙钟起点（tps 墙钟口径用）
     std::chrono::steady_clock::time_point lastLog_;
 };

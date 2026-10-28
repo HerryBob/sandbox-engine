@@ -6,8 +6,13 @@
 
 namespace engine::business {
 
-BusinessWorld::BusinessWorld(engine::core::TimeManager& tm)
-    : tm_(tm),
+BusinessWorld::BusinessWorld(engine::core::TimeManager& tm,
+                             PhysicsBridge& physicsBridge,
+                             RenderBridge& renderBridge)
+    : world_(),
+      physicsBridge_(physicsBridge),
+      renderBridge_(renderBridge),
+      tm_(tm),
       startWall_(std::chrono::steady_clock::now()),
       lastLog_(std::chrono::steady_clock::now()) {
     // 初始世界（48×48 石头平台）由 World 构造函数创建（世界域职责）。
@@ -24,88 +29,27 @@ void BusinessWorld::advanceTick(double scale) {
 }
 
 bool BusinessWorld::syncAll() {
-    // 请求全量同步：排队一条 SyncBlockSet（初始世界/世界重建时用）。
+    // 请求全量同步：委托桥排队一条 SyncBlockSet（初始世界/世界重建时用）。
     // 返回 false 表示已有待发指令（原型：一次只排一条，防止覆盖）。
-    if (wantSync_ || wantPlace_ || wantRemove_) return false;
-    wantSync_ = true;
-    return true;
+    return physicsBridge_.queueSync();
 }
 
-void BusinessWorld::syncToPhysics(engine::core::SPSCQueue<engine::shared::PhysicsCommand>& q) {
-    // 业务 Tick 边界：下发指令。一次只发一条（原型节奏），
-    // 优先级：全量同步 → 放置 → 破坏（MoveBlock 演示已移除，物理不再收到移动指令）。
-    engine::shared::PhysicsCommand cmd;
-    if (wantSync_) {
-        // 全量同步：把业务世界所有方块（含类型/坐标）下发，物理重建静态碰撞体集合。
-        // 区块化后从 chunks_ + bodyBlocks_ 现场生成全量列表（协议边界保持 vector<Block>）。
-        cmd.type = engine::shared::PhysicsCommand::Type::SyncBlockSet;
-        cmd.blocks = world_.renderSnapshot();
-        if (q.push(cmd)) {
-            commandsSent_.fetch_add(1, std::memory_order_relaxed);
-            wantSync_ = false;
-        }
-    } else if (wantPlace_) {
-        // 放置指令：业务裁决已通过（位置合法），物理建静态碰撞体。
-        cmd.type = engine::shared::PhysicsCommand::Type::PlaceBlock;
-        cmd.x = placePos_.x; cmd.y = placePos_.y; cmd.z = placePos_.z;
-        cmd.blockType = placeType_;
-        cmd.contraptionId = -1; // 主世界静态方块（无刚体域）
-        if (q.push(cmd)) {
-            commandsSent_.fetch_add(1, std::memory_order_relaxed);
-            wantPlace_ = false;
-        }
-    } else if (wantRemove_) {
-        // 破坏指令：业务裁决已通过（方块存在），物理删静态碰撞体。
-        cmd.type = engine::shared::PhysicsCommand::Type::RemoveBlock;
-        cmd.x = removePos_.x; cmd.y = removePos_.y; cmd.z = removePos_.z;
-        cmd.contraptionId = -1; // 主世界静态方块（无刚体域）
-        if (q.push(cmd)) {
-            commandsSent_.fetch_add(1, std::memory_order_relaxed);
-            wantRemove_ = false;
-        }
-    } 
+void BusinessWorld::syncToPhysics() {
+    // tick 边界：委托 PhysicsBridge 发指令（全量同步需现场生成世界快照）。
+    physicsBridge_.syncToPhysics(world_.renderSnapshot());
 }
 
-void BusinessWorld::flushChanges(
-    engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& q) {
-    // 业务 Tick 边界：把本 tick 变脏的 chunk 聚合为一条变更事件发出（数据层 ② 第四项）。
-    // 事件源 = World 的脏集合（动作写入，自动去重）；push 成功才清空。
-    auto dirty = world_.peekDirtyChunks();
-    if (dirty.empty()) return;
-    engine::shared::BlockChangeEvent ev;
-    ev.tick = ticks_.load(std::memory_order_relaxed);
-    ev.dirtyChunks.assign(dirty.begin(), dirty.end());
-    if (q.push(ev)) {
-        world_.clearDirtyChunks();
-        changeEventsSent_.fetch_add(1, std::memory_order_relaxed);
-    }
-    // push 失败（队列满）不清空：下 tick 重试。变更事件可延迟送达，
-    // 渲染端最终一致（与位置快照"满则丢"不同：丢变更 = 渲染端漏重建）。
+void BusinessWorld::receiveFromPhysics() {
+    // tick 边界：委托 PhysicsBridge 收物理回执（位置快照/碰撞体数量）。
+    physicsBridge_.receiveFromPhysics();
+}
+
+void BusinessWorld::flushChanges() {
+    // tick 边界：委托 RenderBridge 发变更事件（事件源 = World 脏集合）。
+    renderBridge_.flushChanges(world_, ticks_.load(std::memory_order_relaxed));
 }
 long long BusinessWorld::changeEventsSent() const {
-    return changeEventsSent_.load(std::memory_order_relaxed);
-}
-
-void BusinessWorld::receiveFromPhysics(
-    engine::core::SPSCQueue<engine::shared::PhysicsResult>& q) {
-    // 业务 Tick 边界：收物理结果（位置快照/碰撞体数量）。
-    engine::shared::PhysicsResult res;
-    while (q.pop(res)) {
-        resultsReceived_.fetch_add(1, std::memory_order_relaxed);
-        switch (res.type) {
-        case engine::shared::PhysicsResult::Type::BlockMoved:
-            blockX_.store(res.x, std::memory_order_relaxed);
-            blockY_.store(res.y, std::memory_order_relaxed);
-            blockZ_.store(res.z, std::memory_order_relaxed);
-            break;
-        case engine::shared::PhysicsResult::Type::BlockSetSize:
-            // 物理静态碰撞体数量快照（合并语义：只留最新值）。
-            physicsBlockCount_.store(res.blockSetSize, std::memory_order_relaxed);
-            break;
-        // 无刚体后物理不再发 CollisionEvent（碰撞事件只有刚体撞静态方块才有），
-        // 收到也按未知类型忽略（switch 无匹配 case 直接跳过）。
-        }
-    }
+    return renderBridge_.changeEventsSent();
 }
 
 double BusinessWorld::simTime() const {
@@ -115,14 +59,14 @@ long long BusinessWorld::tickCount() const {
     return ticks_.load(std::memory_order_relaxed);
 }
 long long BusinessWorld::commandsSent() const {
-    return commandsSent_.load(std::memory_order_relaxed);
+    return physicsBridge_.commandsSent();
 }
 long long BusinessWorld::resultsReceived() const {
-    return resultsReceived_.load(std::memory_order_relaxed);
+    return physicsBridge_.resultsReceived();
 }
-int BusinessWorld::blockX() const { return blockX_.load(std::memory_order_relaxed); }
-int BusinessWorld::blockY() const { return blockY_.load(std::memory_order_relaxed); }
-int BusinessWorld::blockZ() const { return blockZ_.load(std::memory_order_relaxed); }
+int BusinessWorld::blockX() const { return physicsBridge_.blockX(); }
+int BusinessWorld::blockY() const { return physicsBridge_.blockY(); }
+int BusinessWorld::blockZ() const { return physicsBridge_.blockZ(); }
 
 // ---- 查询：转发 World（数据真源在 World，锁在 World 内部）----
 std::vector<engine::shared::Block> BusinessWorld::renderSnapshot() const {
@@ -148,18 +92,15 @@ std::optional<engine::shared::Block> BusinessWorld::findBlock
     return world_.findBlock(p);
 }
 
-// ---- 动作：薄壳（裁决/写入/标脏在 World→base；这里只管计数 + 排队指令）----
+// ---- 动作：薄壳（裁决/写入/标脏在 World→base；排队指令委托 PhysicsBridge）----
 bool BusinessWorld::placeBlock(const engine::shared::BlockPos& p,
                                engine::shared::BlockType type) {
     if (!world_.placeBlock(p, type)) {
         placementsRejected_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    // 自动排队 PlaceBlock 指令（下次 syncToPhysics 发出）。
-    // 原型注意：若上一条指令因队列满未发出，本请求会覆盖待发坐标（低概率，接受）。
-    wantPlace_ = true;
-    placePos_ = p;
-    placeType_ = static_cast<int>(type);
+    // 裁决通过 → 委托桥排队 PlaceBlock 指令（下次 syncToPhysics 发出）。
+    physicsBridge_.queuePlace(p, static_cast<int>(type));
     blocksPlaced_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -169,9 +110,8 @@ bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p) {
         removalsRejected_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    // 自动排队 RemoveBlock 指令（下次 syncToPhysics 发出）。
-    wantRemove_ = true;
-    removePos_ = p;
+    // 裁决通过 → 委托桥排队 RemoveBlock 指令（下次 syncToPhysics 发出）。
+    physicsBridge_.queueRemove(p);
     blocksRemoved_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -260,7 +200,7 @@ long long BusinessWorld::removalsRejected() const {
     return removalsRejected_.load(std::memory_order_relaxed);
 }
 long long BusinessWorld::physicsBlockCount() const {
-    return physicsBlockCount_.load(std::memory_order_relaxed);
+    return physicsBridge_.physicsBlockCount();
 }
 
 void BusinessWorld::maybeLog() {
