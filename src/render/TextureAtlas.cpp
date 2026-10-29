@@ -62,24 +62,21 @@ bool TextureAtlas::addFromFile(std::string_view name, AtlasSlot slot) {
     stbi_uc* src = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
     if (!src) return false;
 
-    // NearestNeighbor（最近邻）缩放：目标 16² 每像素取源图对应位置
-    //   源 128² → 目标 16² = 8 倍下采样；dst(x,y) ← src(x*w/16, y*h/16)
-    std::uint8_t tile[kAtlasTile * kAtlasTile * 4];
-    for (std::uint32_t y = 0; y < kAtlasTile; ++y)
-        for (std::uint32_t x = 0; x < kAtlasTile; ++x) {
-            const std::uint32_t sx = static_cast<std::uint32_t>(x) * w / kAtlasTile;
-            const std::uint32_t sy = static_cast<std::uint32_t>(y) * h / kAtlasTile;
-            const std::uint8_t* s = src + (sy * w + sx) * 4;
-            std::uint8_t* d = tile + (y * kAtlasTile + x) * 4;
-            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
-        }
-    stbi_image_free(src);
+    // 直拷模式：引擎不做任何缩放——源图尺寸必须等于格子尺寸（16²），原样进格。
+    // 未来升像素：只需改 kAtlasTile（如 32）且源图同步 32²，此处零改动。
+    if (w != static_cast<int>(kAtlasTile) || h != static_cast<int>(kAtlasTile)) {
+        std::fprintf(stderr, "[Atlas] 纹理尺寸不符：%s 为 %dx%d（应为 %ux%u）→ 该格用棋盘格\n",
+                     std::string(name).c_str(), w, h, kAtlasTile, kAtlasTile);
+        stbi_image_free(src);
+        return false;
+    }
 
-    // ③ 写入图集格：格起始 = row 行 × 每行 kAtlasSize 像素 + col 列 × kAtlasTile
+    // 直接写入图集格：源像素 → 格（源已是 16²，逐行拷贝）
     std::uint8_t* base = pixels_.data() + (slot.row * kAtlasSize + slot.col * kAtlasTile) * 4;
     for (std::uint32_t y = 0; y < kAtlasTile; ++y)
         std::memcpy(base + y * kAtlasSize * 4,   // 每行间距 = 图集宽 128（格内行间有空隙列）
-                    tile + y * kAtlasTile * 4, kAtlasTile * 4);
+                    src + y * kAtlasTile * 4, kAtlasTile * 4);
+    stbi_image_free(src);
     return true;
 }
 
