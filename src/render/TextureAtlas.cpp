@@ -7,29 +7,15 @@
 
 namespace engine::render {
 
-namespace {
-    // 填充一块 16² 棋盘格（MC 风格缺失纹理：洋红/黑，每 2px 一格）
-    void fillChecker(std::uint8_t* dst) {
-        for (std::uint32_t y = 0; y < kAtlasTile; ++y)
-            for (std::uint32_t x = 0; x < kAtlasTile; ++x) {
-                const bool magenta = (((x / 2) + (y / 2)) & 1u) == 0;
-                std::uint8_t* p = dst + (y * kAtlasTile + x) * kAtlasChannels;
-                p[0] = magenta ? 255u : 0u;   // R
-                p[1] = 0u;                    // G
-                p[2] = magenta ? 255u : 0u;   // B
-                p[3] = 255u;                  // A
-            }
-    }
-} // namespace
-
 bool TextureAtlas::buildFromRegistry() {
-    // ① 全图先填棋盘格（空槽默认 = 缺失纹理，后续逐格覆盖）
+    // ① 分配像素数组（全 0 透明黑兜底，正常流程会立即被 default.png 覆盖）
     pixels_.assign(kAtlasSize * kAtlasSize * kAtlasChannels, 0u);
-    for (std::uint32_t r = 0; r < kAtlasGrid; ++r)
-        for (std::uint32_t c = 0; c < kAtlasGrid; ++c)
-            fillChecker(pixels_.data() + (r * kAtlasSize + c * kAtlasTile) * kAtlasChannels);
 
-    // ② 收集注册表里的纹理名（去重；第 0 格恒为 default 棋盘格，纹理从第 1 格起填）
+    // ② 第 0 格 = default.png（缺失纹理兜底，内容来自文件而非程序生成）
+    if (!addFromFile("default", AtlasSlot{0, 0}))
+        std::fprintf(stderr, "[Atlas] 兜底纹理 default.png 缺失 → 第 0 格透明黑\n");
+
+    // ③ 收集注册表里的纹理名（去重；第 0 格恒为 default，纹理从第 1 格起填）
     std::set<std::string_view> seen;
     std::uint32_t slotIndex = 1;   // 第 0 格留给 default（缺失纹理兜底）
     for (const auto& [key, info] : engine::registry::g_blockRegistry) {
@@ -45,11 +31,11 @@ bool TextureAtlas::buildFromRegistry() {
         const AtlasSlot slot{
             static_cast<std::uint8_t>(slotIndex / kAtlasGrid),
             static_cast<std::uint8_t>(slotIndex % kAtlasGrid)};
-        // 加载失败 → 格子保留棋盘格（缺文件兜底，不崩引擎）
+        // 加载失败 → 格子留空（透明黑），不崩引擎
         if (addFromFile(name, slot))
             slots_.emplace(std::string(name), slot);
         else
-            std::fprintf(stderr, "[Atlas] 纹理缺失：%s → 该格用棋盘格\n",
+            std::fprintf(stderr, "[Atlas] 纹理缺失：%s → 该格透明黑\n",
                          std::string(name).c_str());
         ++slotIndex;
     }

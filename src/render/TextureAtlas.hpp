@@ -27,7 +27,7 @@ struct AtlasSlot {
 
 class TextureAtlas {
 public:
-    // 遍历注册表：收集所有 BlockInfo::texture → 加载 → 填格（空槽 = 棋盘格）
+    // 遍历注册表：收集所有 BlockInfo::texture → 加载 → 填格（第 0 格恒为 default.png 兜底）
     bool buildFromRegistry();
 
     // 名字 → 格（未注册返回 false）
@@ -39,13 +39,12 @@ public:
     // 格 → UV 矩形 {u0, v0, u1, v1}（归一化 0~1，meshing 填顶点用）
     static glm::vec4 slotUV(AtlasSlot s);
 
-    // 缺失纹理兜底：第 0 格恒为 default 棋盘格（未注册纹理的方块显示它）
+    // 缺失纹理兜底：第 0 格恒为 default（default.png，未注册纹理的方块显示它）
     static glm::vec4 fallbackUV() { return slotUV(AtlasSlot{0, 0}); }
 
 private:
-    // 加载 textures/<name>.png → NearestNeighbor 缩 16² → 写入格（失败则格留棋盘格）
+    // 加载 textures/<name>.png → 直拷入格（失败则格留空，不崩引擎）
     bool addFromFile(std::string_view name, AtlasSlot slot);
-
     std::vector<std::uint8_t> pixels_;                         // 128² × 4 通道
     std::unordered_map<std::string, AtlasSlot> slots_;         // 纹理名 → 格
 };
