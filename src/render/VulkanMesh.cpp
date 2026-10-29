@@ -16,9 +16,15 @@ namespace engine::render::mesh {
         {0,0,1}, {0,1,0}, {1,0,0}, {0,0,1}, {0,1,0}, {1,0,0}
     }; // 副轴
 
-    std::vector<Vertex> buildCubeVertices(const glm::vec3& offset, std::uint8_t faceMask) {
-        const glm::vec2 faceUV[4] = {                 // 每面 4 角的纹理坐标
-            {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}
+    std::vector<Vertex> buildCubeVertices(const glm::vec3& offset, std::uint8_t faceMask,
+                                          const glm::vec4& atlasUV) {
+        // 面 UV 由图集矩形展开（Vulkan v=0 在图像顶行 → 几何上方用 v0、下方用 v1，方向正确）：
+        // 左下 {u0,v1} → 右下 {u1,v1} → 右上 {u1,v0} → 左上 {u0,v0}
+        const glm::vec2 faceUV[4] = {
+            {atlasUV.x, atlasUV.w},
+            {atlasUV.z, atlasUV.w},
+            {atlasUV.z, atlasUV.y},
+            {atlasUV.x, atlasUV.y}
         };
         // 颜色责任已移交纹理（片元着色器仅采样纹理，不读顶点色）。
         // 顶点色保留 {1,1,1} 白色作为占位调制因子，未来光照/调色可复用。

@@ -710,7 +710,14 @@ bool VulkanContext::rebuildChunkMeshes(
             auto& dstOffset  = isCutout ? cutoutVertexOffset : vertexOffset;
             // 玻璃整体淡蓝；solid 不传 tint 用默认逐面色
             const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
-            auto vs = mesh::buildCubeVertices(center, faceMask);
+            // 纹理 → UV：注册表纹理名 → 图集格 → UV 矩形（未注册 → default 棋盘格）
+            glm::vec4 uvRect = engine::render::TextureAtlas::fallbackUV();
+            if (info && info->texture) {
+                engine::render::AtlasSlot slot;
+                if (textureAtlas_.slotOf(info->texture, slot))
+                    uvRect = engine::render::TextureAtlas::slotUV(slot);
+            }
+            auto vs = mesh::buildCubeVertices(center, faceMask, uvRect);
             dstVerts.insert(dstVerts.end(), vs.begin(), vs.end());
             const uint32_t faceCount = static_cast<uint32_t>(vs.size() / 4);
             for (uint32_t f = 0; f < faceCount; ++f) {
@@ -801,19 +808,23 @@ bool VulkanContext::createCommandObjects() {
     return true;
 }
 
-// 纹理图像：staging 搬运（加载 PNG → 上传显存 → 转 SHADER_READ_ONLY）
+// 纹理图像：staging 搬运（构建图集 → 上传显存 → 转 SHADER_READ_ONLY）
+// 图集 = 一张 128² 大纹理装所有方块小纹理（每格 16²，空槽棋盘格）
 bool VulkanContext::createTextureImage() {
-    int w = 0, h = 0, ch = 0;
-    stbi_uc* pixels = stbi_load("textures/default.png", &w, &h, &ch, STBI_rgb_alpha);
-    if (!pixels) { LOG_ERROR("[Vulkan] stbi_load 纹理失败"); return false; }
-    texWidth_ = static_cast<uint32_t>(w);
-    texHeight_ = static_cast<uint32_t>(h);
+    if (!textureAtlas_.buildFromRegistry()) {   // 遍历注册表 → 拼图集（CPU 内存 128² RGBA）
+        LOG_ERROR("[Vulkan] 图集构建失败");
+        return false;
+    }
+    const auto& pixels = textureAtlas_.rgba();
+    const std::uint32_t w = engine::render::kAtlasSize;   // 128
+    const std::uint32_t h = engine::render::kAtlasSize;
+    texWidth_ = w;
+    texHeight_ = h;
     const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * 4; // RGBA×4字节
 
     if (!util::createImage(device_, physicalDevice_, w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         1, VK_SAMPLE_COUNT_1_BIT, textureImage_, textureImageMemory_)) {
-        stbi_image_free(pixels);
         return false;
     }
 
@@ -823,14 +834,12 @@ bool VulkanContext::createTextureImage() {
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         staging, stagingMem)) {
-        stbi_image_free(pixels);
         return false;
     }
     void* data = nullptr;
     vkMapMemory(device_, stagingMem, 0, imageSize, 0, &data);
-    std::memcpy(data, pixels, static_cast<std::size_t>(imageSize));  // ← 你的 memcpy 搬运
+    std::memcpy(data, pixels.data(), static_cast<std::size_t>(imageSize));  // ← 图集像素进 staging
     vkUnmapMemory(device_, stagingMem);
-    stbi_image_free(pixels);  // 像素已进 staging，CPU 副本可扔
 
     util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, textureImage_,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -859,11 +868,11 @@ bool VulkanContext::createTextureImageView() {
 bool VulkanContext::createTextureSampler() {
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;      // 放大线性
-    samplerInfo.minFilter = VK_FILTER_LINEAR;      // 缩小线性
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;  // MC 平铺
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.magFilter = VK_FILTER_NEAREST;      // 放大最近邻：16² 像素风硬块（线性会糊）
+    samplerInfo.minFilter = VK_FILTER_NEAREST;      // 缩小最近邻
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;  // 图集防相邻格泄漏
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;   // 1 级占位
     samplerInfo.maxLod = 1.0f;
     if (vkCreateSampler(device_, &samplerInfo, nullptr, &textureSampler_) != VK_SUCCESS) {

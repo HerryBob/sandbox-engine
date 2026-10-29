@@ -15,5 +15,6 @@ namespace engine::registry {
 		bool opaque = true;
 		float hardness = 1.0f;
 		RenderType renderType = RenderType::Solid;
+		const char* texture = nullptr;  // 纹理名（对应 textures/<name>.png；nullptr = 未注册 → 缺省棋盘格）
 	};
 }

@@ -61,13 +61,14 @@ static int run() {
     initConsole();
     std::cout << "=== 沙盒引擎 ===\n";
 
+    //方块注册表：必须先于 vkCtx.init（内部 createTextureImage 构建图集要遍历注册表）
+    engine::registry::initBlockRegistry();
+
     engine::render::VulkanContext vkCtx;
     const bool vkOk = vkCtx.init(1280, 720, "沙盒引擎 · Vulkan 方块+相机");
     if (vkOk) {
         std::cout << kCameraHelp;
     }
-    //方块注册表
-    engine::registry::initBlockRegistry();
 
     // 全局 time_scale 单实例，三条轨共享
     core::TimeManager tm;
