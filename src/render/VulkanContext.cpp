@@ -820,7 +820,7 @@ bool VulkanContext::createTextureImage() {
     const std::uint32_t h = engine::render::kAtlasSize;
     texWidth_ = w;
     texHeight_ = h;
-    const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * 4; // RGBA×4字节
+    const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * engine::render::kAtlasChannels; // RGBA×4字节
 
     if (!util::createImage(device_, physicalDevice_, w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -1021,8 +1021,10 @@ void VulkanContext::updateViewProj(double /*dt*/) {
                            static_cast<float>(py),
                            static_cast<float>(pz));
 
-    const float aspect = static_cast<float>(swapchainExtent_.width) /
-                         static_cast<float>(swapchainExtent_.height);
+    // 纵横比：启动竞态时交换链尺寸可能未就绪（height=0 → 除零 NaN 触发 glm assert）
+    const float aspect = (swapchainExtent_.height > 0)
+        ? static_cast<float>(swapchainExtent_.width) / static_cast<float>(swapchainExtent_.height)
+        : 1.0f;
     glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 100.0f);
     proj[1][1] *= -1.0f; // Vulkan 的 NDC Y 轴向下；glm 按 OpenGL 设计，需翻转
 

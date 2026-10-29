@@ -16,6 +16,8 @@ namespace engine::render {
 constexpr std::uint32_t kAtlasTile = 16;   // 每格边长（像素）
 constexpr std::uint32_t kAtlasGrid = 8;    // 每边格数
 constexpr std::uint32_t kAtlasSize = kAtlasTile * kAtlasGrid; // 128
+// 通道数：RGBA 四通道 × 1 字节/通道 = 每像素 4 字节（PNG 解码 / Vulkan 导入均按此）
+constexpr std::uint32_t kAtlasChannels = 4;
 
 // 格位置：row（行）/ col（列）
 struct AtlasSlot {

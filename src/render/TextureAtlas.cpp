@@ -13,7 +13,7 @@ namespace {
         for (std::uint32_t y = 0; y < kAtlasTile; ++y)
             for (std::uint32_t x = 0; x < kAtlasTile; ++x) {
                 const bool magenta = (((x / 2) + (y / 2)) & 1u) == 0;
-                std::uint8_t* p = dst + (y * kAtlasTile + x) * 4;
+                std::uint8_t* p = dst + (y * kAtlasTile + x) * kAtlasChannels;
                 p[0] = magenta ? 255u : 0u;   // R
                 p[1] = 0u;                    // G
                 p[2] = magenta ? 255u : 0u;   // B
@@ -24,10 +24,10 @@ namespace {
 
 bool TextureAtlas::buildFromRegistry() {
     // ① 全图先填棋盘格（空槽默认 = 缺失纹理，后续逐格覆盖）
-    pixels_.assign(kAtlasSize * kAtlasSize * 4, 0u);
+    pixels_.assign(kAtlasSize * kAtlasSize * kAtlasChannels, 0u);
     for (std::uint32_t r = 0; r < kAtlasGrid; ++r)
         for (std::uint32_t c = 0; c < kAtlasGrid; ++c)
-            fillChecker(pixels_.data() + (r * kAtlasSize + c * kAtlasTile) * 4);
+            fillChecker(pixels_.data() + (r * kAtlasSize + c * kAtlasTile) * kAtlasChannels);
 
     // ② 收集注册表里的纹理名（去重；第 0 格恒为 default 棋盘格，纹理从第 1 格起填）
     std::set<std::string_view> seen;
@@ -72,10 +72,10 @@ bool TextureAtlas::addFromFile(std::string_view name, AtlasSlot slot) {
     }
 
     // 直接写入图集格：源像素 → 格（源已是 16²，逐行拷贝）
-    std::uint8_t* base = pixels_.data() + (slot.row * kAtlasSize + slot.col * kAtlasTile) * 4;
+    std::uint8_t* base = pixels_.data() + (slot.row * kAtlasSize + slot.col * kAtlasTile) * kAtlasChannels;
     for (std::uint32_t y = 0; y < kAtlasTile; ++y)
-        std::memcpy(base + y * kAtlasSize * 4,   // 每行间距 = 图集宽 128（格内行间有空隙列）
-                    src + y * kAtlasTile * 4, kAtlasTile * 4);
+        std::memcpy(base + y * kAtlasSize * kAtlasChannels,   // 每行间距 = 图集宽 128（格内行间有空隙列）
+                    src + y * kAtlasTile * kAtlasChannels, kAtlasTile * kAtlasChannels);
     stbi_image_free(src);
     return true;
 }
