@@ -7,6 +7,7 @@
 | **GLM**（OpenGL Mathematics） | header-only（third_party/include/glm） | MIT | Copyright (c) 2005 - G-Truc Creation | https://github.com/g-truc/glm |
 | **GLFW** | 头文件 + glfw3.dll + glfw3dll.lib（third_party） | zlib | Copyright (c) 2002-2006 Marcus Geelnard, Copyright (c) 2006-2019 Camilla Löwy | https://github.com/glfw/glfw |
 | **stb_image** | stb_image.h（third_party/include） | Public Domain 或 MIT（二选一） | Copyright (c) 2017 Sean Barrett | https://github.com/nothings/stb |
+| **RapidJSON** | header-only（third_party/include/rapidjson） | MIT | Copyright (C) 2015 THL A29 Limited, a Tencent company, and Milo Yip | https://github.com/Tencent/rapidjson |
 | **Vulkan SDK**（运行时） | 本机 LunarG SDK（VULKAN_SDK 环境变量），不入库 | Apache-2.0（规范/头文件）、各组件各自许可 | — | https://vulkan.lunarg.com |
 
 ## 许可证全文
