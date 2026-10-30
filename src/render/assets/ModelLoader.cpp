@@ -54,9 +54,10 @@ void loadBlockModels() {
         }
         std::stringstream ss;
         ss << in.rdbuf();
+        const std::string text = ss.str();   // 具名变量：生命周期须覆盖 doc 使用期（RapidJSON 字符串值引用源缓冲）
 
         rapidjson::Document doc;
-        if (doc.Parse(ss.str().c_str()).HasParseError()) {
+        if (doc.Parse(text.c_str()).HasParseError()) {
             std::fprintf(stderr, "[Model] 解析失败：%s（%s）\n", file.c_str(),
                          rapidjson::GetParseError_En(doc.GetParseError()));
             continue;
