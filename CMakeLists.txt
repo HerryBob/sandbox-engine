@@ -70,13 +70,12 @@ add_custom_command(TARGET sandbox_engine POST_BUILD
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vert.spv" "$<TARGET_FILE_DIR:sandbox_engine>/shaders/vert.spv"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/frag.spv" "$<TARGET_FILE_DIR:sandbox_engine>/shaders/frag.spv"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:sandbox_engine>/textures"
 )
-# 纹理为可选资源：公开仓库不含 MC 版权纹理，本机构建时存在则复制（缺省不影响编译）
-# 整个目录拷贝（图集按注册表纹理名加载 textures/<name>.png，缺一即棋盘格）
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/textures")
+# 资源为可选资源：公开仓库不含 MC 版权纹理，本机构建时存在则复制（缺省不影响编译）
+# assets/ 整体拷贝（MC 编排：assets/models/block/*.json + assets/textures/block/*.png）
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
     add_custom_command(TARGET sandbox_engine POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/textures" "$<TARGET_FILE_DIR:sandbox_engine>/textures"
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:sandbox_engine>/assets"
     )
 endif()

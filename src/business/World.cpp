@@ -20,6 +20,9 @@ World::World() {
             setBlock(x, 0, z, engine::shared::BlockType::Stone);
     // 测试块：玻璃（Cutout 分桶验证——悬浮平台上方一格，6 面全暴露）
     setBlock(0, 1, 0, engine::shared::BlockType::Glass);
+    // 测试块：木头（模型驱动验证——顶/底 log_top，侧面 log_side）
+    setBlock(1, 1, 0, engine::shared::BlockType::Wood);
+    setBlock(2, 1, 0, engine::shared::BlockType::Wood);
 }
 
 std::size_t World::blockCount() const {

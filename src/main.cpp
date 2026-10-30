@@ -15,6 +15,7 @@
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerInput.hpp"
 #include "registry/BlockRegistry.hpp"
+#include "assets/ModelLoader.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -63,6 +64,10 @@ static int run() {
 
     //方块注册表：必须先于 vkCtx.init（内部 createTextureImage 构建图集要遍历注册表）
     engine::registry::initBlockRegistry();
+
+    //模型注册表：方块注册之后、Vulkan 初始化之前——
+    //图集 buildFromRegistry 要收集模型引用的纹理名（如 wood.json 的 log_top）
+    engine::assets::loadBlockModels();
 
     engine::render::VulkanContext vkCtx;
     const bool vkOk = vkCtx.init(1280, 720, "沙盒引擎 · Vulkan 方块+相机");

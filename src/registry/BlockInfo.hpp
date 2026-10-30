@@ -15,6 +15,7 @@ namespace engine::registry {
 		bool opaque = true;
 		float hardness = 1.0f;
 		RenderType renderType = RenderType::Solid;
-		const char* texture = nullptr;  // 纹理名（对应 textures/<name>.png；nullptr = 未注册 → 缺省棋盘格）
+		const char* texture = nullptr;  // 纹理名（无模型时 6 面兜底；模型化后仍用于缺失回退）
+		const char* model = nullptr;    // 模型名（assets/models/block/<name>.json）；nullptr = 默认立方体
 	};
 }

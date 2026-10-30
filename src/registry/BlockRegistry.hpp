@@ -13,7 +13,7 @@ namespace engine::registry {
             { "stone", true, 1.5f, RenderType::Solid, "stone" });
         g_blockRegistry.add(
             static_cast<std::uint8_t>(engine::shared::BlockType::Wood),
-            { "wood", true, 2.0f, RenderType::Solid, "log_side" });   // 缺 log_top，本轮 6 面全用侧面
+            { "wood", true, 2.0f, RenderType::Solid, "log_side", "wood" });  // 模型化：顶/底 log_top，侧 log_side
         g_blockRegistry.add(
             static_cast<std::uint8_t>(engine::shared::BlockType::Dirt),
             { "dirt", true, 0.5f, RenderType::Solid, "dirt" });

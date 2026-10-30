@@ -16,7 +16,7 @@ cmake-build-*/
 Allmd/
 
 # 纹理资产（含 MC 版权纹理与网络素材，仅本地使用，不提交公开）
-textures/
+assets/textures/
 
 # 编译产物
 *.obj

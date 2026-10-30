@@ -19,6 +19,7 @@
 #include "render/optimization/meshing/FaceCulling.hpp"
 #include <unordered_set>
 #include "registry/BlockRegistry.hpp"
+#include "assets/ModelRegistry.hpp"
 namespace engine::render {
 
 // 初始化渲染上下文：窗口→实例→设备→交换链→管线→每帧对象，任一失败返回 false
@@ -710,14 +711,22 @@ bool VulkanContext::rebuildChunkMeshes(
             auto& dstOffset  = isCutout ? cutoutVertexOffset : vertexOffset;
             // 玻璃整体淡蓝；solid 不传 tint 用默认逐面色
             const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
-            // 纹理 → UV：注册表纹理名 → 图集格 → UV 矩形（未注册 → default 棋盘格）
-            glm::vec4 uvRect = engine::render::TextureAtlas::fallbackUV();
+            // 纹理 → UV：注册表纹理名 → 图集格 → UV 矩形（未注册 → default 兜底格）
+            glm::vec4 uvRect = engine::assets::TextureAtlas::fallbackUV();
             if (info && info->texture) {
-                engine::render::AtlasSlot slot;
+                engine::assets::AtlasSlot slot;
                 if (textureAtlas_.slotOf(info->texture, slot))
-                    uvRect = engine::render::TextureAtlas::slotUV(slot);
+                    uvRect = engine::assets::TextureAtlas::slotUV(slot);
             }
-            auto vs = mesh::buildCubeVertices(center, faceMask, uvRect);
+            // 顶点生成：优先数据驱动模型（模型名注册且加载成功 → buildModelVertices；
+            // 无 model / 模型缺失 → 立方体兜底，仍用注册表纹理）
+            std::vector<Vertex> vs;
+            if (info && info->model) {
+                if (const auto* md = engine::assets::g_modelRegistry.find(std::string(info->model)))
+                    vs = mesh::buildModelVertices(center, *md, faceMask, textureAtlas_);
+            }
+            if (vs.empty())
+                vs = mesh::buildCubeVertices(center, faceMask, uvRect);
             dstVerts.insert(dstVerts.end(), vs.begin(), vs.end());
             const uint32_t faceCount = static_cast<uint32_t>(vs.size() / 4);
             for (uint32_t f = 0; f < faceCount; ++f) {
@@ -816,11 +825,11 @@ bool VulkanContext::createTextureImage() {
         return false;
     }
     const auto& pixels = textureAtlas_.rgba();
-    const std::uint32_t w = engine::render::kAtlasSize;   // 128
-    const std::uint32_t h = engine::render::kAtlasSize;
+    const std::uint32_t w = engine::assets::kAtlasSize;   // 128
+    const std::uint32_t h = engine::assets::kAtlasSize;
     texWidth_ = w;
     texHeight_ = h;
-    const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * engine::render::kAtlasChannels; // RGBA×4字节
+    const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * engine::assets::kAtlasChannels; // RGBA×4字节
 
     if (!util::createImage(device_, physicalDevice_, w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
