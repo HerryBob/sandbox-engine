@@ -1,8 +1,8 @@
 # MinecraftGame2 架构决策文档
 
 > 项目：C++ 开发 Minecraft 尝试（引擎版）
-> 状态：渲染层全链闭环（校验层 0）/ 四轨消息流跑通 / 软断言全 PASS
-> 更新：2026-10-16
+> 状态：渲染层全链闭环（校验层 0）/ 四轨消息流跑通 / 软断言全 PASS / 模型层数据驱动落地（远端 1b6f9df）
+> 更新：2026-10-31
 > 协作方式：作者主导设计决策，AI 辅助编码/教学/文档整理；代码经作者 review 后提交。
 > 本文记录"为什么这么设计"——每条决策含背景、方案、权衡；代码注释是"是什么"，本文是"为什么"。
 
@@ -132,6 +132,31 @@
 - **方案**：采样前轮询 `waitForBodies(target, timeout)`——**等到物理刚体数达到目标再采样**（超时返回 false，此时才是真实逻辑错误）。
 - **原则**：验证异步事件的结果，**等结果成立再断言，而不是等固定墙钟**。
 
+### D16 增量重建（GPU 安全点执行）
+
+- **背景**：方块改动 → 渲染端重建——若在业务线程直接重建，跨线程触碰 Vulkan 资源 = 竞争。
+- **方案**：业务侧消费 `BlockChangeEvent` 填 `dirtyChunks_`（Renderer.cpp:6-21）；重建在渲染线程 **drawFrame 内 GPU 安全点**执行（`chunkRebuildRequested_` 原子标志 exchange 消费，VulkanContext.cpp:1068-1073）；首帧全量 `rebuildMeshFromBlocks`——全量是增量的特例（推导 allChunks 的脏集合）。
+- **权衡**：重建延迟 ≤ 1 帧，换来"Vulkan 资源只在渲染线程触碰"的单一归属。
+
+### D17 纹理图集（名字驱动，单向流）
+
+- **背景**：逐方块独立纹理 = 绑定切换频繁；程序化生成纹理已否决（用户决策）。
+- **方案**：`TextureAtlas` 单张大图（`kAtlasTile=16 / kAtlasGrid=8 / kAtlasSize=128`，升级分辨率只改 kAtlasTile）；加载时 PNG 解码（STBI_rgb_alpha）直接拷入对应格；`slots_`（名字→行列）哈希索引；`slotUV` 由格坐标推 UV 四角；缺纹理 → 透明黑兜底，尺寸不符 → 棋盘格兜底。
+- **应用链**：BlockInfo 加 `texture` 字段 → 模型点名 → 图集备货 → buildModelVertices 碰头（名字驱动单向流，无反向依赖）。
+- **权衡**：图集上限 = 64 格（超格跳过报错）；格内贴图必须 16×16；纹理名 = 相对路径，天然支持子目录分类。
+
+### D18 Solid/Cutout 分桶（1 render pass + 2 pipelines）
+
+- **背景**：玻璃等镂空方块需要独立状态（不写深度/双面），与不透明方块混在一个桶要么错误要么全开双面。
+- **方案**：**不重建 renderPass**——同 pass 下双管线：Solid（cull BACK）/ Cutout（cull NONE 双面，玻璃薄片两面可见）；`ChunkMesh` 双桶（Solid 桶 + Cutout 桶：各自 vertex/index buffer + 计数）；meshing 按 RenderType 分流。
+- **权衡**：分桶只解决 Cutout（镂空但像素级透明）；**透明排序（Translucent：混合/深度写 OFF）是更难的后续**，留路线图 ②——那才是真正需要改 renderPass 的时机。
+
+### D19 数据驱动方块模型（Model 三件套 + 资源编排）
+
+- **背景**：硬编码立方体无法表达多元素/多面纹理的方块（原木横放、熔炉朝向等）。
+- **方案**：`ModelDef`（纯数据结构：元素 = 任意比例 AABB，from/to 16 单位坐标，6 面槽）/ `ModelLoader`（RapidJSON 逐成员解析，faces 可选缺省 6 面，faceIndexOf/parseVec3 私有容错工具）/ `ModelRegistry`（engine::registry 注册表，文件名去 `.json` 即注册键）；`assets/models/block/*.json`（MC 式资源编排）；textures 表 `#变量` 展开；CMake copy_directory assets；`BlockInfo.model` → `buildModelVertices` 分流（模型驱动 vs 立方体兜底）。
+- **权衡**：rotation/facing（元素旋转/朝向）未实现（等真实需求——原木横放/熔炉朝向目前做不了）；纹理/模型不合并（名字驱动单向流，给模组作者留改造空间）；同模型元素间不做剔除（与 MC 一致）。
+
 ---
 
 ## 三、踩坑记录（都是真金白银）
@@ -163,18 +188,20 @@
 ```
 已完成 ▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸▸
 #1-#5 工程骨架/迁移/依赖链    #6 纹理/深度/MSAA    #8 resize 重建
-渲染层全链闭环（校验层 0）    四轨消息流 + 软断言
+四轨消息流 + 软断言           增量重建（D16）        纹理图集（D17）
+Cutout 双管线分桶（D18）      模型层数据驱动（D19，远端 1b6f9df）
+流式加载与驻留架构设计定案（DOCS自制版/流式加载与驻留架构决策.md）
 
 当前 ▸▸▸
-#7 本文档完成
+模型层闭环；流式加载架构为设计文档（未实现，等有消费者：实体/结构/后台演化）
 
 下一步（建议顺序）▸▸▸
-① 渲染线程深化：Renderer 伪渲染 → 真实 mesh 管理（消费 dirtyChunk 重建 chunk 网格）
-② 动态方块渲染：网格重建 / GPU 实例化（顶点只存 1 方块几何 + instance buffer 存位置）
-③ 优化里程碑（性能瓶颈再学）：mipmap、面剔除（只生成暴露面）、网格合并、顶点压缩
+① chunk 加载/卸载 + 世界生成器（按流式加载决策文档：WorldManager 复合体/租约制/三轴独立）
+② Translucent 半透明管线（1 render pass + 2 pipelines：depthWrite OFF + blend）
+③ 动态方块渲染 / 结构运动（contraption 渲染单元）
 ```
 
-**当前渲染状态**：mesh = 2 方块（48 顶点/72 索引）；世界 28 方块未接入渲染；相机 WASD/鼠标/R 可操作；UBO 每帧更新。
+**当前渲染状态**：世界方块全部接入渲染；方块 mesh 由模型驱动（Model 三件套 + buildModelVertices 分流，立方体兜底）；纹理走图集（Atlas 16×16/8×8 格，名字驱动）；Solid/Cutout 双管线分桶（玻璃走 Cutout）；增量重建消费 BlockChangeEvent（dirtyChunks_ → GPU 安全点 rebuildChunkMeshes）；相机 WASD/鼠标/R；UBO 每帧更新。
 
 ---
 
