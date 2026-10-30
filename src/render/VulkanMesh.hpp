@@ -3,8 +3,8 @@
 // 与 VulkanContext 解耦的自由函数；Vertex 布局见 VulkanContext.hpp。
 // 两条生成路径：buildCubeVertices（硬编码立方体，兜底）/ buildModelVertices（数据驱动模型）。
 #include "VulkanContext.hpp"
-#include "assets/ModelDef.hpp"
-#include "assets/TextureAtlas.hpp"
+#include "render/assets/ModelDef.hpp"
+#include "render/assets/TextureAtlas.hpp"
 #include <cstdint>
 namespace engine::render::mesh {
 

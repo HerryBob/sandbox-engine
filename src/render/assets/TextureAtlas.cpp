@@ -1,6 +1,6 @@
 #include "TextureAtlas.hpp"
 #include "registry/BlockRegistry.hpp"
-#include "assets/ModelRegistry.hpp"
+#include "render/assets/ModelRegistry.hpp"
 #include <set>
 #include <cstring>
 #include <cstdio>

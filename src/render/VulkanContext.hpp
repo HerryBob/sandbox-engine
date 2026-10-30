@@ -12,7 +12,7 @@
 
 #include <glm/glm.hpp>
 #include "shared/block/Block.hpp"
-#include "assets/TextureAtlas.hpp"
+#include "render/assets/TextureAtlas.hpp"
 
 // 依赖方案 A：LunarG SDK 直连（find_package(Vulkan) + vulkan-1.lib 静态链接）。
 // 不再用 volk 动态加载（旧引擎 volk 方案在迁移时切换为 SDK 直连）。

@@ -1,6 +1,6 @@
-#include "assets/ModelLoader.hpp"
-#include "assets/ModelDef.hpp"
-#include "assets/ModelRegistry.hpp"
+#include "render/assets/ModelLoader.hpp"
+#include "render/assets/ModelDef.hpp"
+#include "render/assets/ModelRegistry.hpp"
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <filesystem>

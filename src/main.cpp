@@ -15,7 +15,7 @@
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerInput.hpp"
 #include "registry/BlockRegistry.hpp"
-#include "assets/ModelLoader.hpp"
+#include "render/assets/ModelLoader.hpp"
 
 #include <chrono>
 #include <cmath>

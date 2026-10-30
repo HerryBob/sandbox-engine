@@ -19,7 +19,7 @@
 #include "render/optimization/meshing/FaceCulling.hpp"
 #include <unordered_set>
 #include "registry/BlockRegistry.hpp"
-#include "assets/ModelRegistry.hpp"
+#include "render/assets/ModelRegistry.hpp"
 namespace engine::render {
 
 // 初始化渲染上下文：窗口→实例→设备→交换链→管线→每帧对象，任一失败返回 false
