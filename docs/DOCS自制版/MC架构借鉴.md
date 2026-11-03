@@ -1,4 +1,4 @@
-# MC 架构借鉴
+﻿# MC 架构借鉴
 
 >状态：定案 2026-10-31　·　1a 落地核对 2026-11-04　·　关联：《世界生成数据驱动架构决策.md》《流式加载与驻留架构决策.md》
 >决策背景：自研 C++20/Vulkan 体素沙盒引擎，世界生成器（1a）开工前，系统梳理 Minecraft Java 版代码架构对我们引擎的借鉴点与反模式
@@ -14,9 +14,9 @@
 |---|---|---|
 | `ChunkGenerator`（抽象生成器接口） | `WorldGenerator` | ✓ 已对齐：引擎不绑定具体地形 |
 | `DensityFunction`（函数对象 + JSON 可序列化） | `NoiseSource` | ✓ 同构：输入坐标 → 输出数值；JSON 只是实例化通道 |
-| `ChunkStatus`（生成分阶段：structure start → noise → features → full） | `WorldGenStage`（1a 暂内联） | ○ 1a 单阶段未抽接口；1b 出现装饰/洞穴阶段时再引入 |
-| `ProtoChunk`（生成中间态）vs `LevelChunk`（就绪态） | 1b 后台生成态 | ○ 可落：防半成品被读取 |
-| 分阶段生成 | 1b 先地形后装饰 | ○ 可落：玩家靠近再补细节 |
+| `ChunkStatus`（生成分阶段：structure start → noise → features → full） | `WorldGenStage`（1a 暂内联） | ○ 单阶段未抽接口；出现装饰/洞穴第二阶段时再引入 |
+| `ProtoChunk`（生成中间态）vs `LevelChunk`（就绪态） | 1b：`GenResult` 只在整列算完后才入队 | ✅ 已由架构规避：业务线程只能拿到完整 `ColumnBlocks`，半成品永远不会进 `World` |
+| 分阶段生成 | 先地形后装饰 | ○ 后续（等装饰/洞穴阶段） |
 
 ## 值得学 · 数据组织组
 
@@ -34,20 +34,21 @@
 ## 值得学 · 线程组（MC 的教训 = 我们的优势）
 
 >MC Java 版生成/保存长期跑主线程（1.16 后才并行生成），卡顿闻名
->我们四轨（业务 25TPS + 独立渲染 + 未来生成线程）天生规避；1b 的后台生成线程 = "生成异步化"的我们的版本
+>我们四轨（业务 25TPS + 独立渲染 + 后台生成线程）天生规避；1b 已落地后台生成线程 = "生成异步化"的我们的版本
 
 ## 不要学（反模式）
 
 | 反模式 | 我们的对策 |
 |---|---|
 | 超大类（ServerLevel / LevelChunk 几千行） | 按域拆文件（src/worldgen/ 一个子系统一个目录） |
-| 主线程阻塞生成 | 任何 IO/生成不进 25 TPS 主线；1b 起后台线程 |
+| 主线程阻塞生成 | 任何 IO/生成不进 25 TPS 主线；1b 已落地后台生成线程 |
 | Mixin 字节码 hack（Fabric 生态不得已） | C++ 注册表 + 接口注入，模组路线天然更干净 |
 
 ## 对我们现在的直接落点
 
 >已对齐：NoiseSource ≈ DensityFunction（函数对象设计：构造参数决定行为）；WorldGenStage ≈ ChunkStatus 阶段；src/worldgen/ ≈ 按域分层
->可落 1b：chunk 生成分级（先地形后装饰，玩家靠近再补细节）；ProtoChunk 中间态防半成品读取
+>已落地（1b）：后台生成线程 + SPSC 双队列；ProtoChunk 语义用"整列算完才入队"规避（半成品不进 World）
+>后续可落：chunk 生成分级（先地形后装饰，玩家靠近再补细节）
 >记清单（触发器到时再动）：Palette 调色板 / BlockState 16bit 编码 / pack 栈资源合并（模组化时）
 
 ## 1a 落地核对（2026-11-04）

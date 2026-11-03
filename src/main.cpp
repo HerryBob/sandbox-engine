@@ -20,13 +20,15 @@
 #include "worldgen/noise/NoiseRegistry.hpp"
 #include "worldgen/preset/PresetLoader.hpp"
 #include "worldgen/preset/WorldPreset.hpp"
-#include "worldgen/generator/WorldGenerator.hpp"
+#include "worldgen/generator/ColumnGenerator.hpp"
+#include "worldgen/streaming/ChunkStreamer.hpp"
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <sstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -119,32 +121,63 @@ static int run() {
 
     business::BusinessWorld businessWorld(tm, physicsBridge, renderBridge);
 
-    //#36 初始世界：WorldGenerator 从预设生成（替换 World 构造里写死的 48×48 平台）。
-    // 装配期单线程执行（三轨未启动）；失败不阻断启动（世界保持为空）。
-    // 统计外置：下方相机出生点要按实际地表高度设定。
-    engine::worldgen::WorldGenerator::Stats genStats;
+    // ---- 1b 流式生成（#38）----
+    // 线程边界：业务线程是 World 唯一写者；后台生成线程只做纯计算（ColumnGenerator），
+    //           不持有 World、不碰方块存储（8.4 条准则"线程跟着数据是否共享走"）。
+    // 装配期先同步预热出生点窗口（9×9 = 81 列），再交给后台线程按玩家位置持续请求。
+    engine::worldgen::ColumnGenerator columnGen(preset);
     bool genOk = false;
-    if (presetOk) {
-        engine::worldgen::WorldGenerator gen(businessWorld.world(), preset);
-        genOk = gen.generate(&genStats);
-        std::cout << "地形生成：" << (genOk ? "成功" : "失败");
-        if (genOk) {
-            std::cout << "（列=" << genStats.columns << " 方块=" << genStats.blocks
-                      << " 地表高度=" << genStats.minSurfaceY << ".." << genStats.maxSurfaceY << "）";
+    std::unique_ptr<engine::worldgen::ChunkStreamer> streamer;
+
+    if (presetOk && columnGen.prepare()) {
+        genOk = true;
+        const int radius = engine::worldgen::ChunkStreamer::kDefaultRadius;
+        const int span = 2 * radius + 1;
+        const std::size_t warmupColumns = static_cast<std::size_t>(span * span);   // 81
+
+        streamer = std::make_unique<engine::worldgen::ChunkStreamer>(columnGen, radius);
+        streamer->start();
+
+        // 同步预热：阻塞到窗口内 81 列全部写入（装配期没有 25TPS 约束）。
+        // 刻意走和运行期完全同一条路径（tickUpdate → 后台生成 → drainResults → World），
+        // 避免"启动一套代码、运行期另一套代码"，预热与动态加载结果必然一致。
+        auto& world = businessWorld.world();
+        const double spawnX = 0.0;
+        const double spawnZ = 8.0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (streamer->stats().applied < warmupColumns &&
+               std::chrono::steady_clock::now() < deadline) {
+            streamer->tickUpdate(spawnX, spawnZ);
+            streamer->drainResults(world, engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
+        // 首帧渲染走全量快照重建：装配期的脏标记清掉，避免首帧后再重复重建一遍
+        world.clearDirtyChunks();
+
+        const auto s = streamer->stats();
+        std::cout << "流式预热：请求列=" << s.requested
+                  << " 已生成=" << s.generated
+                  << " 已应用=" << s.applied
+                  << " 方块=" << s.blocks
+                  << " 地表=" << s.minSurfaceY << ".." << s.maxSurfaceY
+                  << " chunk=" << world.chunkCount() << "(非空，空chunk不建)";
+        if (s.applied < warmupColumns) std::cout << " [未灌满：30s 超时]";
         std::cout << "\n";
+    } else {
+        std::cout << "流式预热：失败（预设未加载或地层校验未通过）\n";
     }
 
     physics::PhysicsWorld   physicsWorld(tm);
     input::InputSampler inputSampler;
     inputSampler.attach(vkCtx.window(), &cameraState, &playerInput); // 注册键盘/鼠标回调（真实输入，主线程安全）
 
-    // 相机出生点：按生成地形实际最高地表 +2 格（站在地表上方、略低头看地形）。
-    // 不写死世界高度——改预设的 baseHeight/amplitude 后相机会自动跟着走。
-    // 生成失败则保持默认出生点（空世界下无意义）。
-    if (genOk) {
+    // 相机出生点：按预热窗口实际最高地表 +2 格（1b 决策点③：用实测值，不写死世界高度）。
+    // 不写死的好处：改预设的 baseHeight/amplitude 后相机会自动跟着走。
+    // 预热失败则保持默认出生点（空世界下无意义）。
+    if (genOk && streamer) {
+        const auto s = streamer->stats();
         inputSampler.setSpawn(0.0,
-                              static_cast<double>(genStats.maxSurfaceY) + 2.0,
+                              static_cast<double>(s.maxSurfaceY) + 2.0,
                               8.0,          // z=8：站在世界中心偏后，朝 -Z 看地形
                               0.0,          // yaw：朝 -Z
                               -0.35);       // pitch：略低头（sin(pitch) 为视线高度分量）
@@ -162,11 +195,30 @@ static int run() {
     core::ThreadLoop renderLoop("render");
 
     // ---- 业务线程 25TPS：固定 40ms 墙钟节奏 ----
+    // 流式统计上报节流：每 25 个业务 tick（约 1 秒）打一行。
+    // 读 stats() 只能在业务线程做——appliedBlocks/minSurface 等聚合字段由 drainResults 独占写。
+    std::size_t streamReportCounter = 0;
     businessLoop.start([&] {
         auto next = std::chrono::steady_clock::now();
         while (!businessLoop.shouldStop()) {
             businessWorld.advanceTick(tm.effectiveScale(core::Domain::Business));
             businessWorld.processPlayerInput(cameraState, playerInput);  // 玩家点击 → DDA → 放置/破坏
+            // 1b 流式：请求窗口内未加载的列 + 应用后台已算好的结果。
+            // 必须在 flushChanges 之前——新到货 chunk 的脏标记要进本 tick 的变更事件，
+            // 否则渲染端要等下一个 tick 才看到它。
+            if (streamer) {
+                streamer->tickUpdate(cameraState.camX.load(), cameraState.camZ.load());
+                streamer->drainResults(businessWorld.world(),
+                                       engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
+                if (++streamReportCounter >= 25) {
+                    streamReportCounter = 0;
+                    const auto s = streamer->stats();
+                    std::cout << "[流式] 请求=" << s.requested << " 生成=" << s.generated
+                              << " 应用=" << s.applied << " 方块=" << s.blocks
+                              << " 地表=" << s.minSurfaceY << ".." << s.maxSurfaceY
+                              << " 世界chunk=" << businessWorld.world().chunkCount() << "\n";
+                }
+            }
             businessWorld.syncToPhysics();       // 发指令 → 物理（经 PhysicsBridge）
             businessWorld.receiveFromPhysics();  // 收结果 ← 物理（经 PhysicsBridge）
             businessWorld.flushChanges();        // 变更事件 → 渲染（经 RenderBridge）
@@ -216,6 +268,7 @@ static int run() {
 
     // 优雅停止：模拟三轨先停，渲染线程最后停（第 4 轨只读，不阻塞模拟停止）。
     businessLoop.stop();
+    if (streamer) streamer->stop();   // 业务线程已停（不再 drainResults），再停生成线程
     physicsLoop.stop();
     inputLoop.stop();
     renderLoop.stop();

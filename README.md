@@ -1,4 +1,4 @@
-# 沙盒引擎（Sandbox Engine）
+﻿# 沙盒引擎（Sandbox Engine）
 
 C++ 自研方块沙盒引擎（对标 Minecraft）：**四线程消息流 + Vulkan 渲染 + 数据驱动模型 + 纹理图集 + 动态复合体**（任意方块打包为单个刚体，对标机械动力航空学）。
 
@@ -9,7 +9,8 @@ C++ 自研方块沙盒引擎（对标 Minecraft）：**四线程消息流 + Vulk
 - **Vulkan 全链渲染**：交换链 / MSAA 8x / 深度缓冲 / 背面剔除 / **Solid + Cutout 双管线分桶**（玻璃等镂空方块走 Cutout，双面渲染）
 - **纹理图集**：16×16 / 8×8 格 Atlas（升级分辨率只改一个常量），名字驱动单向流（BlockInfo.texture → 模型点名 → 图集备货 → meshing 碰头）
 - **数据驱动方块模型**：Model 三件套（Def / Loader / Registry）+ `assets/models/block/*.json`（MC 式资源编排，文件名即注册键）+ buildModelVertices 分流（模型驱动 vs 立方体兜底）
-- **世界生成 1a（数据驱动噪声地形）**：`data/worldgen/presets/default.json` → PresetLoader → WorldPreset（NoiseRegistry 工厂实例化 fbm→perlin）→ WorldGenerator（逐列采样 → 相对地表深度地层表 → 批量写入）；写死的 48×48 平台已删除，同 seed 两次生成逐位一致（76447 块 / 地表 28..36）
+- **世界生成 1a（数据驱动噪声地形）**：`data/worldgen/presets/default.json` → PresetLoader → WorldPreset（NoiseRegistry 工厂实例化 fbm→perlin）→ ColumnGenerator（逐列采样 → 相对地表深度地层表）；写死的 48×48 平台已删除，同 seed 两次生成逐位一致
+- **世界生成 1b（流式加载闭环）**：按玩家位置动态请求（窗口半径 4 = 81 列）→ 后台生成线程纯计算（**不持有 World**）→ SPSC 双队列回传（`shared_ptr` 载荷免拷贝）→ 业务线程唯一写入（`applyGeneratedChunk`，自身 + 6 邻居标脏）→ 渲染增量重建；实测预热 81/81/81、695,641 方块 / 220 chunk，相机移动 1 列后 90/90/90、779,679 方块 / 247 chunk，物理 TPS 24.83–24.99 稳定
 - **放置/破坏方块交互闭环**：准星模式输入 → DDA 射线检测 → 业务裁决（base/BlockActions）→ 变更事件 → 增量 mesh 重建
 - **设计定案（未实现，等有消费者）**：流式加载与驻留架构——驻留/活跃/渲染三轴独立 + 租约制（玩家窗口只是默认租约之一）+ WorldManager 复合体，详见下方文档
 

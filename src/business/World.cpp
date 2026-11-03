@@ -97,6 +97,39 @@ bool World::removeBlock(const engine::shared::BlockPos& p) {
     return base::tryRemove(chunks_, dirtyChunksThisTick_, p);
 }
 
+void World::applyGeneratedChunk(const engine::shared::ChunkPos& cp,
+                                const engine::shared::ChunkData& data) {
+    // 运行期生成写入（1b）：一次锁 → 整体覆盖 → 标脏自身与邻居。
+    std::lock_guard<std::mutex> lock(blocksMutex_);
+
+    // 全空气 chunk 不创建（保持"空 chunk 不占内存"；地表以上常见）
+    bool anySolid = false;
+    for (const std::uint8_t t : data.blocks) {
+        if (t != static_cast<std::uint8_t>(engine::shared::BlockType::Air)) {
+            anySolid = true;
+            break;
+        }
+    }
+    if (!anySolid && chunks_.find(cp) == chunks_.end()) return;
+
+    auto& slot = chunks_[cp];   // 已有则取用、没有则缺省构造
+    slot = data;                // 整体覆盖：生成是权威写入，不做旧值合并
+    slot.markDirty(0x01);       // 修改跟踪：生成装载（与 generateBlocks 同码）
+
+    // 运行期必须进脏集合：渲染端只按它请求增量重建
+    dirtyChunksThisTick_.insert(cp);
+    // 邻居一并标脏：新 chunk 会改变相邻 chunk 边界面的剔除结果
+    static const int kNeighborOffsets[6][3] = {
+        { 1, 0, 0}, {-1, 0, 0},
+        { 0, 1, 0}, { 0,-1, 0},
+        { 0, 0, 1}, { 0, 0,-1}};
+    for (const auto& off : kNeighborOffsets) {
+        const engine::shared::ChunkPos n{
+            cp.x + off[0], cp.y + off[1], cp.z + off[2]};
+        if (chunks_.find(n) != chunks_.end()) dirtyChunksThisTick_.insert(n);
+    }
+}
+
 std::unordered_set<engine::shared::ChunkPos> World::peekDirtyChunks() const {
     // dirty 只被业务线程触碰（动作写入 / flushChanges 消费）→ 不加锁。
     // 拷贝返回（不消费）：push 成功后才 clear，失败保留下 tick 重试。
