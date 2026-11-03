@@ -42,6 +42,55 @@ std::vector<engine::shared::Block> World::renderSnapshot() const {
     return out;
 }
 
+std::vector<engine::shared::Block> World::chunkSnapshot(
+    const std::unordered_set<engine::shared::ChunkPos>& chunks,
+    bool expandNeighbors) const {
+    // 增量重建取数：只导"目标 chunk ∪ 6 邻居"，其余 chunk 一律不碰。
+    //
+    // 为什么无条件扩邻居（不看被改方块位置）：
+    //   重建的单位是整块 chunk（4096 格），其中边界壳有 1352 格（33%）至少一个邻居在块外。
+    //   面剔除 computeFaceMask 要查它们的 6 个直接邻居，不带邻居 → 这些面全被判"暴露"
+    //   → 整块边缘长出穿透面。标脏那边看"方块在不在边界"是对的（只多标该方向的邻居），
+    //   但取数面向整块，六个方向必须一次带满。
+    // 复杂度：O(目标 chunk 数 × 4096)，与全世界无关。未加载邻居跳过 → 面保持暴露，
+    //   与 renderSnapshot 全量快照的行为一致（窗口边缘本来就没有数据）。
+    static const int kNeighborChunk[6][3] = {
+        { 1, 0, 0}, {-1, 0, 0},
+        { 0, 1, 0}, { 0,-1, 0},
+        { 0, 0, 1}, { 0, 0,-1}};
+
+    // 先把"要读的 chunk"算成集合：dirty ∪ 各自 6 邻居（重复自动去重）
+    std::unordered_set<engine::shared::ChunkPos> targets;
+    targets.reserve(chunks.size() * 7);
+    for (const auto& cp : chunks) {
+        targets.insert(cp);
+        if (!expandNeighbors) continue;
+        for (const auto& off : kNeighborChunk) {
+            targets.insert(engine::shared::ChunkPos{
+                cp.x + off[0], cp.y + off[1], cp.z + off[2]});
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::vector<engine::shared::Block> out;
+    out.reserve(targets.size() * 512); // 实测约 3156 非空气/chunk，512 起步留扩容余量
+    for (const auto& cp : targets) {
+        const auto it = chunks_.find(cp);
+        if (it == chunks_.end()) continue; // 未加载：跳过（面保持暴露）
+        const auto& data = it->second;
+        const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4; // chunk 起点世界坐标
+        for (int i = 0; i < engine::shared::CHUNK_VOLUME; ++i) {
+            const std::uint8_t t = data.blocks[i];
+            if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air)) continue;
+            out.push_back(engine::shared::Block{
+                static_cast<engine::shared::BlockType>(t),
+                engine::shared::BlockPos{bx + (i & 15), by + ((i >> 4) & 15), bz + (i >> 8)},
+                -1}); // 主世界方块 contraptionId 恒 -1（与 renderSnapshot 同码）
+        }
+    }
+    return out;
+}
+
 std::optional<engine::shared::Block> World::findBlock(const engine::shared::BlockPos& p) const {
     // 调用方需保证无并发写（业务线程持锁调用 / main 在三轨停止后调用）。
     // 主世界 → chunk 定位 O(1)（chunk 存储只存类型，返回现场构造的 Block）。

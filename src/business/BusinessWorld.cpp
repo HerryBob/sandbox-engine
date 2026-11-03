@@ -72,6 +72,11 @@ int BusinessWorld::blockZ() const { return physicsBridge_.blockZ(); }
 std::vector<engine::shared::Block> BusinessWorld::renderSnapshot() const {
     return world_.renderSnapshot();
 }
+std::vector<engine::shared::Block> BusinessWorld::chunkSnapshot(
+    const std::unordered_set<engine::shared::ChunkPos>& chunks,
+    bool expandNeighbors) const {
+    return world_.chunkSnapshot(chunks, expandNeighbors);
+}
 std::size_t BusinessWorld::blockCount() const {
     return world_.blockCount();
 }

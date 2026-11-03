@@ -29,8 +29,15 @@ public:
     // ---- 查询（业务/渲染线程只读通道；锁内访问，安全）----
     // 方块总数（main 线程只读 + 业务线程结构性修改并发——加锁读）。
     std::size_t blockCount() const;
-    // 渲染快照：锁内拷贝全量方块列表（供渲染线程安全调用）。
+    // 渲染快照：锁内拷贝全量方块列表（供渲染线程安全调用）。首帧/世界整体重建用。
     std::vector<engine::shared::Block> renderSnapshot() const;
+    // 增量渲染快照：锁内只导"给定 chunk ∪ 6 邻居"的非空气方块（O(目标 chunk 数)）。
+    // 供方块改动的增量重建使用——重建单位是整块 chunk，边界壳方块的面剔除要查块外邻居，
+    // 所以邻居必须无条件带满（不看被改方块在不在边界：那是标脏的规则，不是取数的规则）。
+    // 未加载的邻居自动跳过（面保持暴露，与 renderSnapshot 行为一致）。
+    std::vector<engine::shared::Block> chunkSnapshot(
+        const std::unordered_set<engine::shared::ChunkPos>& chunks,
+        bool expandNeighbors = true) const;
     // 按坐标查主世界方块；返回空 = 不存在。chunk 定位 O(1)。
     std::optional<engine::shared::Block> findBlock(const engine::shared::BlockPos& p) const;
     // 已加载 chunk 数（空 chunk 不占内存；断言/诊断用）。

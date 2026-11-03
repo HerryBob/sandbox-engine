@@ -56,8 +56,12 @@ public:
 
     // 方块查询：委托 World（数据真源；16³ chunk，世界坐标，定位 O(1)）。
     std::size_t blockCount() const;
-    // 渲染快照：锁内拷贝全量方块列表（供渲染线程安全调用）。
+    // 渲染快照：锁内拷贝全量方块列表（供渲染线程安全调用）。首帧/世界整体重建用。
     std::vector<engine::shared::Block> renderSnapshot() const;
+    // 增量渲染快照：锁内只导"给定 chunk ∪ 6 邻居"（方块改动的增量重建用，委托人=World）。
+    std::vector<engine::shared::Block> chunkSnapshot(
+        const std::unordered_set<engine::shared::ChunkPos>& chunks,
+        bool expandNeighbors = true) const;
     // 按坐标查主世界方块；返回空 = 不存在。chunk 定位 O(1)。
     // 返回值而非指针：主世界方块由 chunk 现场构造（存储只存类型），
     // 值返回避免悬垂/并发写风险。

@@ -176,9 +176,25 @@
   - **窗口**：半径 4（9×9 = 81 列 / 324 槽位）；`tickUpdate` 每 tick 扫窗口、`known_` 去重、按到玩家的距离平方排序（近的先到，"脚下先长出地面"）、队列满即停（**只把 push 成功的记入 known_**，失败的下一 tick 重试）。
   - **应用**：每 tick 最多 4 列（16 个 chunk，一次锁写 64KB）；`World::applyGeneratedChunk` 一次锁 → 整体覆盖 → `markDirty` → **插入 `dirtyChunksThisTick_`** → **已存在的 6 邻居一并标脏**。
   - **预热**：装配期走**同一条路径**（tickUpdate → 后台生成 → drainResults）把 spawn 窗口灌满，再用实测 `maxSurfaceY` 定出生点（不写死）；预热后 `clearDirtyChunks()`，由首帧全量重建兜底。
-- **邻居标脏为什么必须有**：`VulkanContext::rebuildChunkMeshes` 的 `rebuildSet = dirtyChunks`（**不展开邻居**），而 `computeFaceMask(block.pos, solid)` 的 `solid` 是用**全量快照**构建的全局集合——面剔除跨 chunk 查邻居。新列到达会让邻居的边界面从"暴露"变"被遮挡"，不重建就留穿透面。该责任放在 World 侧：比放在渲染侧更早，也更省。
+- **邻居标脏为什么必须有**：`VulkanContext::rebuildChunkMeshes` 的 `rebuildSet = dirtyChunks`（**不展开邻居**），而 `computeFaceMask(block.pos, solid)` 要查块外邻居（`solid` 由取数集合构建，见 D22）——面剔除跨 chunk 查邻居。新列到达会让邻居的边界面从"暴露"变"被遮挡"，不重建就留穿透面。该责任放在 World 侧：比放在渲染侧更早，也更省。
 - **验证**：预热 81/81/81、方块 695641、地表 26..38、非空 chunk 220；相机移动约 1 列后 → 90/90/90、方块 779679（+84038）、chunk 247（+27）。**请求列 = 已生成 = 已应用 恒等**，证明无丢请求、无重复请求；物理 TPS 24.83–24.99 全程稳定；stderr 恒两行。
-- **权衡 / 已知项**：① 动态卸载不做（#38 范围外，`known_` 只增不减）；② 渲染端每帧仍拉全量快照（`renderSnapshot()`，登记优化点，改它要动 `requestChunkRebuild` 签名）；③ **"渲染重建节流（每 tick 预算 N 个 chunk）"在现有实现下不做**——`rebuildChunkMeshes` 每次调用都要用全量方块重建 `solid` 集合（约 77 万次哈希插入），拆成多帧等于把这份固定成本重复 N 次，反而放大开销；正确修法是先把 blocks 按 `ChunkPos` **分桶**（一次 O(N) 扫描）再逐 chunk 取自己的桶，届时节流才有意义——登记为下一轮；④ 首帧 220 个 chunk 全量重建约 4 秒（Debug），Release 会显著更快。
+- **权衡 / 已知项**：① 动态卸载不做（#38 范围外，`known_` 只增不减）；② ~~渲染端每帧仍拉全量快照（`renderSnapshot()`，登记优化点，改它要动 `requestChunkRebuild` 签名）~~ → **2026-11-04 已落地 D22：增量取数收窄到 `dirty ∪ 6 邻居`，签名不变**；③ 渲染重建节流的障碍（`rebuildChunkMeshes` 每次都要用全量方块重建 `solid`）已随 D22 消失——取数本身就是按 chunk 取的子集，但现在单次成本已降到可接受，暂不做每 tick 预算；④ 首帧 220 个 chunk 全量重建约 4 秒（Debug），Release 会显著更快（首帧仍走 `renderSnapshot()`，未改）。
+
+### D22 增量重建的取数范围：按 `ChunkPos` 取子集（对标 MC 的局部 region）
+
+- **问题**：破坏/放置一个方块，Debug 下卡顿几百毫秒。链路五段里 ① 标脏 ② 呈递 都忽略不计，大头是 **③ 全量快照（持锁）** 和 **⑤ 全量扫描 ×N**。
+- **根因（坐标系错位）**：决策侧是精确的——`dirtyChunks_` 只收 1~4 个 `ChunkPos`；数据侧给的却是**全世界**方块列表（`renderSnapshot()` 遍历 247 chunk / 101 万槽位 / 78 万方块）。下游只能"从全量里过滤出自己那一块"，单元成本退化为 O(全世界)：`solid` 要 78 万次哈希插入，每个 dirty chunk 再遍历一遍全量。**标脏精确只减少了重建的 chunk 数，没降低单价。**
+- **MC 对照（三代都不做全量）**：
+  - 1.11-：`RenderChunk#createRegionRenderCache` = chunk 每轴各扩 1 格、padding 到 **20³ = 8000 states**（Forge javadoc 原文）；
+  - 1.17+：`RenderRegionCache` → `RenderChunkRegion` = **3×3×3 = 27 section**（110,592 槽位）；`CompileTask#doTask` 前置 `hasAllNeighbors()`，邻居不齐直接 cancel（从根上不出穿透面）；
+  - VulkanMod / wgpu-mc：同一个 3×3×3，再把调色板数据**展平成扁平数组**供 meshing 热循环直取。
+  - 范围从 20³ 涨到 27 section，是因为要读光照、生物群系染色和 AO 的**对角邻居**；我们的面剔除只查 6 个正交邻居，所以 7 个完整 chunk 就够。
+- **做法**：`World::chunkSnapshot(chunks, expandNeighbors = true)`——锁内只导"给定 chunk ∪ 6 邻居"的非空气方块；`BusinessWorld` 加同名转发（渲染端持有的是 BusinessWorld 而非 World）；`Renderer.cpp` 改一行 → `requestChunkRebuild(world_.chunkSnapshot(dirtyChunks_), dirtyChunks_)`。**`VulkanContext` 零改动**：内层"挑本 chunk 方块"按坐标过滤不变，邻居方块留在 `solid` 里供 `computeFaceMask` 查——**过滤与剔除用的是两个容器，互不干扰**。
+- **为什么邻居必须无条件扩（不看被改方块在不在边界）**：这是最容易照抄错的一点。标脏的规则是"方块在边界才扩该方向邻居"——**对**，因为它面向"被改的那一格"。但**取数面向整块 chunk**：一个 16³ chunk 内 1352 格（33%）至少一个邻居在块外，重建时要把它们全查一遍。只带被改方向 → 其余 5 个方向的边界全被判"暴露" → 整块边缘长出一圈穿透面。一句话：**标脏可以看位置，取数不行。**
+- **成本**：1 脏 → 7 chunk → 28,672 槽位（2.8%）；4 脏（角）→ 约 20 chunk；最坏 < 10%。对比 `renderSnapshot` 的 101 万槽位。
+- **验证**（2026-11-04，Debug）：基线不变（预热 81/81/81、695,641 方块、220 chunk；移动后 90/90/90、779,679、247 chunk）；连续 **16 次破坏 + 6 次放置**期间业务 tps 稳定 24.4–24.6、物理 24.97–25.0；每次重建日志只出现 1~2 个 chunk（`(-1,2,0)` 面数 309→340 缓慢增长）。**若漏带邻居，破坏第一个边界方块就会让该 chunk 的 1352 个壳面一次全暴露（面数跳 +1352 以上）**——实测每次 +2~3 面，穿透面风险从数据上排除。
+- **保留**：`renderSnapshot()` 继续服务首帧全量重建（`rebuildMeshFromBlocks`）。
+- **已知项**：① 将来加 AO（环境光遮蔽）时要读对角邻居 → 取数范围必须扩到 3×3×3（26 邻居），否则 AO 在 chunk 边界会算错；② 邻居只取贴边一层（256 格/方向）能再省 6/7，但要按方向切片、实现复杂，当前子集仅 1.7MB，不做；③ 邻居 chunk 未加载时自动跳过（面保持暴露），与全量快照行为一致。
 
 ---
 
