@@ -54,12 +54,20 @@ void InputSampler::sample() {
     }
     if (keySpace_.load(std::memory_order_relaxed)) camY_ += speed;
     if (keyShift_.load(std::memory_order_relaxed)) camY_ -= speed;
-    if (keyR_.load(std::memory_order_relaxed)) { // 重置视角（回出生点：平台上方）
-        camX_ = 0.0; camY_ = 1.5; camZ_ = 3.5;
-        yaw_ = 0.0; pitch_ = 0.0;
+    if (keyR_.load(std::memory_order_relaxed)) { // 重置视角（回出生点：生成地形的地表上方）
+        camX_ = spawnX_; camY_ = spawnY_; camZ_ = spawnZ_;
+        yaw_ = spawnYaw_; pitch_ = spawnPitch_;
     }
 
     writeCameraState();
+}
+
+void InputSampler::setSpawn(double x, double y, double z, double yawRad, double pitchRad) {
+    spawnX_ = x; spawnY_ = y; spawnZ_ = z;
+    spawnYaw_ = yawRad; spawnPitch_ = pitchRad;
+    camX_ = x; camY_ = y; camZ_ = z;
+    yaw_ = yawRad; pitch_ = pitchRad;
+    writeCameraState(); // 立即生效（渲染首帧前调用，避免首帧还在旧位置）
 }
 
 void InputSampler::writeCameraState() {

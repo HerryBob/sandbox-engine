@@ -48,6 +48,11 @@ public:
     bool placeBlock(const engine::shared::BlockPos& p, engine::shared::BlockType type);
     bool removeBlock(const engine::shared::BlockPos& p);
 
+    // ---- 生成专用批量入口（#36 世界生成；不走逐块 placeBlock）----
+    // 一次锁 → 直写各 chunk 的 blocks 数组 → 逐 chunk 标脏（不发逐块变更事件）。
+    // 仅装配期（三轨启动前）/加载期使用；运行期写入必须走 placeBlock/removeBlock。
+    void generateBlocks(const std::vector<engine::shared::Block>& blocks);
+
     // 本 tick 变脏的 chunk 集合：拷贝查看（不消费）。
     // 调用方（BusinessWorld::flushChanges）push 变更事件成功后再 clearDirtyChunks()；
     // push 失败不清空 → 下 tick 重试（丢变更 = 渲染端漏重建）。

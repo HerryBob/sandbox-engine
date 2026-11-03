@@ -1,8 +1,8 @@
 # MinecraftGame2 架构决策文档
 
 > 项目：C++ 开发 Minecraft 尝试（引擎版）
-> 状态：渲染层全链闭环（校验层 0）/ 四轨消息流跑通 / 软断言全 PASS / 模型层数据驱动落地（远端 1b6f9df）
-> 更新：2026-10-31
+> 状态：渲染层全链闭环（校验层 0）/ 四轨消息流跑通 / 软断言全 PASS / 模型层数据驱动落地（远端 1b6f9df）/ 世界生成 1a 数据驱动落地
+> 更新：2026-11-04
 > 协作方式：作者主导设计决策，AI 辅助编码/教学/文档整理；代码经作者 review 后提交。
 > 本文记录"为什么这么设计"——每条决策含背景、方案、权衡；代码注释是"是什么"，本文是"为什么"。
 
@@ -157,6 +157,15 @@
 - **方案**：`ModelDef`（纯数据结构：元素 = 任意比例 AABB，from/to 16 单位坐标，6 面槽）/ `ModelLoader`（RapidJSON 逐成员解析，faces 可选缺省 6 面，faceIndexOf/parseVec3 私有容错工具）/ `ModelRegistry`（engine::registry 注册表，文件名去 `.json` 即注册键）；`assets/models/block/*.json`（MC 式资源编排）；textures 表 `#变量` 展开；CMake copy_directory assets；`BlockInfo.model` → `buildModelVertices` 分流（模型驱动 vs 立方体兜底）。
 - **权衡**：rotation/facing（元素旋转/朝向）未实现（等真实需求——原木横放/熔炉朝向目前做不了）；纹理/模型不合并（名字驱动单向流，给模组作者留改造空间）；同模型元素间不做剔除（与 MC 一致）。
 
+### D20 世界生成数据驱动（噪声注册表 + 数据预设 + 生成器管线）
+
+- **背景**：`World()` 里写死 48×48 石头平台 + 玻璃/木头测试块——换地形要改代码，也没法交给数据包/模组。
+- **方案**：三层职责分离——① `NoiseSource` 抽象接口 + `NoiseRegistry`（type 名 ↔ 工厂，`registerType` 起就是 public = 模组口子；`freeze()` 后免锁读）管"噪声算法"；② `data/worldgen/presets/*.json` 管"地形配方"（seed / heightmap 噪声编排 / baseHeight / amplitude / strata 地层表）；③ `WorldGenerator` 管"骨架"（预设校验 → 地层解析 → 覆盖连续性校验 → 逐列采样 → 批量写入），引擎侧不出现任何具体 type 字符串。
+- **关键语义**：strata 的 depth 是**相对地表深度**（depth 0 = 该列 surfaceY，地层随地形起伏整体平移），否决绝对高度区间——否则山顶露石、山谷草皮悬空；`baseHeight/amplitude` 在数据文件，生成器零写死。
+- **写入方式**：新增 `World::generateBlocks(blocks)` 生成专用批量入口——一次锁、直写 chunk blocks、逐 chunk 标脏；**不走 base 裁决、不发逐块变更事件**（否则约 7.6 万次事件打乱渲染重建，1b 异步生成时还有锁竞争）。
+- **权衡**：阶段接口 `WorldGenStage` 未抽（1a 单阶段内联，等装饰/洞穴阶段出现再引入）；嵌套噪声保持一层（base 递归升级登记为升级点）；异步生成留 1b。
+- **验证**：同 seed 两次逐位一致（76447 块 / 地表 28..36）；临改 seed=1338 → 76337 块 / 30..35，证明 seed 参与采样。
+
 ---
 
 ## 三、踩坑记录（都是真金白银）
@@ -177,6 +186,7 @@
 ## 四、验证基线
 
 - **校验层 0**：冒烟 stderr 空（Validation Error 数 = 0）。
+- **世界生成 1a 基线**：`地形生成：成功（列=2304 方块=76447 地表高度=28..36）` → `初始世界：方块=76447` → 重建 chunk=44（空 chunk 不占内存：y 48..63 全空、y 32..47 部分列无块）；stderr 固定两行预期输出（`[Model] 加载 2 个方块模型`、`[Noise] 未注册的噪声类型：不存在的类型…`，后者来自自检）。**旧基线 2307 块 + 16 个 `重建 chunk=(x,0,z)` 已作废**。相机出生点由 `stats.maxSurfaceY + 2` 决定（不写死世界高度）。
 - **软断言全部 PASS**：四轨消息（命令零丢失/裁决闭环/打包解包）、物理（刚体/碰撞/接触语义/增量碰撞箱）、业务（区块化/区域查询/脏跟踪）、渲染（Vulkan 全链/方块呈现/变更事件流/位置插值）。
 - **稳定性**：resize 连续重建无报错；改造断言"等事实成立"后连续多次运行全绿。
 - **冒烟惯例**：Start-Process → 等 5-8s → Stop-Process；读 stderr（空=校验层 0）+ grep stdout 关键日志；**冷启动首跑可能 stdout 0 字节，需重跑一次**（进程启动竞态）。
@@ -191,14 +201,16 @@
 四轨消息流 + 软断言           增量重建（D16）        纹理图集（D17）
 Cutout 双管线分桶（D18）      模型层数据驱动（D19，远端 1b6f9df）
 流式加载与驻留架构设计定案（DOCS自制版/流式加载与驻留架构决策.md）
+世界生成 1a：数据驱动噪声地形（D20）——写死平台/玻璃/木头测试块已删除
 
 当前 ▸▸▸
-模型层闭环；流式加载架构为设计文档（未实现，等有消费者：实体/结构/后台演化）
+世界生成 1a 闭环（单阶段、一次性生成 48×48）；流式加载架构仍为设计文档（未实现，等有消费者：实体/结构/后台演化）
 
 下一步（建议顺序）▸▸▸
-① chunk 加载/卸载 + 世界生成器（按流式加载决策文档：WorldManager 复合体/租约制/三轴独立）
-② Translucent 半透明管线（1 render pass + 2 pipelines：depthWrite OFF + blend）
-③ 动态方块渲染 / 结构运动（contraption 渲染单元）
+① 世界生成 1b：异步生成（后台线程 + SPSC 双队列，不阻塞 25 TPS）
+② chunk 加载/卸载（按流式加载决策文档：WorldManager 复合体/租约制/三轴独立）
+③ Translucent 半透明管线（1 render pass + 2 pipelines：depthWrite OFF + blend）
+④ 动态方块渲染 / 结构运动（contraption 渲染单元）
 ```
 
 **当前渲染状态**：世界方块全部接入渲染；方块 mesh 由模型驱动（Model 三件套 + buildModelVertices 分流，立方体兜底）；纹理走图集（Atlas 16×16/8×8 格，名字驱动）；Solid/Cutout 双管线分桶（玻璃走 Cutout）；增量重建消费 BlockChangeEvent（dirtyChunks_ → GPU 安全点 rebuildChunkMeshes）；相机 WASD/鼠标/R；UBO 每帧更新。

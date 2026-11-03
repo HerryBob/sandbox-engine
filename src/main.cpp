@@ -16,6 +16,11 @@
 #include "shared/state/PlayerInput.hpp"
 #include "registry/BlockRegistry.hpp"
 #include "render/assets/ModelLoader.hpp"
+#include "worldgen/noise/BuiltinNoiseTypes.hpp"
+#include "worldgen/noise/NoiseRegistry.hpp"
+#include "worldgen/preset/PresetLoader.hpp"
+#include "worldgen/preset/WorldPreset.hpp"
+#include "worldgen/generator/WorldGenerator.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -69,6 +74,28 @@ static int run() {
     //图集 buildFromRegistry 要收集模型引用的纹理名（如 wood.json 的 log_top）
     engine::assets::loadBlockModels();
 
+    //世界生成子系统（#33/#34）：内置噪声注册 → 行为自检 → 锁表。
+    //freeze 后注册表只读；模组 DLL 将来在 freeze 前注册（#41 加载器）。
+    engine::worldgen::initBuiltinNoiseTypes();
+    const bool noiseOk = engine::worldgen::selfTestNoiseTypes();
+    engine::worldgen::NoiseRegistry::freeze();
+    std::cout << "噪声注册表：内置 value/perlin/fbm，frozen="
+              << std::boolalpha << engine::worldgen::NoiseRegistry::frozen()
+              << "，自检" << (noiseOk ? "通过" : "失败") << "\n";
+
+    // 世界预设（#35）：data/worldgen/presets/default.json → WorldPreset（噪声已实例化）。
+    engine::worldgen::WorldPreset preset;
+    const bool presetOk = engine::worldgen::PresetLoader::load("default", preset);
+    std::cout << "世界预设：default.json " << (presetOk ? "加载成功" : "加载失败");
+    if (presetOk) {
+        std::cout << "（seed=" << preset.seed
+                  << " baseHeight=" << preset.baseHeight
+                  << " amplitude=" << preset.amplitude
+                  << " strata层=" << preset.strata.size()
+                  << " 高度图噪声=" << (preset.heightmap ? "已实例化" : "空") << "）";
+    }
+    std::cout << "\n";
+
     engine::render::VulkanContext vkCtx;
     const bool vkOk = vkCtx.init(1280, 720, "沙盒引擎 · Vulkan 方块+相机");
     if (vkOk) {
@@ -91,13 +118,42 @@ static int run() {
     vkCtx.attachCameraState(&cameraState);
 
     business::BusinessWorld businessWorld(tm, physicsBridge, renderBridge);
+
+    //#36 初始世界：WorldGenerator 从预设生成（替换 World 构造里写死的 48×48 平台）。
+    // 装配期单线程执行（三轨未启动）；失败不阻断启动（世界保持为空）。
+    // 统计外置：下方相机出生点要按实际地表高度设定。
+    engine::worldgen::WorldGenerator::Stats genStats;
+    bool genOk = false;
+    if (presetOk) {
+        engine::worldgen::WorldGenerator gen(businessWorld.world(), preset);
+        genOk = gen.generate(&genStats);
+        std::cout << "地形生成：" << (genOk ? "成功" : "失败");
+        if (genOk) {
+            std::cout << "（列=" << genStats.columns << " 方块=" << genStats.blocks
+                      << " 地表高度=" << genStats.minSurfaceY << ".." << genStats.maxSurfaceY << "）";
+        }
+        std::cout << "\n";
+    }
+
     physics::PhysicsWorld   physicsWorld(tm);
     input::InputSampler inputSampler;
     inputSampler.attach(vkCtx.window(), &cameraState, &playerInput); // 注册键盘/鼠标回调（真实输入，主线程安全）
+
+    // 相机出生点：按生成地形实际最高地表 +2 格（站在地表上方、略低头看地形）。
+    // 不写死世界高度——改预设的 baseHeight/amplitude 后相机会自动跟着走。
+    // 生成失败则保持默认出生点（空世界下无意义）。
+    if (genOk) {
+        inputSampler.setSpawn(0.0,
+                              static_cast<double>(genStats.maxSurfaceY) + 2.0,
+                              8.0,          // z=8：站在世界中心偏后，朝 -Z 看地形
+                              0.0,          // yaw：朝 -Z
+                              -0.35);       // pitch：略低头（sin(pitch) 为视线高度分量）
+    }
+
     // 渲染线程（第 4 轨只读观众）：消费变更事件流 + 绘制。
     engine::render::Renderer renderer(businessWorld, renderBridge.changeEventQueue(), vkCtx);
 
-    // 初始世界：飞船演示数据已删除（2026-10-24），地形生成后在此填充。
+    // 初始世界统计：生成后快照（诊断/验收用）。
     std::cout << "初始世界：方块=" << businessWorld.blockCount() << "\n";
 
     core::ThreadLoop businessLoop("business");

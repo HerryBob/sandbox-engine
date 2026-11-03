@@ -6,23 +6,8 @@
 namespace engine::business {
 
 World::World() {
-    // 初始世界：48×48 石头平台（x,z ∈ [-24,23]，y=0）。
-    // 数据层 ② 区块化：方块写入 16³ chunk（chunks_ 稀疏映射，空 chunk 不占内存）。
-    // 初始内容属世界域；未来被世界生成器（chunk 加载/卸载）取代。
-    auto setBlock = [&](int x, int y, int z, engine::shared::BlockType t) {
-        const engine::shared::BlockPos p{x, y, z};
-        auto& c = chunks_[engine::shared::chunkOf(p)]; // operator[] 缺省构造新 chunk
-        c.atWorld(p) = static_cast<std::uint8_t>(t);
-        c.markDirty(0x01); // 修改跟踪：初始装载标记脏（变更事件流种子）
-    };
-    for (int x = -24; x <= 23; ++x)
-        for (int z = -24; z <= 23; ++z)
-            setBlock(x, 0, z, engine::shared::BlockType::Stone);
-    // 测试块：玻璃（Cutout 分桶验证——悬浮平台上方一格，6 面全暴露）
-    setBlock(0, 1, 0, engine::shared::BlockType::Glass);
-    // 测试块：木头（模型驱动验证——顶/底 log_top，侧面 log_side）
-    setBlock(1, 1, 0, engine::shared::BlockType::Wood);
-    setBlock(2, 1, 0, engine::shared::BlockType::Wood);
+    // 初始世界由装配层（main）用 WorldGenerator 从数据预设生成（#36 起）。
+    // 构造函数不再预置方块：世界域的初始内容 = data/worldgen/presets/*.json。
 }
 
 std::size_t World::blockCount() const {
@@ -120,6 +105,19 @@ std::unordered_set<engine::shared::ChunkPos> World::peekDirtyChunks() const {
 
 void World::clearDirtyChunks() {
     dirtyChunksThisTick_.clear();
+}
+
+void World::generateBlocks(const std::vector<engine::shared::Block>& blocks) {
+    // 生成专用批量写入（#36）：一次锁 → 直写 chunk blocks → 逐 chunk 标脏。
+    // 不走 base 裁决（生成是权威写入，不需要"能不能放"检查）；
+    // 不进 dirtyChunksThisTick_（装配期调用，渲染端首帧全量快照重建即可）。
+    // 调用方保证：装配/加载期单线程（无别线程并发消费 dirty 集合）。
+    std::lock_guard<std::mutex> lock(blocksMutex_);
+    for (const auto& b : blocks) {
+        auto& c = chunks_[engine::shared::chunkOf(b.pos)]; // operator[] 缺省构造新 chunk
+        c.atWorld(b.pos) = static_cast<std::uint8_t>(b.type);
+        c.markDirty(0x01); // 修改跟踪：生成装载标记脏（与初始装载同码）
+    }
 }
 
 } // namespace engine::business

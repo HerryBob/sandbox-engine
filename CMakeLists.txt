@@ -79,3 +79,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
             "${CMAKE_CURRENT_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:sandbox_engine>/assets"
     )
 endif()
+
+# data/ 逻辑层资源整体拷贝（MC 编排：data/worldgen/presets/*.json 世界预设、未来 noise 编排）
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
+    add_custom_command(TARGET sandbox_engine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/data" "$<TARGET_FILE_DIR:sandbox_engine>/data"
+    )
+endif()

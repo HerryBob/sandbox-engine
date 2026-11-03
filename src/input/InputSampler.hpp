@@ -31,6 +31,10 @@ public:
     // 输入线程每 tick 调用：消费视角增量 + 键盘状态 → 更新相机 → 写 CameraState。
     void sample();
 
+    // 装配期设置出生点（生成地形后由 main 按实际地表高度设定；R 键回到这里）。
+    // 同时覆盖当前位置，立即生效（渲染首帧前调用）。
+    void setSpawn(double x, double y, double z, double yawRad, double pitchRad);
+
     // ---- GLFW 回调（静态，单实例经 s_self_ 分发）----
     static void keyboardCb(GLFWwindow* w, int key, int scancode, int action, int mods);
     static void mouseButtonCb(GLFWwindow* w, int button, int action, int mods);
@@ -55,9 +59,13 @@ private:
     std::atomic<double> lastCursorY_{0.0};
 
     // ---- 相机状态（输入线程独占写）----
-    double camX_ = 0.0, camY_ = 1.5, camZ_ = 3.5; // 初始位置：站在 y=0 平台顶面（眼睛高 1.5）
+    // 出生点：装配期由 main 按生成地形实际高度设定（不写死世界高度）；R 键回到这里。
+    double spawnX_ = 0.0, spawnY_ = 1.5, spawnZ_ = 3.5;
+    double spawnYaw_ = 0.0, spawnPitch_ = -0.35;
+
+    double camX_ = 0.0, camY_ = 1.5, camZ_ = 3.5; // 当前位置（初始 = 出生点默认值）
     double yaw_ = 0.0;                            // 左右旋转（弧度）
-    double pitch_ = 0.0;                          // 上下旋转（弧度，clamp ±83°）
+    double pitch_ = -0.35;                        // 上下旋转（弧度，clamp ±83°；略低头看地形）
 
     std::chrono::steady_clock::time_point lastLog_;
 };

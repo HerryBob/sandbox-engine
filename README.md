@@ -2,13 +2,14 @@
 
 C++ 自研方块沙盒引擎（对标 Minecraft）：**四线程消息流 + Vulkan 渲染 + 数据驱动模型 + 纹理图集 + 动态复合体**（任意方块打包为单个刚体，对标机械动力航空学）。
 
-## 当前状态（2026-10-31）
+## 当前状态（2026-11-04）
 
 - **四轨消息流跑通**：输入墙钟采样 / 物理 25TPS / 业务 25TPS / 渲染只读观众（SPSC 无锁队列，命令零丢失）
 - **区块化存储**：16³ 稀疏 chunk + 脏标记 + 变更事件流 + **增量重建**（业务标脏 → GPU 安全点重建脏 chunk，全量重建是增量的特例）
 - **Vulkan 全链渲染**：交换链 / MSAA 8x / 深度缓冲 / 背面剔除 / **Solid + Cutout 双管线分桶**（玻璃等镂空方块走 Cutout，双面渲染）
 - **纹理图集**：16×16 / 8×8 格 Atlas（升级分辨率只改一个常量），名字驱动单向流（BlockInfo.texture → 模型点名 → 图集备货 → meshing 碰头）
 - **数据驱动方块模型**：Model 三件套（Def / Loader / Registry）+ `assets/models/block/*.json`（MC 式资源编排，文件名即注册键）+ buildModelVertices 分流（模型驱动 vs 立方体兜底）
+- **世界生成 1a（数据驱动噪声地形）**：`data/worldgen/presets/default.json` → PresetLoader → WorldPreset（NoiseRegistry 工厂实例化 fbm→perlin）→ WorldGenerator（逐列采样 → 相对地表深度地层表 → 批量写入）；写死的 48×48 平台已删除，同 seed 两次生成逐位一致（76447 块 / 地表 28..36）
 - **放置/破坏方块交互闭环**：准星模式输入 → DDA 射线检测 → 业务裁决（base/BlockActions）→ 变更事件 → 增量 mesh 重建
 - **设计定案（未实现，等有消费者）**：流式加载与驻留架构——驻留/活跃/渲染三轴独立 + 租约制（玩家窗口只是默认租约之一）+ WorldManager 复合体，详见下方文档
 
@@ -19,6 +20,9 @@ C++ 自研方块沙盒引擎（对标 Minecraft）：**四线程消息流 + Vulk
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 当前架构决策（四轨 / 决策 D1-D19 / 踩坑记录 / 验证基线 / 路线图）——**权威文档** |
 | [docs/DOCS自制版/流式加载与驻留架构决策.md](docs/DOCS自制版/流式加载与驻留架构决策.md) | 流式加载与自由驻留架构（三轴独立 / 租约三原语 / WorldManager 复合体 / 市面对照） |
 | [docs/DOCS自制版/模型格式决策.md](docs/DOCS自制版/模型格式决策.md) | 数据驱动方块模型格式（ModelDef / JSON 结构 / 纹理变量表 `#展开`） |
+| [docs/DOCS自制版/世界生成数据驱动架构决策.md](docs/DOCS自制版/世界生成数据驱动架构决策.md) | 世界生成三层职责（模组 / 数据 / 引擎）+ 五步管线 + 1a 落地实况 |
+| [docs/DOCS自制版/MC架构借鉴.md](docs/DOCS自制版/MC架构借鉴.md) | MC Java 架构借鉴点与反模式（生成管线 / 数据组织 / 线程）+ 1a 核对 |
+| [docs/DOCS自制版/模组架构决策.md](docs/DOCS自制版/模组架构决策.md) | 模组加载器定位（单一 DLL 通道）+ 开放面做厚 + 内置 vs 模组边界 |
 | [docs/DOCS自制版/玩法决策.md](docs/DOCS自制版/玩法决策.md) | 玩法方向与引擎通用原语（能源三态 / 结构物理 / 流体气体） |
 | [docs/DOCS自制版/流体与气体系统设计.md](docs/DOCS自制版/流体与气体系统设计.md) | 流体/气体系统设计（chunk 是流体、存档、LOD 的共同地基） |
 | [docs/vulkan-learning-roadmap.md](docs/vulkan-learning-roadmap.md) | Vulkan 学习路线（三层策略 + 里程碑进度 + 坑记录） |
@@ -35,7 +39,8 @@ C++ 自研方块沙盒引擎（对标 Minecraft）：**四线程消息流 + Vulk
 ```
 cmake --build E:\MinecraftGame2\build --config Debug
 # exe: E:\MinecraftGame2\build\Debug\sandbox_engine.exe
-# 注意：运行工作目录需切到 exe 所在目录；assets/ 已由 CMake copy_directory 拷贝到 exe 旁（models/ textures/ 资源相对路径从 exe 解析）
+# 注意：运行工作目录需切到 exe 所在目录；assets/ 与 data/ 已由 CMake copy_directory 拷贝到 exe 旁
+# （models/ textures/ 与 worldgen/presets/ 的资源相对路径都从 exe 目录解析）
 ```
 
 依赖（不入库）：LunarG Vulkan SDK（通过 `VULKAN_SDK` 环境变量定位）+ 仓库内置 third_party（GLM / GLFW / RapidJSON / stb_image，许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）。

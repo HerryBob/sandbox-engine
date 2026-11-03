@@ -15,7 +15,7 @@ BusinessWorld::BusinessWorld(engine::core::TimeManager& tm,
       tm_(tm),
       startWall_(std::chrono::steady_clock::now()),
       lastLog_(std::chrono::steady_clock::now()) {
-    // 初始世界（48×48 石头平台）由 World 构造函数创建（世界域职责）。
+    // 初始世界：由装配层（main）用 WorldGenerator 从数据预设生成（World 构造函数不再预置方块）。
 }
 
 void BusinessWorld::advanceTick(double scale) {
