@@ -1,4 +1,4 @@
-// 沙盒引擎 · 单机入口
+﻿// 沙盒引擎 · 单机入口
 // 引擎本体在 core/business/physics/input/render；本文件只做装配：
 //   Vulkan 上下文 → 进程内 SPSC 队列 → 四线程启动 → 主线程 GLFW 事件循环 → 优雅停止。
 #include "business/BusinessWorld.hpp"
@@ -15,6 +15,7 @@
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerInput.hpp"
 #include "registry/BlockRegistry.hpp"
+#include "modhost/ModLoader.hpp"
 #include "render/assets/ModelLoader.hpp"
 #include "worldgen/noise/BuiltinNoiseTypes.hpp"
 #include "worldgen/noise/NoiseRegistry.hpp"
@@ -71,6 +72,14 @@ static int run() {
 
     //方块注册表：必须先于 vkCtx.init（内部 createTextureImage 构建图集要遍历注册表）
     engine::registry::initBlockRegistry();
+
+    //模组加载（#41）：必须夹在 initBlockRegistry 之后、freeze 之前。
+    //顺序错了不会有报错，只会静默少方块 —— Registry::add 在表冻结后直接返回 false。
+    const auto modCount = engine::modhost::ModLoader::loadAll("mods");
+    engine::registry::freezeBlockRegistry();
+    std::cout << "方块注册表：共 " << engine::registry::g_blockRegistry.size()
+              << " 个（成功加载模组 " << modCount << " 个），frozen="
+              << std::boolalpha << engine::registry::g_blockRegistry.frozen() << "\n";
 
     //模型注册表：方块注册之后、Vulkan 初始化之前——
     //图集 buildFromRegistry 要收集模型引用的纹理名（如 wood.json 的 log_top）
@@ -184,7 +193,7 @@ static int run() {
     }
 
     // 渲染线程（第 4 轨只读观众）：消费变更事件流 + 绘制。
-    engine::render::Renderer renderer(businessWorld, renderBridge.changeEventQueue(), vkCtx);
+    engine::render::Renderer renderer(businessWorld, renderBridge.changeEventQueue(), vkCtx, playerInput);
 
     // 初始世界统计：生成后快照（诊断/验收用）。
     std::cout << "初始世界：方块=" << businessWorld.blockCount() << "\n";
@@ -256,7 +265,9 @@ static int run() {
         while (!renderLoop.shouldStop()) {
             renderer.tick();
             vkCtx.drawFrame();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5)); // ~165Hz
+            // 这里原本有一行 sleep_for(5ms) 做限速，已删除：节奏由 FIFO(vsync) 的
+            // vkAcquireNextImageKHR 阻塞决定，帧率上限 = 显示器刷新率；
+            // 且 Windows 定时器粒度会把 5ms 请求放大到约 9.5ms（实测 165→62 FPS）。
         }
     });
 
@@ -274,6 +285,9 @@ static int run() {
     renderLoop.stop();
 
     vkCtx.shutdown();
+    //模组逆序卸载：放在渲染/业务全部停掉之后——
+    //注册表里还存着 DLL 提供的字符串指针，提前卸载会变成悬垂引用。
+    engine::modhost::ModLoader::unloadAll();
     std::cout << "引擎退出。\n";
     return 0;
 }

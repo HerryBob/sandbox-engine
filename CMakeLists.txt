@@ -32,9 +32,10 @@ add_executable(sandbox_engine
 # ---- 第三方依赖 ----
 set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
-# glm（header-only）+ glfw 头文件
+# glm（header-only）+ glfw 头文件 + 工程根（modapi/ 跨边界契约层）
 target_include_directories(sandbox_engine PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
     "${THIRD_PARTY_DIR}/include"
 )
 
@@ -70,6 +71,10 @@ add_custom_command(TARGET sandbox_engine POST_BUILD
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vert.spv" "$<TARGET_FILE_DIR:sandbox_engine>/shaders/vert.spv"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/frag.spv" "$<TARGET_FILE_DIR:sandbox_engine>/shaders/frag.spv"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hud_vert.spv" "$<TARGET_FILE_DIR:sandbox_engine>/shaders/hud_vert.spv"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hud_frag.spv" "$<TARGET_FILE_DIR:sandbox_engine>/shaders/hud_frag.spv"
 )
 # 资源为可选资源：公开仓库不含 MC 版权纹理，本机构建时存在则复制（缺省不影响编译）
 # assets/ 整体拷贝（MC 编排：assets/models/block/*.json + assets/textures/block/*.png）
@@ -87,3 +92,32 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
             "${CMAKE_CURRENT_SOURCE_DIR}/data" "$<TARGET_FILE_DIR:sandbox_engine>/data"
     )
 endif()
+
+# ============================================================================
+# 模组 DLL（#41 最小骨架）
+# ============================================================================
+# mods_src/ 下每个子目录 = 一个模组工程；产物统一拷到 exe 同级的 mods/。
+# MODULE 库在 Windows 上就是 .dll（PREFIX "" 去掉 lib 前缀）。
+# 关键：DLL 只 include modapi/，绝不 include src/ —— 否则会拿到注册表的独立副本。
+# 运行库必须与 exe 一致（Debug 下 MSVC 默认都是 /MDd；不要单独设 /MT）。
+add_library(hello_block MODULE
+    mods_src/hello_block/HelloBlockMod.cpp
+)
+target_include_directories(hello_block PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(hello_block PRIVATE /utf-8)
+endif()
+set_target_properties(hello_block PROPERTIES
+    PREFIX ""
+    SUFFIX ".dll"
+    FOLDER "mods"
+)
+
+# 先建 DLL 再执行 sandbox_engine 的 POST_BUILD 拷贝
+add_dependencies(sandbox_engine hello_block)
+
+add_custom_command(TARGET sandbox_engine POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:sandbox_engine>/mods"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:hello_block>" "$<TARGET_FILE_DIR:sandbox_engine>/mods/hello_block.dll"
+)

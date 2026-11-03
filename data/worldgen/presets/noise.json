@@ -1,0 +1,18 @@
+{
+  "seed": 1337,
+  "heightmap": {
+    "noise": {
+      "type": "fbm",
+      "base": "perlin",
+      "octaves": 4,
+      "scale": 0.004
+    },
+    "baseHeight": 32.0,
+    "amplitude": 16.0
+  },
+  "strata": [
+    { "block": "grass", "depthMin": 0, "depthMax": 0 },
+    { "block": "dirt",  "depthMin": 1, "depthMax": 3 },
+    { "block": "stone", "depthMin": 4, "depthMax": 63 }
+  ]
+}

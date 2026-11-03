@@ -28,7 +28,13 @@ namespace engine::registry {
         g_blockRegistry.add(
             static_cast<std::uint8_t>(engine::shared::BlockType::Grass),
             { "grass", true, 0.6f, RenderType::Solid, "grass_top", "grass" });  // 模型化：顶 grass_top，侧 grass_side，底 dirt
-        g_blockRegistry.freeze();   // 锁表（免锁读前提）
+    }
+
+    // 锁表：freeze 之后 Registry::add 一律返回 false（免锁读的前提）。
+    // 注意：freeze 不在 initBlockRegistry 内部调用，而是由装配层在"内置方块 + 模组方块"
+    // 全部注册完之后显式调用 —— 否则模组没有任何机会注册（#41 加载器）。
+    inline void freezeBlockRegistry() {
+        g_blockRegistry.freeze();
     }
 
     // 按方块名查 BlockType id（数据文件用字符串引用方块：strata 的 "grass"）。

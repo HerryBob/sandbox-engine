@@ -7,12 +7,15 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 
 #include <glm/glm.hpp>
 #include "shared/block/Block.hpp"
 #include "render/assets/TextureAtlas.hpp"
+#include "render/hud/HudInfo.hpp"
+#include "render/hud/HudTextBuilder.hpp"
 
 // 依赖方案 A：LunarG SDK 直连（find_package(Vulkan) + vulkan-1.lib 静态链接）。
 // 不再用 volk 动态加载（旧引擎 volk 方案在迁移时切换为 SDK 直连）。
@@ -68,6 +71,14 @@ struct ChunkMesh {
 class VulkanContext {
 public:
     void attachCameraState(engine::shared::CameraState* camera) { cameraState_ = camera; }
+
+    // ---- HUD（游戏内调试浮层，F3 开关）----
+    // 业务统计由渲染线程按 1Hz 调用：chunkCount/blockCount 要抢业务锁，别每帧查。
+    void setHudStats(long long chunkCount, long long blockCount,
+                     long long tickCount, double simTime);
+    // 可见性由渲染线程按 F3 按下边沿切换（默认隐藏，不打扰正常游玩）。
+    void setHudVisible(bool visible);
+    bool hudVisible() const { return hudVisible_; }
 public:
     VulkanContext() = default;
     ~VulkanContext();
@@ -140,6 +151,14 @@ private:
     bool createTextureSampler();    // 采样器：告诉 GPU 怎么取样（过滤/寻址）
     void updateViewProj(double dt); // 从 CameraState 读相机状态 → 算 MVP 写 UBO（drawFrame 开头调用，只读不处理输入）
     void destroyUniformObjects();
+
+    // ---- HUD 资源（字体纹理 + 独立管线 + 每帧顶点缓冲）----
+    bool createHudResources();       // init 时创建一次：字体纹理 / 描述符 / 管线 / 顶点缓冲
+    void destroyHudResources();      // shutdown 逆序释放（重复调用安全）
+    bool createFontTexture();        // assets/textures/font/ascii.png → GPU 纹理（R 通道 = 覆盖率）
+    bool createHudPipeline();        // 独立 pipelineLayout（只挂字体纹理）+ 关深度 + alpha 混合
+    std::size_t buildHudVertices();  // 组装本帧 HUD 文本 → 顶点流（返回顶点数，供 draw）
+    void drawHud(VkCommandBuffer cmd, uint32_t frameIndex); // 在 EndRenderPass 之前录制 HUD 这一趟
     
 
     // GLFW 回调（static 成员：可作 C 函数指针传参，同时能访问私有成员）。
@@ -218,6 +237,35 @@ private:
     uint32_t        texWidth_ = 0;
     uint32_t        texHeight_ = 0;
     engine::assets::TextureAtlas    textureAtlas_;   // 图集：纹理名 → 格 → UV（meshing 查询用）
+
+    // ---- HUD（游戏内调试浮层）----
+    // 顶点容量：12288 顶点 = 2048 个字符 × 6 顶点。HUD 满打满算约 900 字符，留足余量。
+    static constexpr std::size_t kHudVertexCapacity = 12288;
+    hud::HudInfo         hudInfo_{};                  // 业务统计快照（1Hz 由渲染线程喂）
+    bool                 hudVisible_ = false;         // F3 切换，默认隐藏
+    bool                 hudDrawnOnce_ = false;       // 首帧绘制日志只打一次
+    hud::HudTextBuilder  hudText_;                    // 逐帧重建的顶点流（CPU 侧）
+    VkImage              fontImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory       fontImageMemory_ = VK_NULL_HANDLE;
+    VkImageView          fontImageView_ = VK_NULL_HANDLE;
+    VkSampler            fontSampler_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout hudDescLayout_ = VK_NULL_HANDLE;  // 独立：binding 0 = 字体纹理
+    VkDescriptorPool      hudDescPool_ = VK_NULL_HANDLE;     // 独立池：不与 3D 的 descPool_ 抢额度
+    VkDescriptorSet       hudDescSet_ = VK_NULL_HANDLE;
+    VkPipelineLayout      hudPipelineLayout_ = VK_NULL_HANDLE;  // 只有 push constant（屏幕尺寸）
+    VkPipeline            hudPipeline_ = VK_NULL_HANDLE;
+    VkBuffer          hudVertexBuffer_[kMaxFramesInFlight]{};
+    VkDeviceMemory    hudVertexMemory_[kMaxFramesInFlight]{};
+    void*             hudVertexMapped_[kMaxFramesInFlight]{};  // 持久映射（HOST_COHERENT，免 flush）
+    // FPS 统计（0.5 秒窗口 + 指数平滑）
+    std::chrono::steady_clock::time_point fpsWindowStart_{};
+    std::chrono::steady_clock::time_point lastFrameStart_{};
+    double            fpsSmoothed_ = 0.0;
+    double            frameMsSmoothed_ = 0.0;
+    uint32_t          fpsFramesInWindow_ = 0;
+    // tps 统计（1Hz 采样的差分：tickCount 增量 / 墙钟增量）
+    std::chrono::steady_clock::time_point tpsWindowStart_{};
+    long long         tpsLastTicks_ = 0;
 };
 
 } // namespace engine::render

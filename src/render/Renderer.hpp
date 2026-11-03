@@ -2,8 +2,10 @@
 #include "core/SPSCQueue.hpp"
 #include "shared/block/Block.hpp"
 #include "shared/protocol/Protocol.hpp"
+#include "shared/state/PlayerInput.hpp"
 #include "VulkanContext.hpp"
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <unordered_set>
 
@@ -24,8 +26,9 @@ class Renderer {
 public:
     Renderer(engine::business::BusinessWorld& world,
              engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& changeQueue,
-        engine::render::VulkanContext& vk)          // ← 新增参数
-        : world_(world), changeQueue_(changeQueue), vk_(vk) {}
+        engine::render::VulkanContext& vk,
+        engine::shared::PlayerInput& input)     // ← 新增：消费 F3 开关请求
+        : world_(world), changeQueue_(changeQueue), vk_(vk), input_(input) {}
 
     // 渲染线程每帧调用（60Hz）：首帧全量重建 + 消费变更事件 → 请求重建。
     void tick();
@@ -44,6 +47,9 @@ private:
     engine::render::VulkanContext& vk_;
     engine::business::BusinessWorld& world_;
     engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& changeQueue_;
+    engine::shared::PlayerInput& input_;                       // F3 开关请求来源（只消费，不回写）
+    bool hudVisible_ = false;                                  // HUD 可见性：渲染线程独占写
+    std::chrono::steady_clock::time_point lastHudStats_{};     // 上次喂业务统计的时刻（1Hz 节流）
     std::unordered_set<engine::shared::ChunkPos> dirtyChunks_; // 见过的脏 chunk
     std::atomic<long long> changeEventsReceived_{0};
 };

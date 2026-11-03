@@ -80,10 +80,31 @@ void InputSampler::writeCameraState() {
 }
 
 // 键盘回调（主线程 pollEvents 触发）：只记录按下/松开状态，不做事。
-void InputSampler::keyboardCb(GLFWwindow* w, int key, int, int action, int) {
+void InputSampler::keyboardCb(GLFWwindow* w, int key, int scancode, int action, int mods) {
     auto* self = s_self_;
     if (!self || !w) return;
-    if (action == GLFW_REPEAT) return; // 重复事件不改变状态
+    (void)scancode; (void)mods;   // 未使用（签名保留 GLFW 回调形参）
+
+    // F3 单独处理：用"按住状态位"做边沿判定，而不是只认 GLFW_PRESS。两个原因：
+    //  ① GLFW 在 Windows 上偶尔把一次独立按键报成 GLFW_REPEAT（系统 key state 未复位）；
+    //     只认 PRESS 会漏按，按一下没反应。
+    //  ② 按住不放时系统 auto-repeat 会持续送来按键事件，必须挡住，
+    //     否则 HUD 会以几十次/秒的速率反复显隐。
+    // 状态位语义：f3Held_ = true 表示"上一次事件说明 F3 仍被按住"。
+    if (key == GLFW_KEY_F3) {
+        if (action == GLFW_RELEASE) {
+            self->f3Held_ = false;   // 松开：允许下一次按下再触发
+            return;
+        }
+        if (self->f3Held_) return;   // 仍按住（含 auto-repeat）→ 忽略
+        self->f3Held_ = true;
+        if (self->clickOut_) {
+            self->clickOut_->toggleHud.store(true, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    if (action == GLFW_REPEAT) return; // 其它键：重复事件不改变状态
     const bool pressed = (action == GLFW_PRESS);
     switch (key) {
     case GLFW_KEY_W:        self->keyW_.store(pressed, std::memory_order_relaxed); break;

@@ -9,8 +9,8 @@
 namespace engine::worldgen {
 
 // 地层：一个方块在"相对地表深度"区间的填充。
-// depthMin/depthMax 为相对地表深度（0 = 地表）——#36 决策点 1 草案，
-// 待用户拍板（相对地表 vs 绝对高度区间）；此结构按相对深度语义注释。
+// depthMin/depthMax 为相对地表深度（0 = 地表）——#36 决策点 1 已定案为"相对地表"，
+// 不再是草案（绝对高度区间的备选方案已弃用；代码与 default.json 均按此语义跑通）。
 struct Stratum {
     std::string block;    // 方块注册名（如 "grass" / "dirt" / "stone"）
     int depthMin = 0;     // 相对地表深度下界（含）
