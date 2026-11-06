@@ -24,6 +24,7 @@
 #include "worldgen/generator/ColumnGenerator.hpp"
 #include "worldgen/streaming/ChunkStreamer.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -31,7 +32,9 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -44,7 +47,6 @@ static void initConsole() {
     SetConsoleOutputCP(CP_UTF8);
 #endif
 }
-
 using namespace engine;
 
 // 玩家操作说明（输入层常量）：相机控制帮助文本。
@@ -85,16 +87,33 @@ static int run() {
     //图集 buildFromRegistry 要收集模型引用的纹理名（如 wood.json 的 log_top）
     engine::assets::loadBlockModels();
 
-    //世界生成子系统（#33/#34）：内置噪声注册 → 行为自检 → 锁表。
-    //freeze 后注册表只读；模组 DLL 将来在 freeze 前注册（#41 加载器）。
+    //世界生成子系统（#33/#34）：噪声注册 → 行为自检 → 锁表。
+    //注册分两批，顺序固定：
+    //  ① 模组（上面 loadAll 已调完，各 DLL 在 onLoad 里 registerNoise）
+    //  ② 引擎内置 flat（自举项：删掉所有 DLL 后，只剩它仍能跑平地）
+    //freeze 之后只读；晚到的注册会被 NoiseRegistry::registerType 直接拒绝。
     engine::worldgen::initBuiltinNoiseTypes();
     const bool noiseOk = engine::worldgen::selfTestNoiseTypes();
     engine::worldgen::NoiseRegistry::freeze();
-    std::cout << "噪声注册表：内置 value/perlin/fbm，frozen="
+
+    // 按名字区分来源：flat 是内置，其余全部来自模组 DLL（注册表不记来源元数据）。
+    std::vector<std::string> noiseTypes = engine::worldgen::NoiseRegistry::types();
+    std::sort(noiseTypes.begin(), noiseTypes.end());
+    std::string modNoise;
+    for (const std::string& type : noiseTypes) {
+        if (type == "flat") continue;
+        if (!modNoise.empty()) modNoise += "/";
+        modNoise += type;
+    }
+    const std::size_t modNoiseCount =
+        noiseTypes.size() - (engine::worldgen::NoiseRegistry::contains("flat") ? 1U : 0U);
+    std::cout << "噪声注册表：内置 flat，模组注册 " << modNoiseCount
+              << " 个（" << modNoise << "），frozen="
               << std::boolalpha << engine::worldgen::NoiseRegistry::frozen()
               << "，自检" << (noiseOk ? "通过" : "失败") << "\n";
 
-    // 世界预设（#35）：data/worldgen/presets/default.json → WorldPreset（噪声已实例化）。
+    // 世界预设（#35）：data/worldgen/presets/default.json → WorldPreset（纯数据）。
+    // 高度场实例化推迟到 ColumnGenerator::prepare()，失败原因在那里报。
     engine::worldgen::WorldPreset preset;
     const bool presetOk = engine::worldgen::PresetLoader::load("default", preset);
     std::cout << "世界预设：default.json " << (presetOk ? "加载成功" : "加载失败");
@@ -103,7 +122,7 @@ static int run() {
                   << " baseHeight=" << preset.baseHeight
                   << " amplitude=" << preset.amplitude
                   << " strata层=" << preset.strata.size()
-                  << " 高度图噪声=" << (preset.heightmap ? "已实例化" : "空") << "）";
+                  << " 高度场=" << preset.heightType << "）";
     }
     std::cout << "\n";
 
@@ -217,8 +236,15 @@ static int run() {
             // 否则渲染端要等下一个 tick 才看到它。
             if (streamer) {
                 streamer->tickUpdate(cameraState.camX.load(), cameraState.camZ.load());
-                streamer->drainResults(businessWorld.world(),
-                                       engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
+                const auto drained = streamer->drainResults(
+                    businessWorld.world(),
+                    engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
+                // 世界 chunk 集合有变化（加载或卸载）→ 物理侧必须重下一次全量方块集。
+                // 只认"卸载"不够：卸载与分批加载错在不同 tick，最后一次加载若不重同步，
+                // 物理侧就停在旧的中间态快照（实测：世界 90 列、物理仍 81 列）。
+                // 稳态时两者都为 0（不再触发），开销只在滑动的那几个 tick。
+                if (drained.evictedChunks > 0 || drained.appliedColumns > 0)
+                    businessWorld.requestPhysicsResync();
                 if (++streamReportCounter >= 25) {
                     streamReportCounter = 0;
                     const auto s = streamer->stats();
@@ -287,13 +313,42 @@ static int run() {
     vkCtx.shutdown();
     //模组逆序卸载：放在渲染/业务全部停掉之后——
     //注册表里还存着 DLL 提供的字符串指针，提前卸载会变成悬垂引用。
+    //卸载前还要先释放"由 DLL 创建、由引擎析构"的对象：
+    //height_ 的 destroy 是 DLL 内的函数指针，而 columnGen 是 run() 的局部变量，
+    //要到 return 才析构 —— 晚于 unloadAll 就是调用已卸载映像里的地址（UB）。
+    streamer.reset();           // 先断开 ChunkStreamer 对生成器的引用
+    columnGen.releaseNoise();   // 再让 DLL 亲手销毁自己 new 出来的实例
     engine::modhost::ModLoader::unloadAll();
     std::cout << "引擎退出。\n";
     return 0;
 }
 
-int main() {
+// 解析启动参数 --log-level=debug|info|warn|error（缺省 Info）。
+// 只认启动参数，不读配置文件——等级是"本次运行想看多细"，不是世界内容。
+static engine::core::LogLevel parseLogLevelArg(int argc, char** argv) {
+    engine::core::LogLevel level = engine::core::LogLevel::Info;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        const std::string prefix = "--log-level=";
+        if (arg.rfind(prefix, 0) == 0) {
+            level = engine::core::parseLogLevel(arg.substr(prefix.size()), level);
+        } else if (arg == "--log-level" && (i + 1) < argc) {
+            ++i;
+            level = engine::core::parseLogLevel(argv[i], level);
+        }
+    }
+    return level;
+}
+
+int main(int argc, char** argv) {
     initConsole();
     chdirToExeDir();
-    return run();
+
+    // 日志：控制台 + logs/engine.log（10MB×5 滚动），异步写不阻塞线程。
+    engine::core::initLog(parseLogLevelArg(argc, argv));
+
+    const int code = run();
+
+    engine::core::shutdownLog();   // 停止后台线程并 flush 剩余队列
+    return code;
 }

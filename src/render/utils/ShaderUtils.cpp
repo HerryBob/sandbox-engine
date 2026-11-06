@@ -13,8 +13,8 @@ VkShaderModule loadShaderModule(VkDevice dev, const char* spvPath) {
     std::ifstream f(spvPath, std::ios::binary | std::ios::ate);
     if (!f) {
         std::ostringstream os;
-        os << "[Vulkan] 打不开着色器文件: " << spvPath;
-        LOG_ERROR(os.str());
+        os << "打不开着色器文件: " << spvPath;
+        LOG_ERROR("Shader", os.str());
         return VK_NULL_HANDLE;
     }
     const std::streamsize size = f.tellg();
@@ -29,8 +29,8 @@ VkShaderModule loadShaderModule(VkDevice dev, const char* spvPath) {
     VkShaderModule mod = VK_NULL_HANDLE;
     if (vkCreateShaderModule(dev, &createInfo, nullptr, &mod) != VK_SUCCESS) {
         std::ostringstream os;
-        os << "[Vulkan] vkCreateShaderModule 失败: " << spvPath;
-        LOG_ERROR(os.str());
+        os << "vkCreateShaderModule 失败: " << spvPath;
+        LOG_ERROR("Shader", os.str());
         return VK_NULL_HANDLE;
     }
     return mod;

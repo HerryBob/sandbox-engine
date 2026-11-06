@@ -46,6 +46,11 @@ cmake --build E:\MinecraftGame2\build --config Debug
 
 依赖（不入库）：LunarG Vulkan SDK（通过 `VULKAN_SDK` 环境变量定位）+ 仓库内置 third_party（GLM / GLFW / RapidJSON / stb_image，许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）。
 
+> **首次运行前**：先跑一次 `tools\gen_font_atlas.ps1` 生成 HUD 字体图集
+> （`assets/textures/font/ascii.png`，160×96，依赖本机 Consolas 字体）。
+> 该图集所在的 `assets/textures/` 被 `.gitignore` 整片忽略，clone 后不会有这张图；
+> 缺它只会让 HUD 浮层初始化失败，不影响引擎主链路。
+
 > 公开版仓库**不含纹理资源**（原 MC 版权纹理已移除；本地构建自备贴图）。缺纹理时编译不受影响，运行时缺失贴图走透明黑/棋盘格兜底（图集加载自动降级）。
 
 ## AI 协助开发说明

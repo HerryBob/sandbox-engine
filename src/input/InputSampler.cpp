@@ -27,7 +27,7 @@ void InputSampler::attach(GLFWwindow* window,
     glfwGetCursorPos(window, &x, &y);
     lastCursorX_.store(x, std::memory_order_relaxed);
     lastCursorY_.store(y, std::memory_order_relaxed);
-    LOG_INFO("[输入] 键盘/鼠标回调已注册（真实输入）");
+    LOG_INFO("Input", "键盘/鼠标回调已注册（真实输入）");
 }
 
 void InputSampler::sample() {
@@ -123,12 +123,11 @@ void InputSampler::mouseButtonCb(GLFWwindow* w, int button, int action, int) {
     auto* self = s_self_;
     if (!self || !w || !self->clickOut_) return;
     if (action != GLFW_PRESS) return;
+    // 一次按下 = 一条 ClickEvent 入队（配对与"不丢"由队列保证，不再拼两个原子变量）。
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        self->clickOut_->clickButton.store(0, std::memory_order_relaxed);
-        self->clickOut_->clickSeq.fetch_add(1, std::memory_order_relaxed);
+        self->clickOut_->clicks.push(engine::shared::ClickEvent{ 0 });
     } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        self->clickOut_->clickButton.store(1, std::memory_order_relaxed);
-        self->clickOut_->clickSeq.fetch_add(1, std::memory_order_relaxed);
+        self->clickOut_->clicks.push(engine::shared::ClickEvent{ 1 });
     }
 }
 

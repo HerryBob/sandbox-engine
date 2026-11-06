@@ -2,7 +2,7 @@
   "seed": 0,
   "heightmap": {
     "noise": {
-      "type": "value"
+      "type": "flat"
     },
     "baseHeight": 3.0,
     "amplitude": 0.0

@@ -89,9 +89,16 @@ public:
     bool placeBlock(const engine::shared::BlockPos& p, engine::shared::BlockType type);
     bool removeBlock(const engine::shared::BlockPos& p);
 
-    // 玩家输入消费：DDA 射线检测 → 命中则放置/破坏。
+    // 玩家输入消费：逐条弹出点击事件 → DDA 射线检测 → 命中则放置/破坏。
+    // clicks 不是 const：pop 会消费事件（队列是"事件流"，读即取走）。
     void processPlayerInput(const engine::shared::CameraState& cam,
-                            const engine::shared::PlayerInput& clicks);
+                            engine::shared::PlayerInput& clicks);
+
+    // 请求下一次同步下发全量方块集（区块卸载等"批量增删"之后调用）。
+    // 物理侧只认 SyncBlockSet 才能建立集合，逐条 RemoveBlock 卸载 4096 格不现实。
+    // 只置标志：真正的下发与重试在 syncToPhysics 里（指令槽位被占用时下 tick 再试）。
+    void requestPhysicsResync();
+
     long long playerActionsProcessed() const;  // 已处理玩家点击次数（断言/诊断）
     long long blocksPlaced() const;        // 成功放置次数
     long long blocksRemoved() const;       // 成功破坏次数
@@ -113,8 +120,8 @@ private:
     std::atomic<double>        simTime_{ 0.0 };
     std::atomic<long long>     ticks_{0};
 
-    long long lastProcessedClickSeq_ = 0;      // 上次已处理点击序号（去重：一帧只处理一次）
     std::atomic<long long> playerActions_{ 0 };  // 已处理玩家点击计数
+    bool resyncPending_ = false;                 // 待重下发全量方块集（业务线程独占）
 
     std::atomic<long long> blocksPlaced_{0};       // 成功放置（裁决通过）次数
     std::atomic<long long> blocksRemoved_{0};      // 成功破坏次数

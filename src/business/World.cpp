@@ -5,8 +5,36 @@
 
 namespace engine::business {
 
+namespace {
+// 把一个 chunk 的非空气方块按世界坐标追加到 out。
+// renderSnapshot（全量快照）与 chunkSnapshot（增量快照）共用这一份实现：
+// 索引 → 块内偏移的解码只在 ChunkData::localOf 定义，两处快照不再各写一遍位运算
+// （那种重复改一处忘一处就是体素引擎里极难查的坐标错位）。
+void appendChunkBlocks(const engine::shared::ChunkPos& cp,
+                       const engine::shared::ChunkData& data,
+                       std::vector<engine::shared::Block>& out) {
+    const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4; // chunk 起点世界坐标
+    for (std::int32_t i = 0; i < engine::shared::CHUNK_VOLUME; ++i) {
+        const std::uint8_t t = data.blocks[i];
+        if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air)) continue;
+        const engine::shared::BlockPos off = engine::shared::ChunkData::localOf(i);
+        out.push_back(engine::shared::Block{
+            static_cast<engine::shared::BlockType>(t),
+            engine::shared::BlockPos{bx + off.x, by + off.y, bz + off.z},
+            -1}); // 主世界方块 contraptionId 恒 -1（chunk 不存该字段）
+    }
+}
+
+// 六邻接偏移：chunk 到达/消失都会改变相邻 chunk 边界面的剔除结果，
+// applyGeneratedChunk 与 unloadChunks 共用这一份（避免两处表写错一个方向）。
+constexpr int kNeighborOffsets[6][3] = {
+    { 1, 0, 0}, {-1, 0, 0},
+    { 0, 1, 0}, { 0,-1, 0},
+    { 0, 0, 1}, { 0, 0,-1}};
+} // namespace
+
 World::World() {
-    // 初始世界由装配层（main）用 WorldGenerator 从数据预设生成（#36 起）。
+    // 初始世界由装配层（main）用 ColumnGenerator + ChunkStreamer 从数据预设生成。
     // 构造函数不再预置方块：世界域的初始内容 = data/worldgen/presets/*.json。
 }
 
@@ -29,15 +57,7 @@ std::vector<engine::shared::Block> World::renderSnapshot() const {
     std::vector<engine::shared::Block> out;
     out.reserve(chunks_.size() * 64); // 粗略预留，减少扩容
     for (const auto& [cp, data] : chunks_) {
-        const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4; // chunk 起点世界坐标
-        for (int i = 0; i < engine::shared::CHUNK_VOLUME; ++i) {
-            const std::uint8_t t = data.blocks[i];
-            if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air)) continue;
-            out.push_back(engine::shared::Block{
-                static_cast<engine::shared::BlockType>(t),
-                engine::shared::BlockPos{bx + (i & 15), by + ((i >> 4) & 15), bz + (i >> 8)},
-                -1}); // 主世界方块 contraptionId 恒 -1（chunk 不存该字段）
-        }
+        appendChunkBlocks(cp, data, out);
     }
     return out;
 }
@@ -77,23 +97,19 @@ std::vector<engine::shared::Block> World::chunkSnapshot(
     for (const auto& cp : targets) {
         const auto it = chunks_.find(cp);
         if (it == chunks_.end()) continue; // 未加载：跳过（面保持暴露）
-        const auto& data = it->second;
-        const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4; // chunk 起点世界坐标
-        for (int i = 0; i < engine::shared::CHUNK_VOLUME; ++i) {
-            const std::uint8_t t = data.blocks[i];
-            if (t == static_cast<std::uint8_t>(engine::shared::BlockType::Air)) continue;
-            out.push_back(engine::shared::Block{
-                static_cast<engine::shared::BlockType>(t),
-                engine::shared::BlockPos{bx + (i & 15), by + ((i >> 4) & 15), bz + (i >> 8)},
-                -1}); // 主世界方块 contraptionId 恒 -1（与 renderSnapshot 同码）
-        }
+        appendChunkBlocks(cp, it->second, out);
     }
     return out;
 }
 
 std::optional<engine::shared::Block> World::findBlock(const engine::shared::BlockPos& p) const {
-    // 调用方需保证无并发写（业务线程持锁调用 / main 在三轨停止后调用）。
+    // 与其它读函数一致：锁内访问 chunks_（全引擎唯一数据真源，读不加锁会与写路径竞争）。
+    // 调用频率：射线检测 25 TPS × 约 25 步 ≈ 625 次/秒，加锁成本可忽略。
+    // 约束：blocksMutex_ 是不可重入的 std::mutex，持有本锁的函数内部不得再调用本函数，
+    //       否则自死锁。当前 placeBlock / removeBlock / applyGeneratedChunk /
+    //       forEachBlockInAABB 均未在锁内调用它。
     // 主世界 → chunk 定位 O(1)（chunk 存储只存类型，返回现场构造的 Block）。
+    std::lock_guard<std::mutex> lock(blocksMutex_);
     const auto it = chunks_.find(engine::shared::chunkOf(p));
     if (it == chunks_.end()) return std::nullopt;
     const std::uint8_t t = it->second.atWorld(p);
@@ -163,20 +179,36 @@ void World::applyGeneratedChunk(const engine::shared::ChunkPos& cp,
 
     auto& slot = chunks_[cp];   // 已有则取用、没有则缺省构造
     slot = data;                // 整体覆盖：生成是权威写入，不做旧值合并
-    slot.markDirty(0x01);       // 修改跟踪：生成装载（与 generateBlocks 同码）
+    slot.markDirty(0x01);       // 修改跟踪：生成装载
 
     // 运行期必须进脏集合：渲染端只按它请求增量重建
     dirtyChunksThisTick_.insert(cp);
     // 邻居一并标脏：新 chunk 会改变相邻 chunk 边界面的剔除结果
-    static const int kNeighborOffsets[6][3] = {
-        { 1, 0, 0}, {-1, 0, 0},
-        { 0, 1, 0}, { 0,-1, 0},
-        { 0, 0, 1}, { 0, 0,-1}};
     for (const auto& off : kNeighborOffsets) {
         const engine::shared::ChunkPos n{
             cp.x + off[0], cp.y + off[1], cp.z + off[2]};
         if (chunks_.find(n) != chunks_.end()) dirtyChunksThisTick_.insert(n);
     }
+}
+
+std::size_t World::unloadChunks(const std::unordered_set<engine::shared::ChunkPos>& cps) {
+    // 区块卸载（流式加载的回收端）：删除数据 + 标脏"自身与还在的邻居"。
+    // 渲染端不需要新接口：重建一个已不存在的 chunk 时取不到方块 → 无顶点 →
+    // VulkanContext 自动 destroyChunkMesh 并 erase，内存随之释放。
+    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::size_t removed = 0;
+    for (const auto& cp : cps) {
+        if (chunks_.erase(cp) == 0) continue;   // 本来就没加载：不标脏、不计数
+        ++removed;
+        dirtyChunksThisTick_.insert(cp);        // 自身：让渲染端把旧 mesh 删掉
+        for (const auto& off : kNeighborOffsets) {
+            const engine::shared::ChunkPos n{
+                cp.x + off[0], cp.y + off[1], cp.z + off[2]};
+            // 邻居面剔除依赖被删的 chunk：边界面从"被遮挡"变"暴露"，必须重建
+            if (chunks_.find(n) != chunks_.end()) dirtyChunksThisTick_.insert(n);
+        }
+    }
+    return removed;
 }
 
 std::unordered_set<engine::shared::ChunkPos> World::peekDirtyChunks() const {
@@ -187,19 +219,6 @@ std::unordered_set<engine::shared::ChunkPos> World::peekDirtyChunks() const {
 
 void World::clearDirtyChunks() {
     dirtyChunksThisTick_.clear();
-}
-
-void World::generateBlocks(const std::vector<engine::shared::Block>& blocks) {
-    // 生成专用批量写入（#36）：一次锁 → 直写 chunk blocks → 逐 chunk 标脏。
-    // 不走 base 裁决（生成是权威写入，不需要"能不能放"检查）；
-    // 不进 dirtyChunksThisTick_（装配期调用，渲染端首帧全量快照重建即可）。
-    // 调用方保证：装配/加载期单线程（无别线程并发消费 dirty 集合）。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
-    for (const auto& b : blocks) {
-        auto& c = chunks_[engine::shared::chunkOf(b.pos)]; // operator[] 缺省构造新 chunk
-        c.atWorld(b.pos) = static_cast<std::uint8_t>(b.type);
-        c.markDirty(0x01); // 修改跟踪：生成装载标记脏（与初始装载同码）
-    }
 }
 
 } // namespace engine::business

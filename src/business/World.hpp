@@ -55,22 +55,23 @@ public:
     bool placeBlock(const engine::shared::BlockPos& p, engine::shared::BlockType type);
     bool removeBlock(const engine::shared::BlockPos& p);
 
-    // ---- 生成专用批量入口（#36 世界生成；不走逐块 placeBlock）----
-    // 一次锁 → 直写各 chunk 的 blocks 数组 → 逐 chunk 标脏（不发逐块变更事件）。
-    // 仅装配期（三轨启动前）/加载期使用；运行期写入必须走 placeBlock/removeBlock。
-    // 注意：本入口**不进** dirtyChunksThisTick_（装配期靠渲染首帧全量重建兜底）；
-    //       运行期到货的 chunk 必须走 applyGeneratedChunk。
-    void generateBlocks(const std::vector<engine::shared::Block>& blocks);
-
-    // ---- 运行期生成写入（1b 流式加载）----
+    // ---- 生成写入（1b 流式加载；装配期首批地形也走这里）----
     // 一次锁 → 整体覆盖一个 16³ chunk → 标脏（自身 + 已存在的 6 邻居）。
-    // 与 generateBlocks 的关键区别：必须进 dirtyChunksThisTick_，否则渲染端不会重建它。
+    // 必须进 dirtyChunksThisTick_，否则渲染端不会重建它。
     // 邻居标脏是必需的：面剔除跨 chunk 查邻居（computeFaceMask 用全局 solid 集合），
     // 新 chunk 到达会让相邻 chunk 的边界面从"暴露"变"被遮挡"，不重建就会留下穿透面。
     // 全空气 chunk 不创建（保持"空 chunk 不占内存"）。
     // 调用方约束：业务线程（唯一 World 写者）调用。
     void applyGeneratedChunk(const engine::shared::ChunkPos& cp,
                              const engine::shared::ChunkData& data);
+
+    // ---- 区块卸载（流式加载的回收端）----
+    // 删除给定 chunk，并把"自身 + 6 邻居"标脏：
+    //   · 自身：渲染端重建时取不到方块 → 自动删掉旧 mesh 并释放 GPU buffer（无需新接口）；
+    //   · 邻居：边界面从"被遮挡"变"暴露"，不重建就会留下空洞。
+    // 返回实际删掉的 chunk 数（未加载的忽略）。
+    // 调用方约束：业务线程（唯一 World 写者）。
+    std::size_t unloadChunks(const std::unordered_set<engine::shared::ChunkPos>& cps);
 
     // 本 tick 变脏的 chunk 集合：拷贝查看（不消费）。
     // 调用方（BusinessWorld::flushChanges）push 变更事件成功后再 clearDirtyChunks()；

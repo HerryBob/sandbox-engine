@@ -1,83 +1,66 @@
 #include "worldgen/noise/BuiltinNoiseTypes.hpp"
 
-#include "worldgen/noise/FbmNoise.hpp"
+#include "core/Log.hpp"
+#include "modapi/noise_api.h"
 #include "worldgen/noise/NoiseRegistry.hpp"
-#include "worldgen/noise/PerlinNoise.hpp"
-#include "worldgen/noise/ValueNoise.hpp"
 
-#include <cstdio>
-#include <memory>
+#include <new>
 
 namespace engine::worldgen {
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// flat：恒返回 0 的高度场（引擎唯一的"算法"）。
+// 它不依赖任何噪声代码 —— baseHeight 直接就是地表高度；
+// amplitude 乘 0 也仍然是 0，所以默认预设的 amplitude 对 flat 无意义。
+// 用一个 1 字节哨兵表示"实例存在"：create/destroy 必须配对，契约要求非空句柄。
+// ---------------------------------------------------------------------------
+
+void* createFlat(const modapi::NoiseParamC*, std::int32_t, const char**) {
+    return new (std::nothrow) char{0};
+}
+
+double sampleFlat(void*, double, double, std::uint64_t) {
+    return 0.0;
+}
+
+void destroyFlat(void* self) {
+    delete static_cast<char*>(self);
+}
+
+} // namespace
+
 void initBuiltinNoiseTypes() {
-    NoiseRegistry::registerType("value", [](const NoiseParams& p) {
-        return std::make_unique<ValueNoise>(p.get("scale", 1.0));
-    });
-    NoiseRegistry::registerType("perlin", [](const NoiseParams& p) {
-        return std::make_unique<PerlinNoise>(p.get("scale", 1.0));
-    });
-    NoiseRegistry::registerType("fbm", [](const NoiseParams& p) -> std::unique_ptr<NoiseSource> {
-        // 基底：递归查表实例化。当前只支持"嵌套名字"（基底参数走默认）；
-        // 完整递归嵌套（base 携带参数）已登记为升级点，1a 保持现状。
-        auto base = NoiseRegistry::make(p.base, NoiseParams{});
-        if (!base) {
-            std::fprintf(stderr, "[Noise] fbm 需要基底噪声，但 type=%s 未注册\n",
-                         p.base.c_str());
-            return std::unique_ptr<NoiseSource>(nullptr);
-        }
-        return std::make_unique<FbmNoise>(
-            std::move(base),
-            static_cast<int>(p.get("octaves", 4.0)),
-            p.get("scale", 1.0),
-            p.get("lacunarity", 2.0),
-            p.get("gain", 0.5));
-    });
+    static const modapi::NoiseProviderDef kFlat{
+        "flat", &createFlat, &sampleFlat, &destroyFlat,
+    };
+    if (!NoiseRegistry::registerType(kFlat)) {
+        LOG_ERROR("Noise", "内置 flat 注册失败（重复注册或注册表已冻结）");
+    }
 }
 
 bool selfTestNoiseTypes() {
     bool ok = true;
 
-    // ① 确定性：同 seed + 同参数 + 同点 → 两次采样完全一致（流式命脉）。
+    // ① 内置 flat：可创建，且输出恒为 0（默认平地世界的地表来源）。
     {
-        NoiseParams p;
-        p.values["scale"] = 0.01;
-        auto a = NoiseRegistry::make("perlin", p);
-        auto b = NoiseRegistry::make("perlin", p);
-        if (!a || !b) {
-            std::fprintf(stderr, "[Noise 自检] perlin 实例化失败\n");
+        NoiseHandle handle;
+        if (!NoiseRegistry::make("flat", nullptr, 0, handle)) {
+            LOG_ERROR("Noise", "自检：flat 创建失败");
             ok = false;
-        } else if (a->sample(1.5, -2.25, 42) != b->sample(1.5, -2.25, 42)) {
-            std::fprintf(stderr, "[Noise 自检] perlin 确定性破坏：同点两次采样不一致\n");
+        } else if (handle.sample(0.0, 0.0, 0) != 0.0) {
+            LOG_ERROR("Noise", "自检：flat 的输出应为 0");
             ok = false;
         }
     }
 
-    // ② 未注册类型：make 返回空（引擎查表，不硬编码任何类型）。
+    // ② 未注册类型：make 必须拒绝（引擎只查注册表，不硬编码任何类型名）。
     {
-        NoiseParams p;
-        if (NoiseRegistry::make("不存在的类型", p)) {
-            std::fprintf(stderr, "[Noise 自检] 未注册类型应返回 nullptr\n");
+        NoiseHandle handle;
+        if (NoiseRegistry::make("不存在的类型", nullptr, 0, handle)) {
+            LOG_ERROR("Noise", "自检：未注册类型应被拒绝");
             ok = false;
-        }
-    }
-
-    // ③ fbm 包 perlin：组合子链路（base 递归实例化）+ 输出范围 [-1,1]。
-    {
-        NoiseParams p;
-        p.base = "perlin";
-        p.values["octaves"] = 4.0;
-        p.values["scale"] = 0.01;
-        auto f = NoiseRegistry::make("fbm", p);
-        if (!f) {
-            std::fprintf(stderr, "[Noise 自检] fbm(perlin) 实例化失败\n");
-            ok = false;
-        } else {
-            const double v = f->sample(3.0, 4.0, 7);
-            if (v < -1.0 || v > 1.0) {
-                std::fprintf(stderr, "[Noise 自检] fbm 输出越界：%f\n", v);
-                ok = false;
-            }
         }
     }
 

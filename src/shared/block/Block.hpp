@@ -65,16 +65,22 @@ struct ChunkPos {
 
 // 一个 chunk 的方块数据：16³ 密集数组（默认全 Air=0）。
 struct ChunkData {
-    std::array<std::uint8_t, CHUNK_VOLUME> blocks{}; // 索引=(z&15)*256+(y&15)*16+(x&15)
+    std::array<std::uint8_t, CHUNK_VOLUME> blocks{}; // 索引 = indexOf(x,y,z)
     std::uint32_t dirty = 0;                          // 变更原因位掩码（0=干净）
 
+    // 块内坐标 → 数组索引（x/y/z 低 4 位各占一段）。
+    // 与 localOf 严格互逆：改其中一处必须同步改另一处，否则快照遍历会坐标错位。
+    static std::int32_t indexOf(int x, int y, int z) {
+        return (z & 15) * 256 + (y & 15) * 16 + (x & 15);
+    }
+    // 数组索引 → 块内偏移（x/y/z ∈ 0..15）。快照遍历用的唯一解码点。
+    static BlockPos localOf(std::int32_t i) {
+        return BlockPos{i & 15, (i >> 4) & 15, i >> 8};
+    }
+
     // 世界坐标访问（内部换算块内偏移；负数由 &15 正确落到块内 0..15）。
-    std::uint8_t atWorld(int x, int y, int z) const {
-        return blocks[(z & 15) * 256 + (y & 15) * 16 + (x & 15)];
-    }
-    std::uint8_t& atWorld(int x, int y, int z) {
-        return blocks[(z & 15) * 256 + (y & 15) * 16 + (x & 15)];
-    }
+    std::uint8_t atWorld(int x, int y, int z) const { return blocks[indexOf(x, y, z)]; }
+    std::uint8_t& atWorld(int x, int y, int z) { return blocks[indexOf(x, y, z)]; }
     std::uint8_t atWorld(const BlockPos& p) const { return atWorld(p.x, p.y, p.z); }
     std::uint8_t& atWorld(const BlockPos& p) { return atWorld(p.x, p.y, p.z); }
 

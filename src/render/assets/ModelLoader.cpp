@@ -1,4 +1,5 @@
 #include "render/assets/ModelLoader.hpp"
+#include "core/Log.hpp"
 #include "render/assets/ModelDef.hpp"
 #include "render/assets/ModelRegistry.hpp"
 #include <rapidjson/document.h>
@@ -8,7 +9,6 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <cstdio>
 #include <glm/glm.hpp>
 
 namespace engine::assets {
@@ -29,7 +29,7 @@ std::uint8_t faceIndexOf(std::string_view s) {
 // 解析 JSON 数组 [x,y,z] → glm::vec3；缺成员/非数组 → 警告 + 返回零向量
 glm::vec3 parseVec3(const rapidjson::Value& v, const char* what, const char* file) {
     if (!v.IsArray() || v.Size() < 3) {
-        std::fprintf(stderr, "[Model] %s：%s 须为 3 元素数组\n", file, what);
+        LOG_WARN("Model", std::string(file) + "：" + what + " 须为 3 元素数组");
         return glm::vec3{0.0f};
     }
     return { v[0].GetFloat(), v[1].GetFloat(), v[2].GetFloat() };
@@ -40,7 +40,7 @@ glm::vec3 parseVec3(const rapidjson::Value& v, const char* what, const char* fil
 void loadBlockModels() {
     const std::filesystem::path dir = std::filesystem::path("assets") / "models" / "block";
     if (!std::filesystem::exists(dir)) {
-        std::fprintf(stderr, "[Model] 目录缺失：%s\n", dir.string().c_str());
+        LOG_WARN("Model", "目录缺失：" + dir.string());
         return;
     }
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -49,7 +49,7 @@ void loadBlockModels() {
 
         std::ifstream in(entry.path());
         if (!in) {
-            std::fprintf(stderr, "[Model] 无法打开：%s\n", file.c_str());
+            LOG_ERROR("Model", "无法打开：" + file);
             continue;
         }
         std::stringstream ss;
@@ -58,8 +58,8 @@ void loadBlockModels() {
 
         rapidjson::Document doc;
         if (doc.Parse(text.c_str()).HasParseError()) {
-            std::fprintf(stderr, "[Model] 解析失败：%s（%s）\n", file.c_str(),
-                         rapidjson::GetParseError_En(doc.GetParseError()));
+            LOG_ERROR("Model", "解析失败：" + file + "（" +
+                               rapidjson::GetParseError_En(doc.GetParseError()) + "）");
             continue;
         }
 
@@ -74,14 +74,14 @@ void loadBlockModels() {
 
         // elements：盒子列表
         if (!doc.HasMember("elements") || !doc["elements"].IsArray()) {
-            std::fprintf(stderr, "[Model] %s 缺 elements 数组 → 跳过\n", file.c_str());
+            LOG_WARN("Model", file + " 缺 elements 数组 → 跳过");
             continue;
         }
         for (const auto& el : doc["elements"].GetArray()) {
             if (!el.IsObject()) continue;
             ModelElement me;
             if (!el.HasMember("from") || !el.HasMember("to")) {
-                std::fprintf(stderr, "[Model] %s 某元素缺 from/to → 跳过该元素\n", file.c_str());
+                LOG_WARN("Model", file + " 某元素缺 from/to → 跳过该元素");
                 continue;
             }
             me.from = parseVec3(el["from"], "from", file.c_str());
@@ -99,8 +99,7 @@ void loadBlockModels() {
                         if (!t.empty() && t[0] == '#') {
                             const auto vt = def.textures.find(t.substr(1));
                             if (vt != def.textures.end()) face.texture = vt->second;
-                            else std::fprintf(stderr, "[Model] %s 未知纹理变量 %s\n",
-                                              file.c_str(), t.c_str());
+                            else LOG_WARN("Model", file + " 未知纹理变量 " + t);
                         } else {
                             face.texture = t;
                         }
@@ -116,12 +115,12 @@ void loadBlockModels() {
         }
 
         if (def.elements.empty()) {
-            std::fprintf(stderr, "[Model] %s 无有效元素 → 跳过\n", file.c_str());
+            LOG_WARN("Model", file + " 无有效元素 → 跳过");
             continue;
         }
         g_modelRegistry.add(entry.path().stem().string(), std::move(def));
     }
-    std::fprintf(stderr, "[Model] 加载 %zu 个方块模型\n", g_modelRegistry.size());
+    LOG_INFO("Model", "加载 " + std::to_string(g_modelRegistry.size()) + " 个方块模型");
 }
 
 } // namespace engine::assets

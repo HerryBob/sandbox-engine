@@ -35,6 +35,16 @@ public:
     static constexpr std::size_t kResultCapacity = 64;
     // 每 tick 最多应用 4 列 = 16 个 16³ chunk（一次锁写 64KB；25TPS 下约 1.6MB/s）
     static constexpr std::size_t kMaxApplyPerTick = 4;
+    // 卸载半径 = 加载半径 + 1：留一圈滞回（hysteresis），站在窗口边界上不会反复加载/卸载。
+    static constexpr int kEvictMargin = 1;
+
+    // 一次 drain 的结果：
+    //   appliedColumns = 本次真正写进 World 的列数
+    //   evictedChunks  = 本次卸载掉的 chunk 数（> 0 时调用方需要重同步物理静态集合）
+    struct DrainOutcome {
+        std::size_t appliedColumns = 0;
+        std::size_t evictedChunks = 0;
+    };
 
     // generator 必须已 prepare()，且生命周期要覆盖 streamer（建议同处一个作用域）。
     ChunkStreamer(const ColumnGenerator& generator,
@@ -54,11 +64,11 @@ public:
     // playerX/playerZ 为世界坐标（可为负）：内部 floor 后 >>4 转 chunk 坐标。
     void tickUpdate(double playerX, double playerZ);
 
-    // 业务线程每 tick 调用：最多 maxApply 列写进 world。
+    // 业务线程每 tick 调用：最多 maxApply 列写进 world，并先结算上一 tick 积攒的淘汰列。
     // 必须由"唯一 World 写者"线程调用（内部会写 dirtyChunksThisTick_）。
-    // 返回本次实际写入的列数。
-    std::size_t drainResults(engine::business::World& world,
-                             std::size_t maxApply = kMaxApplyPerTick);
+    // 返回本次实际写入的列数与卸载的 chunk 数。
+    DrainOutcome drainResults(engine::business::World& world,
+                              std::size_t maxApply = kMaxApplyPerTick);
 
     GenStats stats() const;
     std::size_t knownColumns() const { return known_.size(); }
@@ -73,8 +83,11 @@ private:
     core::SPSCQueue<GenResult>  results_;    // 生成 → 业务
     core::ThreadLoop loop_{"worldgen-stream"};
 
-    // 已请求过的列（业务线程独占；本阶段不做卸载 → 只增不减）
+    // 已请求过的列（业务线程独占）。1b 起支持卸载：走出窗口的列从 known_ 移除，
+    // 这样玩家走回来时会重新请求生成（否则这些列"永不加载"）。
     std::unordered_set<ColPos> known_;
+    // 待卸载的列（tickUpdate 收集，drainResults 结算；业务线程独占）
+    std::unordered_set<ColPos> pendingEvict_;
 
     std::atomic<std::size_t> requested_{0};
     std::atomic<std::size_t> generated_{0};

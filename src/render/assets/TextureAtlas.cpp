@@ -1,9 +1,9 @@
 #include "TextureAtlas.hpp"
+#include "core/Log.hpp"
 #include "registry/BlockRegistry.hpp"
 #include "render/assets/ModelRegistry.hpp"
 #include <set>
 #include <cstring>
-#include <cstdio>
 #include <stb_image.h>
 
 namespace engine::assets {
@@ -14,7 +14,7 @@ bool TextureAtlas::buildFromRegistry() {
 
     // ② 第 0 格 = default.png（缺失纹理兜底，内容来自文件而非程序生成）
     if (!addFromFile("default", AtlasSlot{0, 0}))
-        std::fprintf(stderr, "[Atlas] 兜底纹理 default.png 缺失 → 第 0 格透明黑\n");
+        LOG_WARN("Atlas", "兜底纹理 default.png 缺失 → 第 0 格透明黑");
 
     // ③ 收集纹理名（去重；第 0 格恒为 default，纹理从第 1 格起填）
     //    来源一：方块注册表的兜底纹理（BlockInfo::texture）
@@ -24,8 +24,8 @@ bool TextureAtlas::buildFromRegistry() {
     std::uint32_t slotIndex = 1;   // 第 0 格留给 default（缺失纹理兜底）
     const auto fillSlot = [&](std::string_view name) {
         if (slotIndex >= kAtlasGrid * kAtlasGrid) {
-            std::fprintf(stderr, "[Atlas] 纹理数超图集容量(%u×%u)，跳过后续\n",
-                         kAtlasGrid, kAtlasGrid);
+            LOG_WARN("Atlas", "纹理数超图集容量(" + std::to_string(kAtlasGrid) + "×" +
+                              std::to_string(kAtlasGrid) + ")，跳过后续");
             return false;
         }
         const AtlasSlot slot{
@@ -35,8 +35,7 @@ bool TextureAtlas::buildFromRegistry() {
         if (addFromFile(name, slot))
             slots_.emplace(std::string(name), slot);
         else
-            std::fprintf(stderr, "[Atlas] 纹理缺失：%s → 该格透明黑\n",
-                         std::string(name).c_str());
+            LOG_WARN("Atlas", "纹理缺失：" + std::string(name) + " → 该格透明黑");
         ++slotIndex;
         return true;
     };
@@ -69,8 +68,9 @@ bool TextureAtlas::addFromFile(std::string_view name, AtlasSlot slot) {
     // 直拷模式：引擎不做任何缩放——源图尺寸必须等于格子尺寸（16²），原样进格。
     // 未来升像素：只需改 kAtlasTile（如 32）且源图同步 32²，此处零改动。
     if (w != static_cast<int>(kAtlasTile) || h != static_cast<int>(kAtlasTile)) {
-        std::fprintf(stderr, "[Atlas] 纹理尺寸不符：%s 为 %dx%d（应为 %ux%u）→ 该格透明黑\n",
-                     std::string(name).c_str(), w, h, kAtlasTile, kAtlasTile);
+        LOG_WARN("Atlas", "纹理尺寸不符：" + std::string(name) + " 为 " + std::to_string(w) +
+                          "x" + std::to_string(h) + "（应为 " + std::to_string(kAtlasTile) +
+                          "x" + std::to_string(kAtlasTile) + "）→ 该格透明黑");
         stbi_image_free(src);
         return false;
     }

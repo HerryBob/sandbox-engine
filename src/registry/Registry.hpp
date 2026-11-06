@@ -2,7 +2,6 @@
 
 #include <unordered_map>
 #include <cstdint>
-#include <cassert>
 #include <cstddef>
 
 namespace engine::registry {
@@ -19,11 +18,9 @@ namespace engine::registry {
             return it == items_.end() ? nullptr : &it->second;
         }
 
-        const T& get(Key key) const {
-            const T* p = find(key);
-            assert(p && "get: Key未注册");
-            return *p;
-        }
+        // 刻意不提供 get()（引用返回）。历史版本是 assert(p) + return *p：
+        // Release 下 assert 被编译掉，未注册 key 直接空指针解引用，崩溃且无信息。
+        // 全工程调用方一律用 find() + 判空，语义更明确，故直接删除该接口。
         void freeze() { frozen_ = true; }
         bool frozen() const { return frozen_; }
         std::size_t size() const { return items_.size(); }

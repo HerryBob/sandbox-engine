@@ -67,7 +67,22 @@ void ChunkStreamer::tickUpdate(double playerX, double playerZ) {
     const int cx = static_cast<int>(std::floor(playerX)) >> 4;
     const int cz = static_cast<int>(std::floor(playerZ)) >> 4;
 
-    // 收集窗口内尚未请求的列。窗口固定 (2r+1)×(2r+1) 格，每 tick 全扫一遍；
+    // ① 淘汰：走出"加载半径 + 1"的列进入待卸载集合。
+    // 比加载半径多留一圈 = 滞回，避免玩家站在窗口边界时同一列反复卸载/重建。
+    // 这里只摘 known_、收集坐标；真正删 chunk 在 drainResults（那里才持有 World）。
+    const int evictR = radius_ + kEvictMargin;
+    for (auto it = known_.begin(); it != known_.end(); ) {
+        const int dx = it->x - cx;
+        const int dz = it->z - cz;
+        if (std::abs(dx) > evictR || std::abs(dz) > evictR) {
+            pendingEvict_.insert(*it);
+            it = known_.erase(it);   // 摘掉记录 → 走回来会重新请求
+        } else {
+            ++it;
+        }
+    }
+
+    // ② 收集窗口内尚未请求的列。窗口固定 (2r+1)×(2r+1) 格，每 tick 全扫一遍；
     // 已请求的列被 known_ 挡住 → 稳定后每 tick 只做 81 次哈希查询，开销可忽略。
     std::vector<ColPos> candidates;
     const int span = 2 * radius_ + 1;
@@ -96,11 +111,32 @@ void ChunkStreamer::tickUpdate(double playerX, double playerZ) {
     }
 }
 
-std::size_t ChunkStreamer::drainResults(engine::business::World& world,
-                                        std::size_t maxApply) {
+ChunkStreamer::DrainOutcome ChunkStreamer::drainResults(engine::business::World& world,
+                                                        std::size_t maxApply) {
+    DrainOutcome out;
+
+    // ① 先结算淘汰：一列 = 4 个竖直堆叠的 16³ chunk。
+    // World::unloadChunks 会标脏"自身 + 还在的邻居"，渲染端重建时取不到方块就删 mesh，
+    // 不需要给渲染端新增"卸载"接口。
+    if (!pendingEvict_.empty()) {
+        std::unordered_set<engine::shared::ChunkPos> dead;
+        dead.reserve(pendingEvict_.size() * static_cast<std::size_t>(kGenChunkLevels));
+        for (const ColPos& col : pendingEvict_) {
+            for (int level = 0; level < kGenChunkLevels; ++level) {
+                dead.insert(engine::shared::ChunkPos{
+                    col.x, (kGenMinY / engine::shared::CHUNK_SIZE) + level, col.z});
+            }
+        }
+        out.evictedChunks = world.unloadChunks(dead);
+        pendingEvict_.clear();
+    }
+
+    // ② 应用生成结果：已被淘汰的列直接丢弃——否则会把刚删掉的 chunk 又写回来
+    //    （队列里可能还压着淘汰前排队/在算的请求，这是允许的浪费，但结果不能落地）。
     std::size_t applied = 0;
     GenResult res;
     while (applied < maxApply && results_.pop(res)) {
+        if (known_.find(res.pos) == known_.end()) continue;   // 在途结果属于已淘汰的列
         // 一列 = 4 个竖直堆叠的 16³ chunk：逐层写入（每个 chunk 一次锁 + 标脏自身与邻居）
         for (int level = 0; level < kGenChunkLevels; ++level) {
             const engine::shared::ChunkPos cp{
@@ -116,7 +152,8 @@ std::size_t ChunkStreamer::drainResults(engine::business::World& world,
         maxSurfaceY_ = std::max(maxSurfaceY_, res.blocks->maxSurfaceY);
         ++applied;
     }
-    return applied;
+    out.appliedColumns = applied;
+    return out;
 }
 
 GenStats ChunkStreamer::stats() const {

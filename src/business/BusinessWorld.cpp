@@ -15,7 +15,8 @@ BusinessWorld::BusinessWorld(engine::core::TimeManager& tm,
       tm_(tm),
       startWall_(std::chrono::steady_clock::now()),
       lastLog_(std::chrono::steady_clock::now()) {
-    // 初始世界：由装配层（main）用 WorldGenerator 从数据预设生成（World 构造函数不再预置方块）。
+    // 初始世界：由装配层（main）用 ColumnGenerator + ChunkStreamer 从数据预设生成
+    // （World 构造函数不再预置方块）。
 }
 
 void BusinessWorld::advanceTick(double scale) {
@@ -35,6 +36,12 @@ bool BusinessWorld::syncAll() {
 }
 
 void BusinessWorld::syncToPhysics() {
+    // 区块卸载等批量变更后需要重发全量：指令槽位是单槽位状态机，
+    // queueSync 在"已有待发指令"时返回 false —— 保留标志，下 tick 继续重试，
+    // 否则物理侧会一直留着已卸载区域的幽灵碰撞体。
+    if (resyncPending_) {
+        if (physicsBridge_.queueSync()) resyncPending_ = false;
+    }
     // tick 边界：委托 PhysicsBridge 发指令（全量同步需现场生成世界快照）。
     physicsBridge_.syncToPhysics(world_.renderSnapshot());
 }
@@ -121,16 +128,11 @@ bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p) {
     return true;
 }
 
-//// 玩家输入：DDA 射线检测 → 放置/破坏
-// 相机来自 CameraState（输入线程写），点击来自 PlayerInput（鼠标回调写）。
+//// 玩家输入：逐条消费点击队列 → DDA 射线检测 → 放置/破坏
+// 相机来自 CameraState（输入线程写），点击来自 PlayerInput 的 SPSC 队列（鼠标回调 push）。
 void BusinessWorld::processPlayerInput(const engine::shared::CameraState& cam,
-                                       const engine::shared::PlayerInput& clicks){
-    const long long seq = clicks.clickSeq.load(std::memory_order_relaxed);
-    if(seq == lastProcessedClickSeq_) return;
-    lastProcessedClickSeq_ = seq;   //修复重复射线
-    const int button = clicks.clickButton.load(std::memory_order_relaxed);
-
-    //读取相机槽
+                                       engine::shared::PlayerInput& clicks){
+    // 相机槽（输入线程写）在本次 tick 内只读一次：同一 tick 的多次点击共享同一视角。
     const double cx = cam.camX.load(std::memory_order_relaxed);
     const double cy = cam.camY.load(std::memory_order_relaxed);
     const double cz = cam.camZ.load(std::memory_order_relaxed);
@@ -143,11 +145,7 @@ void BusinessWorld::processPlayerInput(const engine::shared::CameraState& cam,
     const double dy = std::sin(pitch);
     const double dz = -std::cos(yaw) * cosP;
 
-    //DDA初始化
     const double ox = std::floor(cx), oy = std::floor(cy), oz = std::floor(cz);
-    double tMaxX = (dx > 0 ? (ox + 1 - cx) / dx : (dx < 0 ? (ox - cx) / dx : 1e30));
-    double tMaxY = (dy > 0 ? (oy + 1 - cy) / dy : (dy < 0 ? (oy - cy) / dy : 1e30));
-    double tMaxZ = (dz > 0 ? (oz + 1 - cz) / dz : (dz < 0 ? (oz - cz) / dz : 1e30));
     const double tDeltaX = (dx != 0.0 ? std::abs(1.0 / dx) : 1e30);
     const double tDeltaY = (dy != 0.0 ? std::abs(1.0 / dy) : 1e30);
     const double tDeltaZ = (dz != 0.0 ? std::abs(1.0 / dz) : 1e30);
@@ -155,41 +153,56 @@ void BusinessWorld::processPlayerInput(const engine::shared::CameraState& cam,
     const int stepY = (dy > 0 ? 1 : -1);
     const int stepZ = (dz > 0 ? 1 : -1);
 
-    int ix = static_cast<int>(ox), iy = static_cast<int>(oy), iz = static_cast<int>(oz);
-    int dirX = 0, dirY = 0, dirZ = 0;   // 进入命中格的推进方向（反推放置位用）
-    bool hit = false;
-    int hx = 0, hy = 0, hz = 0;         // 命中格（左键破坏目标）
-    int px = ix, py = iy, pz = iz;      // 放置位（默认 = 起点格）
-    
-    // ⑤ DDA 推进：最多 8 格（射线距离上限）。每次选最小的 tMax 推进对应轴
-    for (int s = 0; s < 8; ++s) {
-        if (tMaxX < tMaxY && tMaxX < tMaxZ) {
-            tMaxX += tDeltaX; ix += stepX; dirX = stepX; dirY = 0; dirZ = 0;
-        }
-        else if (tMaxY < tMaxZ) {
-            tMaxY += tDeltaY; iy += stepY; dirX = 0; dirY = stepY; dirZ = 0;
-        }
-        else {
-            tMaxZ += tDeltaZ; iz += stepZ; dirX = 0; dirY = 0; dirZ = stepZ;
-        }
-        if (findBlock(engine::shared::BlockPos{ ix, iy, iz }).has_value()) {
-            hit = true;
-            hx = ix; hy = iy; hz = iz;
-            px = ix - dirX; py = iy - dirY; pz = iz - dirZ;  // 放置位 = 命中格前一格
-            break;
-        }
-    }
+    // 逐条消费：一个 tick 内落进几次点击就处理几次。
+    // 旧实现用"序号 + 按钮"两个原子变量、业务侧按序号跳号，一个 40ms tick 内的第二次点击会被吞掉。
+    engine::shared::ClickEvent ev;
+    while (clicks.clicks.pop(ev)) {
+        // DDA 状态每次点击独立 → 在循环内初始化
+        double tMaxX = (dx > 0 ? (ox + 1 - cx) / dx : (dx < 0 ? (ox - cx) / dx : 1e30));
+        double tMaxY = (dy > 0 ? (oy + 1 - cy) / dy : (dy < 0 ? (oy - cy) / dy : 1e30));
+        double tMaxZ = (dz > 0 ? (oz + 1 - cz) / dz : (dz < 0 ? (oz - cz) / dz : 1e30));
 
-    playerActions_.fetch_add(1, std::memory_order_relaxed);
-    if (!hit) return;  // 8 格内没碰到方块：点击已消费，无事可做
+        int ix = static_cast<int>(ox), iy = static_cast<int>(oy), iz = static_cast<int>(oz);
+        int dirX = 0, dirY = 0, dirZ = 0;   // 进入命中格的推进方向（反推放置位用）
+        bool hit = false;
+        int hx = 0, hy = 0, hz = 0;         // 命中格（左键破坏目标）
+        int px = ix, py = iy, pz = iz;      // 放置位（默认 = 起点格）
 
-    if (button == 0) {  // 左键：破坏命中格
-        removeBlock(engine::shared::BlockPos{ hx, hy, hz });
+        // ⑤ DDA 推进：最多 8 格（射线距离上限）。每次选最小的 tMax 推进对应轴
+        for (int s = 0; s < 8; ++s) {
+            if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+                tMaxX += tDeltaX; ix += stepX; dirX = stepX; dirY = 0; dirZ = 0;
+            }
+            else if (tMaxY < tMaxZ) {
+                tMaxY += tDeltaY; iy += stepY; dirX = 0; dirY = stepY; dirZ = 0;
+            }
+            else {
+                tMaxZ += tDeltaZ; iz += stepZ; dirX = 0; dirY = 0; dirZ = stepZ;
+            }
+            if (findBlock(engine::shared::BlockPos{ ix, iy, iz }).has_value()) {
+                hit = true;
+                hx = ix; hy = iy; hz = iz;
+                px = ix - dirX; py = iy - dirY; pz = iz - dirZ;  // 放置位 = 命中格前一格
+                break;
+            }
+        }
+
+        playerActions_.fetch_add(1, std::memory_order_relaxed);
+        if (!hit) continue;  // 8 格内没碰到方块：本次点击已消费，无事可做
+
+        if (ev.button == 0) {  // 左键：破坏命中格
+            removeBlock(engine::shared::BlockPos{ hx, hy, hz });
+        }
+        else if (ev.button == 1) {  // 右键：在放置位放 Stone
+            placeBlock(engine::shared::BlockPos{ px, py, pz },
+                engine::shared::BlockType::Stone);
+        }
     }
-    else if (button == 1) {  // 右键：在放置位放 Stone
-        placeBlock(engine::shared::BlockPos{ px, py, pz },
-            engine::shared::BlockType::Stone);
-    }
+}
+
+void BusinessWorld::requestPhysicsResync() {
+    // 只置标志；真正的下发在 syncToPhysics（那里才有世界快照，且每 tick 会重试）。
+    resyncPending_ = true;
 }
 
 long long BusinessWorld::blocksPlaced() const {
