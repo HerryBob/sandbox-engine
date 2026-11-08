@@ -677,7 +677,7 @@ bool VulkanContext::rebuildChunkMeshes(
         if (b.contraptionId == -1) {
             //查询注册表: 注册过且 opaque = true 
             const auto* info = engine::registry::g_blockRegistry.find(
-                static_cast<std::uint8_t>(b.type));
+                static_cast<std::uint16_t>(b.type));
             if (info && info->opaque) {
                 solid.insert(b.pos);
             }
@@ -707,7 +707,7 @@ bool VulkanContext::rebuildChunkMeshes(
             const glm::vec3 center{block.pos.x + 0.5f, block.pos.y + 0.5f, block.pos.z + 0.5f};
             // 查注册表：renderType 决定进哪个桶（认属性不认方块身份）
             const auto* info = engine::registry::g_blockRegistry.find(
-                static_cast<std::uint8_t>(block.type));
+                static_cast<std::uint16_t>(block.type));
             const bool isCutout = info && info->renderType == engine::registry::RenderType::Cutout;
             auto& dstVerts   = isCutout ? cutoutVerts : vertices;
             auto& dstIndices = isCutout ? cutoutIndices : indices;
@@ -715,17 +715,17 @@ bool VulkanContext::rebuildChunkMeshes(
             // 玻璃整体淡蓝；solid 不传 tint 用默认逐面色
             const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
             // 纹理 → UV：注册表纹理名 → 图集格 → UV 矩形（未注册 → default 兜底格）
-            glm::vec4 uvRect = engine::assets::TextureAtlas::fallbackUV();
-            if (info && info->texture) {
+            glm::vec4 uvRect = textureAtlas_.fallbackUV();
+            if (info && !info->texture.empty()) {
                 engine::assets::AtlasSlot slot;
                 if (textureAtlas_.slotOf(info->texture, slot))
-                    uvRect = engine::assets::TextureAtlas::slotUV(slot);
+                    uvRect = textureAtlas_.slotUV(slot);
             }
             // 顶点生成：优先数据驱动模型（模型名注册且加载成功 → buildModelVertices；
             // 无 model / 模型缺失 → 立方体兜底，仍用注册表纹理）
             std::vector<Vertex> vs;
-            if (info && info->model) {
-                if (const auto* md = engine::assets::g_modelRegistry.find(std::string(info->model)))
+            if (info && !info->model.empty()) {
+                if (const auto* md = engine::assets::g_modelRegistry.find(info->model))
                     vs = mesh::buildModelVertices(center, *md, faceMask, textureAtlas_);
             }
             if (vs.empty())
@@ -821,15 +821,15 @@ bool VulkanContext::createCommandObjects() {
 }
 
 // 纹理图像：staging 搬运（构建图集 → 上传显存 → 转 SHADER_READ_ONLY）
-// 图集 = 一张 128² 大纹理装所有方块小纹理（每格 16²，空槽棋盘格）
+// 图集 = 一张大纹理装所有方块小纹理（每格 16²，边长由声明条目数算出）
 bool VulkanContext::createTextureImage() {
-    if (!textureAtlas_.buildFromRegistry()) {   // 遍历注册表 → 拼图集（CPU 内存 128² RGBA）
+    if (!textureAtlas_.build()) {   // 读 assets/atlases/blocks.json → 拼图集（CPU 内存 RGBA）
         LOG_ERROR("Vulkan", "图集构建失败");
         return false;
     }
     const auto& pixels = textureAtlas_.rgba();
-    const std::uint32_t w = engine::assets::kAtlasSize;   // 128
-    const std::uint32_t h = engine::assets::kAtlasSize;
+    const std::uint32_t w = textureAtlas_.size();
+    const std::uint32_t h = textureAtlas_.size();
     texWidth_ = w;
     texHeight_ = h;
     const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * engine::assets::kAtlasChannels; // RGBA×4字节

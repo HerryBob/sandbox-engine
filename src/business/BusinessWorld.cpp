@@ -1,5 +1,6 @@
 #include "business/BusinessWorld.hpp"
 #include "core/Log.hpp"
+#include "registry/BlockRegistry.hpp"
 
 #include <cmath>
 #include <sstream>
@@ -89,15 +90,6 @@ std::size_t BusinessWorld::blockCount() const {
 }
 std::size_t BusinessWorld::chunkCount() const {
     return world_.chunkCount();
-}
-void BusinessWorld::forEachBlockInAABB(
-    const engine::shared::BlockPos& min, const engine::shared::BlockPos& max,
-    const std::function<void(const engine::shared::BlockPos&,
-                             engine::shared::BlockType)>& fn) const {
-    world_.forEachBlockInAABB(min, max, fn);
-}
-std::uint32_t BusinessWorld::chunkDirtyFlags(const engine::shared::ChunkPos& cp) const {
-    return world_.chunkDirtyFlags(cp);
 }
 std::optional<engine::shared::Block> BusinessWorld::findBlock
 (const engine::shared::BlockPos& p) const {
@@ -194,8 +186,10 @@ void BusinessWorld::processPlayerInput(const engine::shared::CameraState& cam,
             removeBlock(engine::shared::BlockPos{ hx, hy, hz });
         }
         else if (ev.button == 1) {  // 右键：在放置位放 Stone
+            // 方块 id 由注册表运行期分配，不能写死枚举值——读 freeze 后解析好的缓存。
             placeBlock(engine::shared::BlockPos{ px, py, pz },
-                engine::shared::BlockType::Stone);
+                static_cast<engine::shared::BlockType>(
+                    engine::registry::g_builtinBlockIds.stone));
         }
     }
 }
@@ -240,7 +234,7 @@ void BusinessWorld::maybeLog() {
            << " 放置/破坏=" << blocksPlaced() << "/" << blocksRemoved()
            << "(拒" << placementsRejected() << "/" << removalsRejected() << ")"
            << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Business);
-        engine::core::log(engine::core::LogLevel::Info, os.str());
+        LOG_INFO("Business", os.str());
     }
 }
 

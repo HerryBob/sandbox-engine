@@ -1,0 +1,5 @@
+{
+    "id": "builtin_blocks",
+    "phase": "builtin",
+    "dependencies": []
+}

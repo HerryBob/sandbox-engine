@@ -4,9 +4,10 @@
 
 namespace modapi {
 
-// 引擎 API 版本：v2。契约演进只允许在结构末尾追加字段（ABI 纪律），
+// 引擎 API 版本：v4（v4 = ModApi 末尾追加 WorldApi，世界查询）。
+// 契约演进只允许在结构末尾追加字段（ABI 纪律），
 // 老模组若未重编，version 校验会拒绝加载，不会带着错位布局继续跑。
-inline constexpr std::uint32_t kEngineApiVersion = 2;
+inline constexpr std::uint32_t kEngineApiVersion = 4;
 
 inline constexpr std::int32_t kLogDebug = 0;
 inline constexpr std::int32_t kLogInfo  = 1;

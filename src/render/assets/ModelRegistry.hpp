@@ -1,9 +1,9 @@
 #pragma once
-// 模型注册表：模型名（"wood"）→ ModelDef（Key = std::string，复用 Registry 模板）。
-// 与方块注册表同款生命周期：add（加载）→ freeze（锁表，免锁读）。
+// 模型注册表：模型名（"wood"）→ ModelDef。
+// 走统一注册器，与方块/贴图同一套「扫目录 + 全量解码 + 先到先得」规则。
 #include "render/assets/ModelDef.hpp"
-#include "registry/Registry.hpp"
+#include "resource/DataRegistry.hpp"
 
 namespace engine::assets {
-    inline engine::registry::Registry<ModelDef, std::string> g_modelRegistry;
+    inline engine::resource::DataRegistry<ModelDef> g_modelRegistry;
 }

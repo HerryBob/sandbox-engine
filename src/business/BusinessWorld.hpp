@@ -9,7 +9,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <functional> // std::function（forEachBlockInAABB 回调）
 #include <optional>
 #include <vector>
 
@@ -69,14 +68,6 @@ public:
 
     // 已加载 chunk 数（空 chunk 不占内存；断言/诊断用）。
     std::size_t chunkCount() const;
-    // 区域查询（跨 chunk；同步/LOD/变更广播共用）：遍历 [min, max] 内所有非空气方块，
-    // 对每个调用 fn。原型按坐标遍历（区域内定位 O(1)）。
-    void forEachBlockInAABB(const engine::shared::BlockPos& min,
-                            const engine::shared::BlockPos& max,
-                            const std::function<void(const engine::shared::BlockPos&,
-                                                     engine::shared::BlockType)>& fn) const;
-    // 某 chunk 的变更原因位掩码（修改跟踪诊断用；未加载返回 0）。
-    std::uint32_t chunkDirtyFlags(const engine::shared::ChunkPos& cp) const;
 
     // 装配期入口：世界数据真源（main 启动生成/世界重建用）。
     // 运行期外部不得持有引用（写路径仍只经命令式接口，保持调度边界）。

@@ -17,6 +17,10 @@ Allmd/
 
 # 纹理资产（含 MC 版权纹理与网络素材，仅本地使用，不提交公开）
 assets/textures/
+mods_src/**/assets/textures/
+
+# 本地素材（家燕模型与参考图，不进仓库）
+Model/
 
 # 编译产物
 *.obj

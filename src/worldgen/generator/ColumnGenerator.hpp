@@ -42,7 +42,7 @@ public:
 private:
     // 地层：方块类型 + 相对地表深度区间（0 = 地表）。
     struct Layer {
-        std::uint8_t type = 0;   // BlockType 值
+        std::uint16_t type = 0;  // BlockType 值
         int depthMin = 0;
         int depthMax = 0;
     };

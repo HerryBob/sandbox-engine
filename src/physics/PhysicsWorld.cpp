@@ -372,7 +372,7 @@ void PhysicsWorld::maybeLog() {
            << " 碰撞=" << collisions()
            << " 方块=(" << blockX() << "," << blockY() << "," << blockZ() << ")"
            << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Physics);
-        engine::core::log(engine::core::LogLevel::Info, os.str());
+        LOG_INFO("Physics", os.str());
     }
 }
 

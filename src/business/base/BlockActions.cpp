@@ -23,12 +23,11 @@ bool tryPlace(std::unordered_map<engine::shared::ChunkPos, engine::shared::Chunk
     // 裁决：位置已被占用（chunk 存在且该格非空气）→ 拒绝放置。
     const auto cp = engine::shared::chunkOf(p);
     const auto it = chunks.find(cp);
-    if (it != chunks.end() &&
-        it->second.atWorld(p) != static_cast<std::uint8_t>(engine::shared::BlockType::Air))
+    if (it != chunks.end() && it->second.get(p) != engine::shared::kAirEntry)
         return false;
-    // 区块化：chunk 写入（16³ 密集数组，O(1)；不存在则默认构造空 chunk）。
+    // 区块化：chunk 写入（调色板 + 索引，O(1)；不存在则默认构造空 chunk）。
     auto& c = chunks[cp];
-    c.atWorld(p) = static_cast<std::uint8_t>(type);
+    c.set(p, static_cast<engine::shared::PaletteEntry>(type));
     c.markDirty(DIRTY_PLACED); // 修改跟踪：放置标记脏（持久留档）
     markDirtyWithBoundary(dirty, cp, p);
     return true;
@@ -39,11 +38,9 @@ bool tryRemove(std::unordered_map<engine::shared::ChunkPos, engine::shared::Chun
                const engine::shared::BlockPos& p) {
     // 裁决：目标方块必须存在（chunk 存在且该格非空气）。
     const auto it = chunks.find(engine::shared::chunkOf(p));
-    if (it == chunks.end() ||
-        it->second.atWorld(p) == static_cast<std::uint8_t>(engine::shared::BlockType::Air))
+    if (it == chunks.end() || it->second.get(p) == engine::shared::kAirEntry)
         return false;
-    it->second.atWorld(p) =
-        static_cast<std::uint8_t>(engine::shared::BlockType::Air);
+    it->second.set(p, engine::shared::kAirEntry);
     it->second.markDirty(DIRTY_REMOVED); // 修改跟踪：破坏标记脏（持久留档）
     markDirtyWithBoundary(dirty, it->first, p);
     return true;

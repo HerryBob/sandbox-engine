@@ -9,12 +9,17 @@ std::unordered_map<std::string, modapi::NoiseProviderDef>& NoiseRegistry::table(
     return entries;
 }
 
+std::unordered_map<std::string, std::string>& NoiseRegistry::owners() {
+    static std::unordered_map<std::string, std::string> entries;
+    return entries;
+}
+
 bool& NoiseRegistry::frozenFlag() {
     static bool frozen = false;
     return frozen;
 }
 
-bool NoiseRegistry::registerType(const modapi::NoiseProviderDef& def) {
+bool NoiseRegistry::registerType(const modapi::NoiseProviderDef& def, const char* owner) {
     if (frozenFlag()) return false;
     if (def.type == nullptr || def.type[0] == '\0') return false;
     if (def.create == nullptr || def.sample == nullptr || def.destroy == nullptr) return false;
@@ -23,7 +28,40 @@ bool NoiseRegistry::registerType(const modapi::NoiseProviderDef& def) {
     // 表内也不再保存 def.type 指针（同样理由：它指向 DLL 的静态字符串）。
     modapi::NoiseProviderDef stored = def;
     stored.type = nullptr;
-    return table().emplace(std::string(def.type), stored).second;
+    const std::string typeName(def.type);
+    if (!table().emplace(typeName, stored).second) return false;
+    owners().emplace(typeName, (owner != nullptr) ? std::string(owner) : std::string());
+    return true;
+}
+
+std::size_t NoiseRegistry::eraseByOwner(const char* owner) {
+    const std::string name = (owner != nullptr) ? std::string(owner) : std::string();
+    const auto& tbl = table();
+    std::size_t removed = 0;
+    for (auto it = owners().begin(); it != owners().end();) {
+        if (it->second == name) {
+            table().erase(it->first);
+            it = owners().erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    // 一致性检查：两张表的 key 必须一一对应（漏删会留下悬垂函数指针）。
+    if (tbl.size() != owners().size()) {
+        LOG_WARN("Noise", "噪声注册表与来源表数量不一致（" + std::to_string(tbl.size()) +
+                              " vs " + std::to_string(owners().size()) + "）");
+    }
+    return removed;
+}
+
+std::size_t NoiseRegistry::countByOwner(const char* owner) {
+    const std::string name = (owner != nullptr) ? std::string(owner) : std::string();
+    std::size_t count = 0;
+    for (const auto& entry : owners()) {
+        if (entry.second == name) ++count;
+    }
+    return count;
 }
 
 bool NoiseRegistry::make(const char* type, const modapi::NoiseParamC* params,

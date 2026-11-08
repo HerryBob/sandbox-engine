@@ -29,6 +29,11 @@ add_executable(sandbox_engine
     ${ENGINE_HEADERS}
 )
 
+# windows.h 会定义 min/max 宏，直接撞 rapidjson 里的 std::max(...)：
+# 先被 include 的头文件（如 ModLoader.hpp）一旦拉进 windows.h，后包含 rapidjson 就编译失败。
+# NOMINMAX 让 windows.h 不再定义这两个宏。
+target_compile_definitions(sandbox_engine PRIVATE NOMINMAX)
+
 # ---- 第三方依赖 ----
 set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
@@ -95,18 +100,26 @@ add_custom_target(compile_shaders ALL
     VERBATIM
 )
 add_dependencies(sandbox_engine compile_shaders)
-# 资源为可选资源：公开仓库不含 MC 版权纹理，本机构建时存在则复制（缺省不影响编译）
-# assets/ 整体拷贝（MC 编排：assets/models/block/*.json + assets/textures/block/*.png）
+# 引擎自带资源（可选：公开仓库不含 MC 版权纹理，缺省不影响编译）
+# assets/ 编排：assets/models/block/*.json + assets/textures/{block,font}/*.png
+# data/ 编排：data/worldgen/presets/*.json
+#
+# 用 ALL 目标而不是 sandbox_engine 的 POST_BUILD —— POST_BUILD 只在 exe 重链时执行，
+# 只改 JSON/贴图不动代码时资源不会同步到输出目录。
+# 先 remove_directory 再 copy_directory：copy_directory 只增不删，删掉的资源会残留在
+# 输出目录，索引照样能找到它，旧副本会把新来源（模组那份）遮蔽掉。
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets")
-    add_custom_command(TARGET sandbox_engine POST_BUILD
+    add_custom_target(copy_engine_assets ALL
+        COMMAND ${CMAKE_COMMAND} -E remove_directory
+            "$<TARGET_FILE_DIR:sandbox_engine>/assets"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:sandbox_engine>/assets"
     )
 endif()
-
-# data/ 逻辑层资源整体拷贝（MC 编排：data/worldgen/presets/*.json 世界预设、未来 noise 编排）
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
-    add_custom_command(TARGET sandbox_engine POST_BUILD
+    add_custom_target(copy_engine_data ALL
+        COMMAND ${CMAKE_COMMAND} -E remove_directory
+            "$<TARGET_FILE_DIR:sandbox_engine>/data"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/data" "$<TARGET_FILE_DIR:sandbox_engine>/data"
     )
@@ -115,19 +128,22 @@ endif()
 # ============================================================================
 # 模组 DLL（#41 最小骨架）
 # ============================================================================
-# mods_src/ 下每个子目录 = 一个模组工程；产物统一拷到 exe 同级的 mods/。
+# mods_src/ 下每个子目录 = 一个模组工程；产物拷到 exe 同级的 mods/<模组名>/（目录即模组单元）。
 # MODULE 库在 Windows 上就是 .dll（PREFIX "" 去掉 lib 前缀）。
 # 关键：DLL 只 include modapi/，绝不 include src/ —— 否则会拿到注册表的独立副本。
 # 运行库必须与 exe 一致（Debug 下 MSVC 默认都是 /MDd；不要单独设 /MT）。
-add_library(hello_block MODULE
-    mods_src/hello_block/HelloBlockMod.cpp
+# builtin_blocks：引擎原来写死的那 6 个方块（#39）——删掉这个模组，方块注册表就是空的。
+# 产物目录 mods/blocks/：内含 blocks.dll 与 mod.json（phase=builtin，保证先于其它模组加载）。
+add_library(builtin_blocks MODULE
+    mods_src/blocks/BuiltinBlocksMod.cpp
 )
-target_include_directories(hello_block PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(builtin_blocks PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 if(MSVC)
-    target_compile_options(hello_block PRIVATE /utf-8)
+    target_compile_options(builtin_blocks PRIVATE /utf-8)
 endif()
-set_target_properties(hello_block PROPERTIES
+set_target_properties(builtin_blocks PROPERTIES
     PREFIX ""
+    OUTPUT_NAME "blocks"
     SUFFIX ".dll"
     FOLDER "mods"
 )
@@ -154,18 +170,42 @@ set_target_properties(mod_noise PROPERTIES
 )
 
 # 先建 DLL 再链接 exe（保证运行前 mods/ 已就绪）
-add_dependencies(sandbox_engine hello_block mod_noise)
+add_dependencies(sandbox_engine builtin_blocks mod_noise)
 
 # 拷贝挂在各自 DLL 的 POST_BUILD：DLL 重链即同步 mods/ 副本。
 # （挂在 sandbox_engine 上会有漏洞：只改模组源码时 exe 不重链，POST_BUILD 不执行，
 #   mods/ 里仍是旧 DLL。）
-add_custom_command(TARGET hello_block POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:sandbox_engine>/mods"
+add_custom_command(TARGET builtin_blocks POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:sandbox_engine>/mods/blocks"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:hello_block>" "$<TARGET_FILE_DIR:sandbox_engine>/mods/hello_block.dll"
+        "$<TARGET_FILE:builtin_blocks>" "$<TARGET_FILE_DIR:sandbox_engine>/mods/blocks/blocks.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/mods_src/blocks/mod.json"
+        "$<TARGET_FILE_DIR:sandbox_engine>/mods/blocks/mod.json"
 )
+# 模组自带资源：assets/（贴图、模型）与 data/（数据驱动定义）整体跟着模组走。
+# 用 ALL 目标而不是 DLL 的 POST_BUILD（POST_BUILD 只在 DLL 重新链接时执行）；
+# 先 remove_directory 再 copy_directory（copy_directory 只增不删，删掉的资源会残留）。
+# EXISTS 在配置期求值：新增/删除某模组的 assets 或 data 目录后要重新配置一次。
+foreach(mod_dir blocks noise)
+    foreach(res_kind assets data)
+        set(res_src "${CMAKE_CURRENT_SOURCE_DIR}/mods_src/${mod_dir}/${res_kind}")
+        if(EXISTS "${res_src}")
+            add_custom_target(copy_${mod_dir}_${res_kind} ALL
+                COMMAND ${CMAKE_COMMAND} -E remove_directory
+                    "$<TARGET_FILE_DIR:sandbox_engine>/mods/${mod_dir}/${res_kind}"
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${res_src}"
+                    "$<TARGET_FILE_DIR:sandbox_engine>/mods/${mod_dir}/${res_kind}"
+            )
+        endif()
+    endforeach()
+endforeach()
 add_custom_command(TARGET mod_noise POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:sandbox_engine>/mods"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:sandbox_engine>/mods/noise"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:mod_noise>" "$<TARGET_FILE_DIR:sandbox_engine>/mods/mod_noise.dll"
+        "$<TARGET_FILE:mod_noise>" "$<TARGET_FILE_DIR:sandbox_engine>/mods/noise/mod_noise.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/mods_src/noise/mod.json"
+        "$<TARGET_FILE_DIR:sandbox_engine>/mods/noise/mod.json"
 )

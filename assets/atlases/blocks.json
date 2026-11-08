@@ -1,0 +1,12 @@
+{
+  "textures": [
+    "stone",
+    "log_side",
+    "log_top",
+    "dirt",
+    "brick",
+    "glass",
+    "grass_top",
+    "grass_side"
+  ]
+}

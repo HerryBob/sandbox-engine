@@ -3,6 +3,7 @@
 #include "modapi/api_base.h"
 #include "modapi/block_api.h"
 #include "modapi/noise_api.h"
+#include "modapi/world_api.h"
 
 namespace modapi {
 
@@ -13,6 +14,7 @@ namespace modapi {
 struct ModApi {
     BlockApi block;   // 方块注册能力
     NoiseApi noise;   // 噪声注册能力
+    WorldApi world;   // 世界查询能力（v4 追加）
 };
 
 // 模组入口：引擎通过 CreateMod 得到它，再按五阶段生命周期驱动。

@@ -36,8 +36,8 @@ bool ColumnGenerator::prepare() {
     layers_.clear();
     layers_.reserve(preset_.strata.size());
     for (const Stratum& s : preset_.strata) {
-        const std::uint8_t id = engine::registry::findBlockIdByName(s.block);
-        if (id == 0xFF) {
+        const std::uint16_t id = engine::registry::findBlockIdByName(s.block);
+        if (id == 0xFFFF) {
             LOG_ERROR("ColumnGen", "地层引用未注册方块：" + s.block);
             return false;
         }
@@ -123,7 +123,7 @@ void ColumnGenerator::generateColumn(const ColPos& col, ColumnBlocks& out) const
                 const int depth = surfaceY - y;   // 相对地表深度：0 = 地表
 
                 // 查地层（线性扫；层数少，阶段 1 不提前优化——触发器模式）
-                std::uint8_t type = 0;
+                std::uint16_t type = 0;
                 bool found = false;
                 for (const Layer& l : layers_) {
                     if (depth >= l.depthMin && depth <= l.depthMax) {
@@ -134,8 +134,9 @@ void ColumnGenerator::generateColumn(const ColPos& col, ColumnBlocks& out) const
                 }
                 if (!found) continue;   // 连续性已校验，理论上不可达；兜底跳过
 
-                // y ∈ [0,63] → 层号 0..3；ChunkData::atWorld 用 &15 定位块内偏移
-                out.chunks[y >> 4].atWorld(worldX, y, worldZ) = type;
+                // y ∈ [0,63] → 层号 0..3；写入按块内坐标 &15 定位
+                out.chunks[y >> 4].set(worldX, y, worldZ,
+                                       static_cast<engine::shared::PaletteEntry>(type));
                 ++out.blockCount;
             }
         }

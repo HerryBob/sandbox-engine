@@ -37,7 +37,7 @@ void InputSampler::sample() {
     pitch_ = std::clamp(pitch_, -1.45, 1.45); // ±83°
 
     // 键盘移动（速度 2.5 格/s，与原渲染线程逻辑一致；125Hz → dt=0.008）。
-    const double speed = 2.5 * 0.008;
+    const double speed = 8 * 0.008;
     const double fwdX = std::sin(yaw_),  fwdZ = -std::cos(yaw_); // 前方向
     const double rgtX = std::cos(yaw_),  rgtZ =  std::sin(yaw_); // 右方向
     if (keyW_.load(std::memory_order_relaxed)) {

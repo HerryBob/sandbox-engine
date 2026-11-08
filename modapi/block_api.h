@@ -16,6 +16,11 @@ struct ModBlockDef {
     std::uint8_t renderType;  // kRenderSolid / kRenderCutout / kRenderTranslucent
     const char*  texture;     // 纹理图集里的纹理名（assets/textures/block/<name>.png）
     const char*  model;       // 模型名；nullptr = 默认立方体（6 面用 texture）
+
+    // ---- v3 追加：物理属性（字段一律加在末尾，保持 ABI 追加纪律）----
+    float        mass;        // 质量（相对单位：1.0 = 一个基准方块，约 1 m³ 的土）
+    std::uint8_t solid;       // 1 = 参与碰撞（实体阻挡、可站立）；0 = 可穿过
+    float        friction;    // 摩擦系数（0 = 冰面，1 = 完全不滑）
 };
 
 // 方块注册能力：继承共用基类。

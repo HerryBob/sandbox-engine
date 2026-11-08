@@ -11,13 +11,17 @@
 #include "physics/PhysicsWorld.hpp"
 #include "render/Renderer.hpp"
 #include "render/VulkanContext.hpp"
+#include "render/VulkanMesh.hpp"
 #include "shared/state/CameraState.hpp"
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerInput.hpp"
 #include "registry/BlockRegistry.hpp"
-#include "modhost/ModLoader.hpp"
+#include "modhost/loader/ModLoader.hpp"
+#include "resource/ResourceIndex.hpp"
+#include "render/assets/ModelDef.hpp"
 #include "render/assets/ModelLoader.hpp"
 #include "worldgen/noise/BuiltinNoiseTypes.hpp"
+#include "worldgen/noise/NoiseDefTable.hpp"
 #include "worldgen/noise/NoiseRegistry.hpp"
 #include "worldgen/preset/PresetLoader.hpp"
 #include "worldgen/preset/WorldPreset.hpp"
@@ -28,6 +32,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <sstream>
 #include <iostream>
 #include <memory>
@@ -67,24 +72,170 @@ static void chdirToExeDir() {
 #endif
 }
 
+// 调色板自检：覆盖 4→8→16 两档扩宽，确认扩宽后逐格内容不变、计数正确。
+static bool selfTestPalette() {
+    // ① 新 chunk 全空
+    shared::ChunkData blank;
+    if (!blank.isAllAir() || blank.nonAirCount() != 0) return false;
+    if (blank.bits() != 4 || blank.paletteSize() != 1) return false;
+
+    // ② 4→8 扩宽（第 17 个条目触发）
+    shared::ChunkData a;
+    for (int i = 0; i < 20; ++i)
+        a.set(i % 16, (i / 16) % 16, 0, static_cast<shared::PaletteEntry>(2000 + i));
+    if (a.bits() != 8 || a.paletteSize() != 21) return false;
+    for (int i = 0; i < 20; ++i)
+        if (a.get(i % 16, (i / 16) % 16, 0) != static_cast<shared::PaletteEntry>(2000 + i))
+            return false;
+    if (a.nonAirCount() != 20) return false;
+
+    // ③ 8→16 扩宽（第 257 个条目触发），写满 300 项后再逐格核对
+    shared::ChunkData b;
+    for (int i = 0; i < 300; ++i)
+        b.set(i % 16, (i / 16) % 16, i / 256, static_cast<shared::PaletteEntry>(3000 + i));
+    if (b.bits() != 16 || b.paletteSize() != 301) return false;
+    for (int i = 0; i < 300; ++i)
+        if (b.get(i % 16, (i / 16) % 16, i / 256) !=
+            static_cast<shared::PaletteEntry>(3000 + i))
+            return false;
+    for (std::int32_t i = 300; i < shared::CHUNK_VOLUME; ++i)
+        if (b.getAt(i) != shared::kAirEntry) return false;
+    if (b.nonAirCount() != 300) return false;
+
+    // ④ 写回 Air：字典里仍留着非空气条目，判空必须逐格扫完才返回 true
+    shared::ChunkData c;
+    const shared::PaletteEntry five = static_cast<shared::PaletteEntry>(5);
+    c.set(1, 1, 1, five);
+    if (c.get(1, 1, 1) != five) return false;
+    c.set(1, 1, 1, shared::kAirEntry);
+    if (!c.isAllAir() || c.nonAirCount() != 0) return false;
+    return true;
+}
+
+// 元素级旋转：绕轴旋转公式 + 原点不动，纯数学自检（不依赖图集与窗口）
+static bool selfTestModelRotation() {
+    using engine::assets::applyModelRotation;
+    using engine::assets::ModelRotation;
+
+    // ① 绕 Z 轴 45°：点 (16,8,8) 绕原点 (8,8,8) → (8+8cos45, 8+8sin45, 8)
+    ModelRotation rz;
+    rz.origin = glm::vec3{8.0f, 8.0f, 8.0f};
+    rz.axis = 'z';
+    rz.angle = 45.0f;
+    const glm::vec3 a = applyModelRotation(glm::vec3{16.0f, 8.0f, 8.0f}, rz);
+    const float e = 8.0f + 8.0f * 0.70710678f;
+    if (std::fabs(a.x - e) > 0.01f || std::fabs(a.y - e) > 0.01f || std::fabs(a.z - 8.0f) > 0.01f)
+        return false;
+
+    // ② 旋转原点自身不动
+    const glm::vec3 o = applyModelRotation(rz.origin, rz);
+    if (std::fabs(o.x - 8.0f) > 0.01f || std::fabs(o.y - 8.0f) > 0.01f || std::fabs(o.z - 8.0f) > 0.01f)
+        return false;
+
+    // ③ 绕 Y 轴 90°：+X 转到 -Z（右手系）
+    ModelRotation ry;
+    ry.origin = glm::vec3{8.0f, 8.0f, 8.0f};
+    ry.axis = 'y';
+    ry.angle = 90.0f;
+    const glm::vec3 b = applyModelRotation(glm::vec3{16.0f, 8.0f, 8.0f}, ry);
+    if (std::fabs(b.x - 8.0f) > 0.01f || std::fabs(b.y - 8.0f) > 0.01f || std::fabs(b.z - 0.0f) > 0.01f)
+        return false;
+
+    // ④ 绕 X 轴 90°：+Y 转到 +Z
+    ModelRotation rx;
+    rx.origin = glm::vec3{8.0f, 8.0f, 8.0f};
+    rx.axis = 'x';
+    rx.angle = 90.0f;
+    const glm::vec3 d = applyModelRotation(glm::vec3{8.0f, 16.0f, 8.0f}, rx);
+    if (std::fabs(d.x - 8.0f) > 0.01f || std::fabs(d.y - 8.0f) > 0.01f || std::fabs(d.z - 16.0f) > 0.01f)
+        return false;
+
+    return true;
+}
+
+// 元素级旋转的几何落点：直接跑 buildModelVertices，验旋转后顶点的包围盒尺寸。
+// 公式自检只证明数学，这里证明"模型里的 rotation 字段确实进到了顶点"。
+static bool selfTestModelGeometry() {
+    using engine::render::Vertex;
+
+    engine::assets::ModelDef def;
+    engine::assets::ModelElement el;
+    el.from = glm::vec3{0.0f, 0.0f, 0.0f};
+    el.to   = glm::vec3{16.0f, 16.0f, 16.0f};
+    for (int f = 0; f < 6; ++f) {
+        el.faces[f].texture = "default";
+        el.faces[f].cullFace = 0;          // 永不剔 → 6 面全生成
+    }
+    el.rotation.origin = glm::vec3{8.0f, 8.0f, 8.0f};
+    el.rotation.axis = 'z';
+    el.rotation.angle = 45.0f;
+    def.elements.push_back(el);
+
+    engine::assets::TextureAtlas emptyAtlas;   // 空图集：纹理走兜底格，不影响位置
+    const std::vector<Vertex> verts =
+        engine::render::mesh::buildModelVertices(glm::vec3{0.0f, 0.0f, 0.0f}, def, 0u, emptyAtlas);
+    if (verts.size() != 24) return false;      // 6 面 × 4 顶点
+
+    // 绕 Z 转 45°：X/Y 跨度 16√2 ≈ 22.627，Z 跨度仍 16；÷16 后 → 1.414 / 1.0
+    glm::vec3 lo{1e30f, 1e30f, 1e30f};
+    glm::vec3 hi{-1e30f, -1e30f, -1e30f};
+    for (const Vertex& v : verts) {
+        lo = glm::min(lo, v.pos);
+        hi = glm::max(hi, v.pos);
+    }
+    const glm::vec3 span = hi - lo;
+    const float diag = 22.6274f * 0.0625f;
+    if (std::fabs(span.x - diag) > 0.05f) return false;
+    if (std::fabs(span.y - diag) > 0.05f) return false;
+    if (std::fabs(span.z - 1.0f) > 0.05f) return false;
+
+    // 同一元素不旋转：三轴跨度都应是 1.0（确认走的是同一条路径的恒等分支）
+    def.elements.front().rotation.angle = 0.0f;
+    const std::vector<Vertex> plain =
+        engine::render::mesh::buildModelVertices(glm::vec3{0.0f, 0.0f, 0.0f}, def, 0u, emptyAtlas);
+    if (plain.size() != 24) return false;
+    glm::vec3 lo2{1e30f, 1e30f, 1e30f};
+    glm::vec3 hi2{-1e30f, -1e30f, -1e30f};
+    for (const Vertex& v : plain) {
+        lo2 = glm::min(lo2, v.pos);
+        hi2 = glm::max(hi2, v.pos);
+    }
+    const glm::vec3 span2 = hi2 - lo2;
+    if (std::fabs(span2.x - 1.0f) > 0.01f) return false;
+    if (std::fabs(span2.y - 1.0f) > 0.01f) return false;
+    if (std::fabs(span2.z - 1.0f) > 0.01f) return false;
+
+    return true;
+}
+
 // 引擎主流程：装配四轨 → 启动 → 主线程事件循环 → 优雅停止。
-static int run() {
+// presetName：世界预设名（不带 .json），由启动参数 --preset 决定。
+static int run(const std::string& presetName) {
     initConsole();
     std::cout << "=== 沙盒引擎 ===\n";
 
-    //方块注册表：必须先于 vkCtx.init（内部 createTextureImage 构建图集要遍历注册表）
-    engine::registry::initBlockRegistry();
+    // 资源索引：先登记引擎自带的 assets/ 与 data/，再由 ModLoader 追加各模组目录下的同名子目录。
+    // 登记顺序即冲突优先级：先登记者优先。
+    resource::g_resourceIndex.addRoot(resource::ResourceKind::Assets, "", "assets");
+    resource::g_resourceIndex.addRoot(resource::ResourceKind::Data, "", "data");
 
-    //模组加载（#41）：必须夹在 initBlockRegistry 之后、freeze 之前。
-    //顺序错了不会有报错，只会静默少方块 —— Registry::add 在表冻结后直接返回 false。
+    //方块注册表（#39）：引擎不再写死任何方块，内容全部由 mods/blocks.dll 注册。
+    //顺序：loadAll（blocks.dll 按文件名排序最靠前，独占 id 1..6）→ freeze → 按名字解析内置 id。
+    //晚于 freeze 的注册会被 Registry::add 静默拒绝；整条链必须早于 vkCtx.init（图集要遍历注册表）。
     const auto modCount = engine::modhost::ModLoader::loadAll("mods");
     engine::registry::freezeBlockRegistry();
+    engine::registry::resolveBuiltinBlockIds();
     std::cout << "方块注册表：共 " << engine::registry::g_blockRegistry.size()
               << " 个（成功加载模组 " << modCount << " 个），frozen="
               << std::boolalpha << engine::registry::g_blockRegistry.frozen() << "\n";
+    std::cout << "资源索引：assets "
+              << resource::g_resourceIndex.count(resource::ResourceKind::Assets)
+              << " 个文件，data "
+              << resource::g_resourceIndex.count(resource::ResourceKind::Data)
+              << " 个文件\n";
 
     //模型注册表：方块注册之后、Vulkan 初始化之前——
-    //图集 buildFromRegistry 要收集模型引用的纹理名（如 wood.json 的 log_top）
+    //图集 build 会读 assets/atlases/blocks.json 的纹理声明，同时核对注册表引用的纹理名
     engine::assets::loadBlockModels();
 
     //世界生成子系统（#33/#34）：噪声注册 → 行为自检 → 锁表。
@@ -95,6 +246,19 @@ static int run() {
     engine::worldgen::initBuiltinNoiseTypes();
     const bool noiseOk = engine::worldgen::selfTestNoiseTypes();
     engine::worldgen::NoiseRegistry::freeze();
+
+    //区块调色板（ChunkData）：4/8/16 位扩宽 + 判空自检，装配期跑一次。
+    const bool paletteOk = selfTestPalette();
+
+    //元素级旋转（ModelElement::rotation）：绕轴旋转公式自检。
+    const bool modelRotOk = selfTestModelRotation();
+
+    //元素级旋转的几何落点：rotation 字段 → buildModelVertices 顶点位置。
+    const bool modelGeoOk = selfTestModelGeometry();
+
+    //世界生成数据（data/worldgen/noise/*.json）：扫全目录、逐个解码注册，之后按名字查表。
+    //必须在预设加载之前——PresetLoader 只查这张表，不再自己读噪声文件。
+    engine::worldgen::loadNoiseDefs();
 
     // 按名字区分来源：flat 是内置，其余全部来自模组 DLL（注册表不记来源元数据）。
     std::vector<std::string> noiseTypes = engine::worldgen::NoiseRegistry::types();
@@ -111,12 +275,18 @@ static int run() {
               << " 个（" << modNoise << "），frozen="
               << std::boolalpha << engine::worldgen::NoiseRegistry::frozen()
               << "，自检" << (noiseOk ? "通过" : "失败") << "\n";
+    std::cout << "区块调色板：4/8/16 位扩宽 + 判空自检"
+              << (paletteOk ? "通过" : "失败") << "\n";
+    std::cout << "模型元素旋转：绕轴旋转自检"
+              << (modelRotOk ? "通过" : "失败") << "\n";
+    std::cout << "模型元素旋转：顶点几何自检"
+              << (modelGeoOk ? "通过" : "失败") << "\n";
 
-    // 世界预设（#35）：data/worldgen/presets/default.json → WorldPreset（纯数据）。
+    // 世界预设（#35）：data/worldgen/presets/<presetName>.json → WorldPreset（纯数据）。
     // 高度场实例化推迟到 ColumnGenerator::prepare()，失败原因在那里报。
     engine::worldgen::WorldPreset preset;
-    const bool presetOk = engine::worldgen::PresetLoader::load("default", preset);
-    std::cout << "世界预设：default.json " << (presetOk ? "加载成功" : "加载失败");
+    const bool presetOk = engine::worldgen::PresetLoader::load(presetName, preset);
+    std::cout << "世界预设：" << presetName << ".json " << (presetOk ? "加载成功" : "加载失败");
     if (presetOk) {
         std::cout << "（seed=" << preset.seed
                   << " baseHeight=" << preset.baseHeight
@@ -125,6 +295,11 @@ static int run() {
                   << " 高度场=" << preset.heightType << "）";
     }
     std::cout << "\n";
+    if (!presetOk) {
+        // 没有预设就没有地形来源：继续启动只会得到空世界，直接退出。
+        std::cerr << "预设加载失败，没有可生成的世界，退出。\n";
+        return 1;
+    }
 
     engine::render::VulkanContext vkCtx;
     const bool vkOk = vkCtx.init(1280, 720, "沙盒引擎 · Vulkan 方块+相机");
@@ -148,6 +323,10 @@ static int run() {
     vkCtx.attachCameraState(&cameraState);
 
     business::BusinessWorld businessWorld(tm, physicsBridge, renderBridge);
+
+    // 世界已构造：交给模组 API 层。loadAll 执行时 World 还不存在，
+    // 那段窗口里模组调世界查询会拿到 kWorldNotReady。
+    engine::modhost::ModLoader::attachWorld(&businessWorld.world());
 
     // ---- 1b 流式生成（#38）----
     // 线程边界：业务线程是 World 唯一写者；后台生成线程只做纯计算（ColumnGenerator），
@@ -216,6 +395,18 @@ static int run() {
 
     // 初始世界统计：生成后快照（诊断/验收用）。
     std::cout << "初始世界：方块=" << businessWorld.blockCount() << "\n";
+    {
+        const auto ps = businessWorld.world().paletteStats();
+        const std::size_t denseBytes = ps.chunks * 8192;   // 改造前：16 位密集数组
+        std::cout << "[Palette] chunk=" << ps.chunks
+                  << " 4位=" << ps.bits4 << " 8位=" << ps.bits8 << " 16位=" << ps.bits16
+                  << " 平均字典=" << std::fixed << std::setprecision(2) << ps.avgPalette << "项"
+                  << " 实际=" << ps.totalBytes / 1024 << "KB"
+                  << " 密集数组本应=" << denseBytes / 1024 << "KB"
+                  << "（省 " << (denseBytes == 0 ? 0.0
+                          : static_cast<double>(denseBytes - ps.totalBytes) * 100.0
+                            / static_cast<double>(denseBytes)) << "%）\n";
+    }
 
     core::ThreadLoop businessLoop("business");
     core::ThreadLoop physicsLoop("physics");
@@ -340,14 +531,28 @@ static engine::core::LogLevel parseLogLevelArg(int argc, char** argv) {
     return level;
 }
 
+// 解析启动参数 --preset <name>（缺省 default）：决定跑哪个世界预设。
+static std::string parsePresetArg(int argc, char** argv) {
+    std::string name = "default";
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (arg == "--preset" && (i + 1) < argc) {
+            ++i;
+            name = argv[i];
+        }
+    }
+    return name;
+}
+
 int main(int argc, char** argv) {
     initConsole();
     chdirToExeDir();
 
     // 日志：控制台 + logs/engine.log（10MB×5 滚动），异步写不阻塞线程。
     engine::core::initLog(parseLogLevelArg(argc, argv));
+    engine::core::setLogThreadName("main");   // 主线程标识；子线程由 ThreadLoop::start 自动登记
 
-    const int code = run();
+    const int code = run(parsePresetArg(argc, argv));
 
     engine::core::shutdownLog();   // 停止后台线程并 flush 剩余队列
     return code;

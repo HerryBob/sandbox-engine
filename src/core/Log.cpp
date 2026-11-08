@@ -24,6 +24,10 @@ namespace {
 std::mutex g_initMutex;
 std::shared_ptr<spdlog::logger> g_logger;
 
+// 每个线程独立一份线程名（thread_local），由 ThreadLoop::start 或 main 登记。
+// 存 std::string 而非裸指针，调用方传临时字符串也不会悬垂。
+thread_local std::string g_threadName = "?";
+
 // LogLevel 与 spdlog 的等级枚举数值不同（spdlog 中 trace=0、debug=1、info=2、warn=3、err=4），
 // 必须显式映射，不能直接 static_cast。
 spdlog::level::level_enum toSpdLevel(LogLevel level) {
@@ -75,8 +79,8 @@ void initLog(LogLevel level) {
         "engine", sinks.begin(), sinks.end(), spdlog::thread_pool(),
         spdlog::async_overflow_policy::block);
 
-    // 每行：[时间][等级][线程] [tag] 消息（tag 由 log() 拼进消息体）。
-    logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e][%l][%t] %v");
+    // 每行：[时间][等级][线程ID][线程名][tag] 消息（线程名与 tag 由 log() 拼进消息体）。
+    logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e][%l][%t]%v");
     logger->set_level(toSpdLevel(level));
     logger->flush_on(spdlog::level::warn);
 
@@ -104,14 +108,25 @@ LogLevel parseLogLevel(const std::string& text, LogLevel fallback) {
     return fallback;
 }
 
-void log(LogLevel level, const char* tag, const std::string& msg) {
-    const char* shownTag = (tag != nullptr && tag[0] != '\0') ? tag : "?";
-    if (g_logger == nullptr) {
-        // 未初始化（理论上 main 已 initLog）：退回控制台，保持可用。
-        std::cout << "[" << shownTag << "] " << msg << "\n";
+void setLogThreadName(const char* name) {
+    if (name == nullptr || name[0] == '\0') {
+        g_threadName = "?";
         return;
     }
-    g_logger->log(toSpdLevel(level), "[{}] {}", shownTag, msg);
+    g_threadName = name;   // 拷贝保存，不持有调用方指针
+}
+
+void log(LogLevel level, const char* tag, const std::string& msg) {
+    const char* shownTag = (tag != nullptr && tag[0] != '\0') ? tag : "?";
+    // 在调用线程内拼好整行文本：异步 sink 在后台线程格式化，
+    // 若把 thread_local 当格式化参数传过去，后台线程读到的是日志线程自己的名字。
+    const std::string line = "[" + g_threadName + "][" + shownTag + "] " + msg;
+    if (g_logger == nullptr) {
+        // 未初始化（理论上 main 已 initLog）：退回控制台，保持可用。
+        std::cout << line << "\n";
+        return;
+    }
+    g_logger->log(toSpdLevel(level), line);   // 该重载按纯文本处理，不做 {} 格式化
 }
 
 } // namespace engine::core

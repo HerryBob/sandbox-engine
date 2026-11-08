@@ -17,6 +17,10 @@ void shutdownLog();
 // 解析等级字符串（debug/info/warn/error，大小写不敏感）；无法识别时返回 fallback。
 LogLevel parseLogLevel(const std::string& text, LogLevel fallback = LogLevel::Info);
 
+// 设置当前线程在日志中的标识（如 "main" / "render" / "physics" / "worldgen-stream"）。
+// 只影响调用它的那个线程；未设置的线程显示 "?"。传入内容会被拷贝保存，可安全传临时字符串。
+void setLogThreadName(const char* name);
+
 // 统一日志出口：tag 是模块名（Vulkan / Mod / Noise / ColumnGen / Model / Atlas / Input / Shader）。
 // 门面内部负责等级过滤、格式化（时间/等级/线程/tag）与 sink 分发。
 void log(LogLevel level, const char* tag, const std::string& msg);

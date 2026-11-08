@@ -1,0 +1,6 @@
+{
+  "type": "fbm",
+  "base": "perlin",
+  "octaves": 4,
+  "scale": 0.004
+}

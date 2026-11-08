@@ -20,7 +20,16 @@ class NoiseRegistry {
 public:
     // 注册一个 provider（模组 DLL 与引擎内置走同一入口、地位平等）。
     // type 空 / create·sample·destroy 任一为空 / 重复 / 已冻结 → 拒绝。
-    static bool registerType(const modapi::NoiseProviderDef& def);
+    // owner：注册来源（模组名；nullptr/空串 = 引擎自身注册），只存字符串副本。
+    static bool registerType(const modapi::NoiseProviderDef& def, const char* owner = nullptr);
+
+    // 按来源批量移除（卸载闭环）：表里存的是 DLL 的 create/sample/destroy 函数指针，
+    // DLL 一旦 FreeLibrary，这些指针就是悬垂指针 —— 卸载方必须调本函数清干净。
+    // 封表后仍允许（移除比新增安全）。返回移除条数。
+    static std::size_t eraseByOwner(const char* owner);
+
+    // 按来源计数（卸载前后自检用）。
+    static std::size_t countByOwner(const char* owner);
 
     // 按 type 创建句柄；params 只在本次调用期间有效（DLL 负责拷贝自己需要的值）。
     // 未注册 / create 返回空 → false（stderr 说明原因），out 已被 reset。
@@ -42,6 +51,8 @@ public:
 private:
     // 函数局部静态（Meyer's singleton）：跨 TU 安全的单实例，首次访问时构造。
     static std::unordered_map<std::string, modapi::NoiseProviderDef>& table();
+    // 与 table() 同 key 的来源标记（同样是字符串副本）。
+    static std::unordered_map<std::string, std::string>& owners();
     static bool& frozenFlag();
 };
 

@@ -1,12 +1,7 @@
 {
   "seed": 1337,
   "heightmap": {
-    "noise": {
-      "type": "fbm",
-      "base": "perlin",
-      "octaves": 4,
-      "scale": 0.004
-    },
+    "noise": "terrain",
     "baseHeight": 32.0,
     "amplitude": 16.0
   },
