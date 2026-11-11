@@ -6,7 +6,7 @@
 
 namespace engine::worldgen {
 
-resource::DataRegistry<NoiseDef> g_noiseDefs;
+resource::JsonRegistry<NoiseDef> g_noiseDefs;
 
 // type / base 单读，其余键按值类型收进 params
 bool decodeNoiseDef(const rapidjson::Value& v, NoiseDef& out, const std::string& rel) {

@@ -1,5 +1,7 @@
 #include "business/PhysicsBridge.hpp"
 
+#include <utility>
+
 namespace engine::business {
 
 PhysicsBridge::PhysicsBridge() = default;
@@ -59,8 +61,10 @@ void PhysicsBridge::syncToPhysics(const std::vector<engine::shared::Block>& full
     // push 失败（队列满）不清待发位：下 tick 重试。指令可延迟送达（最终一致）。
 }
 
-void PhysicsBridge::receiveFromPhysics() {
-    // 业务 Tick 边界：收物理结果（位置快照/碰撞体数量）。
+void PhysicsBridge::receiveFromPhysics(
+    std::vector<engine::shared::BodyStructureEvent>* bodyEvents,
+    std::optional<engine::shared::BodyPose>* bodyPose) {
+    // 业务 Tick 边界：收物理结果（位置快照/碰撞体数量/刚体结构/位姿）。
     engine::shared::PhysicsResult res;
     while (resultQueue_.pop(res)) {
         resultsReceived_.fetch_add(1, std::memory_order_relaxed);
@@ -74,8 +78,40 @@ void PhysicsBridge::receiveFromPhysics() {
             // 物理静态碰撞体数量快照（合并语义：只留最新值）。
             physicsBlockCount_.store(res.blockSetSize, std::memory_order_relaxed);
             break;
-        // 无刚体后物理不再发 CollisionEvent（碰撞事件只有刚体撞静态方块才有），
-        // 收到也按未知类型忽略（switch 无匹配 case 直接跳过）。
+        case engine::shared::PhysicsResult::Type::ContraptionPacked: {
+            // 打包回执：带局部坐标方块列表 → 渲染端建网格；顺带给出初始位姿。
+            if (bodyEvents) {
+                engine::shared::BodyStructureEvent ev;
+                ev.contraptionId = res.contraptionId;
+                ev.destroy = false;
+                ev.blocks = res.blocks;
+                bodyEvents->push_back(std::move(ev));
+            }
+            if (bodyPose)
+                *bodyPose = engine::shared::BodyPose{
+                    res.contraptionId, res.rx, res.ry, res.rz};
+            break;
+        }
+        case engine::shared::PhysicsResult::Type::ContraptionUnpacked: {
+            // 解包回执：渲染端销毁该刚体的网格。
+            if (bodyEvents) {
+                engine::shared::BodyStructureEvent ev;
+                ev.contraptionId = res.contraptionId;
+                ev.destroy = true;
+                bodyEvents->push_back(std::move(ev));
+            }
+            break;
+        }
+        case engine::shared::PhysicsResult::Type::RigidBodyPos: {
+            // 位姿快照（状态语义：后到的覆盖先到的）。
+            if (bodyPose)
+                *bodyPose = engine::shared::BodyPose{
+                    res.contraptionId, res.rx, res.ry, res.rz};
+            break;
+        }
+        case engine::shared::PhysicsResult::Type::CollisionEvent:
+            // 碰撞事件暂无消费方，先忽略。
+            break;
         }
     }
 }

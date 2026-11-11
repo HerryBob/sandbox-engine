@@ -1,6 +1,6 @@
 #pragma once
 #include "core/SPSCQueue.hpp"
-#include "shared/block/Block.hpp"
+#include "shared/chunk/ChunkPos.hpp"
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerInput.hpp"
 #include "VulkanContext.hpp"

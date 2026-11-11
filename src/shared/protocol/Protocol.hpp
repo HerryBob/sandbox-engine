@@ -1,6 +1,6 @@
 #pragma once
 
-#include "shared/block/Block.hpp"
+#include "shared/chunk/ChunkPos.hpp"
 
 #include <vector>
 
@@ -58,9 +58,25 @@ struct PhysicsResult {
     int        nx = 0, ny = 0, nz = 0;     // 碰撞法向（刚体被推回的方向）
     double     impact = 0.0;               // 碰撞瞬间刚体速度（冲击强度）
 
-    // 解包回执（ContraptionUnpacked 用）：世界坐标方块列表。
-    // 业务据此重建 blocks_，对齐两侧坐标（解包闭环，架构 2.7）。
+    // 解包/打包回执（ContraptionUnpacked / ContraptionPacked 用）：
+    // Unpacked = 世界坐标方块列表（业务据此重建 blocks_）；
+    // Packed   = 刚体局部坐标方块列表（业务据此交给渲染端建网格，不必自己留副本）。
     std::vector<engine::shared::Block> blocks;
+};
+
+// 业务 → 渲染：刚体结构事件（打包/解包）。
+// 事件流语义：逐条送达、不能丢（丢一条 = 渲染端多一个或漏一个网格）。
+struct BodyStructureEvent {
+    int  contraptionId = -1;  // 刚体 ID（渲染端 bodyMeshes_ 的 key）
+    bool destroy = false;     // true=解包销毁网格；false=打包建网格
+    std::vector<engine::shared::Block> blocks; // 局部坐标方块列表（destroy 时为空）
+};
+
+// 业务 → 渲染：刚体位姿。
+// 状态语义：中间帧可丢，渲染端只取最新一条（旧位置没有留存价值）。
+struct BodyPose {
+    int    contraptionId = -1;
+    double x = 0.0, y = 0.0, z = 0.0; // 刚体世界位置
 };
 
 // 业务 → 渲染：变更事件流（数据层 ② 第四项，渲染快照正式化）。

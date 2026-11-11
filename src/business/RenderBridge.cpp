@@ -20,8 +20,26 @@ void RenderBridge::flushChanges(World& world, long long tick) {
     // 渲染端最终一致（与位置快照"满则丢"不同：丢变更 = 渲染端漏重建）。
 }
 
+bool RenderBridge::pushBodyStructure(const engine::shared::BodyStructureEvent& ev) {
+    // 结构事件是"事件流"：push 失败返回 false，由调用方下次重试（不能丢）。
+    return bodyStructureQueue_.push(ev);
+}
+
+void RenderBridge::pushBodyPose(const engine::shared::BodyPose& pose) {
+    // 位姿是"状态"：满则丢，下一 tick 还有更新的值。
+    bodyPoseQueue_.push(pose);
+}
+
 engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& RenderBridge::changeEventQueue() {
     return changeEventQueue_;
+}
+
+engine::core::SPSCQueue<engine::shared::BodyStructureEvent>& RenderBridge::bodyStructureQueue() {
+    return bodyStructureQueue_;
+}
+
+engine::core::SPSCQueue<engine::shared::BodyPose>& RenderBridge::bodyPoseQueue() {
+    return bodyPoseQueue_;
 }
 
 long long RenderBridge::changeEventsSent() const {

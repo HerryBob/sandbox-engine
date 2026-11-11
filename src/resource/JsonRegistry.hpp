@@ -35,7 +35,7 @@ struct DataEntry {
 };
 
 template <typename T>
-class DataRegistry {
+class JsonRegistry {
 public:
     // 扫 kind 侧 relDir 下扩展名为 ext 的全部文件（relDir 形如 "worldgen/noise"），逐个解码注册。
     // 名字取文件名去扩展名。同名时先到先得，后到的告警并忽略。
@@ -74,7 +74,7 @@ private:
 };
 
 template <typename T>
-void DataRegistry<T>::load(ResourceKind kind, const std::string& relDir,
+void JsonRegistry<T>::load(ResourceKind kind, const std::string& relDir,
                            const std::string& ext, DataDecoder<T> decode,
                            const char* tag) {
     const std::vector<std::string> files = g_resourceIndex.list(kind, relDir, ext);
@@ -134,24 +134,24 @@ void DataRegistry<T>::load(ResourceKind kind, const std::string& relDir,
 }
 
 template <typename T>
-const T* DataRegistry<T>::find(const std::string& name) const {
+const T* JsonRegistry<T>::find(const std::string& name) const {
     auto it = items_.find(name);
     return it == items_.end() ? nullptr : &it->second.value;
 }
 
 template <typename T>
-std::string DataRegistry<T>::ownerOf(const std::string& name) const {
+std::string JsonRegistry<T>::ownerOf(const std::string& name) const {
     auto it = items_.find(name);
     return it == items_.end() ? std::string{} : it->second.owner;
 }
 
 template <typename T>
-std::size_t DataRegistry<T>::size() const {
+std::size_t JsonRegistry<T>::size() const {
     return items_.size();
 }
 
 template <typename T>
-std::vector<std::string> DataRegistry<T>::names() const {
+std::vector<std::string> JsonRegistry<T>::names() const {
     std::vector<std::string> out;
     out.reserve(items_.size());
     for (const auto& kv : items_) out.push_back(kv.first);
@@ -159,7 +159,7 @@ std::vector<std::string> DataRegistry<T>::names() const {
 }
 
 template <typename T>
-void DataRegistry<T>::clear() {
+void JsonRegistry<T>::clear() {
     items_.clear();
 }
 

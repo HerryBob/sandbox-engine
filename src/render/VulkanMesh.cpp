@@ -1,5 +1,8 @@
 #include "VulkanMesh.hpp"
+#include "registry/BlockRegistry.hpp"
+#include "render/assets/ModelRegistry.hpp"
 #include <bit>
+#include <unordered_map>
 namespace engine::render::mesh {
     using engine::assets::TextureAtlas;
     using engine::assets::AtlasSlot;
@@ -7,17 +10,18 @@ namespace engine::render::mesh {
 
     // ---- 方块几何：24 顶点 + 36 索引（每面独立 4 顶点、独立颜色）----
 
-    // 面定义表：法线 n + 主轴 u + 副轴 v（约束：u×v = n，右手系）
+    // 面定义表：法线 n + 屏幕右 u + 屏幕上 v（约束：u×v = n，右手系）
+    // u×v=n 只保证绕序朝外；u/v 还必须取「从外面看」的屏幕方向，否则贴图整体转 90°。
     // 角点由公式生成 → 叉积恒 = 4h²·n → 绕序数学上永远朝外
     static const glm::vec3 kFaceN[6] = {
         { 1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0,-1, 0}, {0, 0, 1}, {0, 0,-1}
     }; // 法线：+X  -X  +Y  -Y  +Z  -Z
     static const glm::vec3 kFaceU[6] = {
-        {0,1,0}, {0,0,1}, {0,0,1}, {1,0,0}, {1,0,0}, {0,1,0}
-    }; // 主轴
+        {0,0,-1}, {0,0,1}, {1,0,0}, {1,0,0}, {1,0,0}, {-1,0,0}
+    }; // 屏幕右
     static const glm::vec3 kFaceV[6] = {
-        {0,0,1}, {0,1,0}, {1,0,0}, {0,0,1}, {0,1,0}, {1,0,0}
-    }; // 副轴
+        {0,1,0}, {0,1,0}, {0,0,-1}, {0,0,1}, {0,1,0}, {0,1,0}
+    }; // 屏幕上
 
     std::vector<Vertex> buildCubeVertices(const glm::vec3& offset, std::uint8_t faceMask,
                                           const glm::vec4& atlasUV) {
@@ -128,5 +132,75 @@ namespace engine::render::mesh {
             }
         }
         return verts;
+    }
+
+    // ---- 刚体几何：局部坐标 + 仅刚体内部剔除 ----
+    BodyMeshData buildBodyVertices(const std::vector<engine::shared::Block>& blocks,
+                                   const TextureAtlas& atlas) {
+        using engine::shared::BlockPos;
+        using engine::shared::BlockType;
+
+        BodyMeshData out;
+
+        // 局部坐标 → 类型：只用于邻居查询（刚体规模小，哈希表足够）
+        std::unordered_map<BlockPos, BlockType> localMap;
+        localMap.reserve(blocks.size());
+        for (const auto& b : blocks)
+            localMap[b.pos] = b.type;
+
+        // 六方向偏移，位序与 kFaceN 一致：+X -X +Y -Y +Z -Z
+        static const BlockPos kDir[6] = {
+            { 1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}
+        };
+
+        for (const auto& block : blocks) {
+            if (block.type == BlockType::Air) continue;
+
+            // 邻居只在刚体内部查：外部方向一律可见——刚体离位后那些面会露出来
+            std::uint8_t faceMask = 0;
+            for (int f = 0; f < 6; ++f) {
+                const BlockPos np{block.pos.x + kDir[f].x,
+                                  block.pos.y + kDir[f].y,
+                                  block.pos.z + kDir[f].z};
+                const auto it = localMap.find(np);
+                const bool blocked = (it != localMap.end() && it->second != BlockType::Air);
+                if (!blocked)
+                    faceMask = static_cast<std::uint8_t>(faceMask | (1u << f));
+            }
+
+            // 局部坐标下的方块中心（刚体基准为原点）
+            const glm::vec3 center{block.pos.x + 0.5f,
+                                   block.pos.y + 0.5f,
+                                   block.pos.z + 0.5f};
+
+            const auto* info = engine::registry::g_blockRegistry.find(
+                static_cast<std::uint16_t>(block.type));
+
+            glm::vec4 uvRect = atlas.fallbackUV();
+            if (info && !info->texture.empty()) {
+                AtlasSlot slot;
+                if (atlas.slotOf(info->texture, slot))
+                    uvRect = atlas.slotUV(slot);
+            }
+
+            // 与 chunk 同一套降级顺序：模型 → 立方体兜底
+            std::vector<Vertex> vs;
+            if (info && !info->model.empty()) {
+                if (const auto* md = engine::assets::g_modelRegistry.find(info->model))
+                    vs = buildModelVertices(center, *md, faceMask, atlas);
+            }
+            if (vs.empty())
+                vs = buildCubeVertices(center, faceMask, uvRect);
+
+            const std::uint32_t base = static_cast<std::uint32_t>(out.vertices.size());
+            out.vertices.insert(out.vertices.end(), vs.begin(), vs.end());
+            const std::uint32_t faceCount = static_cast<std::uint32_t>(vs.size() / 4);
+            for (std::uint32_t f = 0; f < faceCount; ++f) {
+                const std::uint32_t b0 = base + f * 4;
+                out.indices.push_back(b0 + 0); out.indices.push_back(b0 + 1); out.indices.push_back(b0 + 2);
+                out.indices.push_back(b0 + 0); out.indices.push_back(b0 + 2); out.indices.push_back(b0 + 3);
+            }
+        }
+        return out;
     }
 } // namespace engine::render::mesh

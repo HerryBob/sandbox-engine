@@ -320,3 +320,52 @@ CMake 的 `assets` 是 ALL 目标 `copy_directory`，加子目录不用重新 co
 9. `TextureAtlas.hpp` → `TextureAtlas.cpp`（A3，重点看 `addFromFile`）
 10. `VulkanContext.cpp:825` → `VulkanMesh.cpp` 的 UV 取值（A3 接线）
 11. `assets/atlases/blocks.json` 与两道尺寸门槛
+
+---
+
+## 八、通读结果（2026-11-09）
+
+按第七节的顺序完整走读一遍，五段问题清单全部有答案。验证手段是重跑 default 复现基线：
+`EXIT=0`、stderr 0 字节、`[Palette] chunk=81 4位=81 … 实际=163KB 密集数组本应=648KB（省 74.80%）`。
+工作区干净，HEAD = `b9af359`，日志与代码同源。
+
+### 8.1 三条旧缺口的重新判定
+
+**缺口③「`createTextureImage` 里 `vkUnmapMemory` 前没有 `vkBindMemory`，属于双重 unmap」——不成立。**
+`util::createBuffer`（`src/render/utils/ResourcesUtils.cpp:79-100`）只做 create / allocate / `vkBindBufferMemory`，不 map。
+`createTextureImage` 里是 `vkMapMemory` → `memcpy` → `vkUnmapMemory`，一次配对，内存操作正确。
+真正的小问题在 `VulkanContext.cpp:852`：`vkMapMemory` 的返回值没有检查，失败时 `data` 是空指针，紧接着的 `memcpy` 会崩。属于健壮性缺陷，不是双重 unmap。
+
+**缺口①「边界壳面数没有改造前后对照」——等价性推论成立，不必补实验。**
+面数完全由 `get()` 返回的方块值决定，与存储编码方式无关；`selfTestPalette` 已经覆盖 `set` → 扩宽 → `get` 的一致性。
+今天重跑得到 `面=512/576/640 顶点=2048/2304/2560`，与改造后的历次记录一致。要看硬证据可另起 worktree 跑旧提交，但收益只是确认一件已经由接口性质保证的事。
+
+**缺口②「`findOrAdd` 没有 `lastIndex_` 缓存」——当前规模下不是问题。**
+`set` 每次都会调 `findOrAdd`，后者线性扫字典（`Block.hpp:152-161`）。字典 2~4 项时单次写入最多 4 次比较，可以忽略。
+该做的事情是在注释里写明「字典规模变大时要加缓存」，而不是现在实现它。
+
+### 8.2 本次走读新发现
+
+1. **`TextureAtlas.hpp:2` 注释过时**：仍写「一张 128² 大纹理装所有方块小纹理」，A3 之后边长是 48² / 64² 随条目数变。
+
+2. **`addFromFile` 的旧错误是越界写堆内存，不只是「写到错误位置」**。
+   48² / 3×3 下，`grass_top` 的格是 (row 2, col 1)，旧公式 `slot.row * size_` 得到像素行 96，字节偏移 `(96 * 48 + 16) * 4 = 18496`；而整张图集只有 `48 * 48 * 4 = 9216` 字节——超出两倍，`memcpy` 落到 `pixels_` 之外。
+   128² / 8×8 下最大旧偏移是 `(7 * 128 + 112) * 4 = 4032`，远小于 65536，只在图内偏移，所以长期看不出来。
+   这也解释了 48² 下故障为何那么彻底：不是某几格采到透明，而是堆被踩了。
+
+3. **A1 与 A3 没有自动断言，只有日志**。
+   A1 的烘焙语义（elements 整段替换、textures 按 key 合并、环检测、parent 缺失回退）与 A3 的布局计算（8 → 3×3、9 → 4×4）全部靠「跑一次看日志」确认，没有一条 `if (...) return false`。
+   `addFromFile` 偏移 bug 能活到生产，与「图集布局无断言」直接相关——当时没有任何东西会因为它失败。
+
+4. **`ModelDef.parent` 在烘焙后仍然保留**（`ModelLoader.cpp:173`），原始记录与烘焙结果混在同一结构里。
+   当前只在启动期调一次 `resolveModelParents`，不会出事；但将来做模型热重载时，对已烘焙的模型再调一次会把结果当原始数据二次解析。
+
+5. **`tryPlace` 会凭空造 chunk**（`BlockActions.cpp:29` 的 `chunks[cp]`）。往未加载位置放一个方块，`operator[]` 默认构造 `ChunkData` 并分配 2048 字节索引数组，留下一个只含 1 个方块的孤立 chunk。
+
+6. **空 chunk 的分配发生在判空之前**。`ChunkData` 构造时就分配 `packed_`（2048 字节），`isAllAir` 是构造完之后才调；走「先构造再判空丢弃」的路径时，每个空 chunk 白分配一次。延迟分配 `packed_` 可以省掉这笔。
+
+### 8.3 本次没覆盖的部分
+
+- A1 的环检测与 parent 缺失回退：现有资产不会触发，只读了代码路径，没有实测。
+- A2 的 `rescale=true` 分支：`buildModelVertices` 里实现了，但当前资产没有一个用到，只验了 `rescale=false` 的 45° 场景。
+- 图集的「声明里有、但没人引用」这种情况：没有构造过，只读了代码。

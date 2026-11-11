@@ -1,7 +1,7 @@
 #include "worldgen/streaming/ChunkStreamer.hpp"
 
 #include "business/World.hpp"
-#include "shared/block/Block.hpp"
+#include "shared/chunk/ChunkPos.hpp"
 
 #include <algorithm>
 #include <chrono>

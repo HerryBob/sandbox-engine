@@ -8,7 +8,7 @@
 #include "stb_image.h"
 #include <glm/gtc/matrix_transform.hpp>
 //导入方块类
-#include "shared/block/Block.hpp"   
+#include "shared/chunk/ChunkPos.hpp"   
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -22,6 +22,8 @@
 #include <unordered_set>
 #include "registry/BlockRegistry.hpp"
 #include "render/assets/ModelRegistry.hpp"
+#include "render/assets/BbModelLoader.hpp"
+#include "render/EntityMesh.hpp"
 namespace engine::render {
 
 // 初始化渲染上下文：窗口→实例→设备→交换链→管线→每帧对象，任一失败返回 false
@@ -70,6 +72,7 @@ bool VulkanContext::init(int width, int height, const char* title) {
     if (!createTextureImageView()) return false;
     if (!createTextureSampler()) return false;
     if (!createUniformObjects()) return false;    // descLayout_ 就绪
+    if (!createEntityTextureResources()) return false; // 实体贴图 + entityDescSet_ 的 binding 1
     if (!createPipeline()) return false;          // ← 移到这：引用 descLayout_
     if (!createHudResources()) return false;      // HUD：字体纹理 + 独立管线 + 顶点缓冲（依赖 renderPass_）
     if (!createSyncObjects()) return false;
@@ -555,6 +558,14 @@ bool VulkanContext::createPipeline() {
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &descLayout_;
+
+    // 刚体变换：每趟绘制前推一次 4x4 矩阵（静态 chunk 推单位矩阵，矩阵乘上去等于没乘）
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushRange.offset = 0;
+    pushRange.size = sizeof(glm::mat4);
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(device_, &pipelineLayoutInfo, nullptr, &pipelineLayout_) != VK_SUCCESS) {
         LOG_ERROR("Vulkan", "vkCreatePipelineLayout 失败");
         vkDestroyShaderModule(device_, vert, nullptr);
@@ -796,6 +807,144 @@ bool VulkanContext::rebuildChunkMeshes(
     return true;
 }
 
+// ---- 刚体网格（可动方块组）----
+
+bool VulkanContext::uploadBodyMesh(int contraptionId, const std::vector<engine::shared::Block>& blocks) {
+    // 同 id 已有网格：结构变了，先销毁旧缓冲再建新的
+    auto it = bodyMeshes_.find(contraptionId);
+    if (it != bodyMeshes_.end()) {
+        destroyChunkMesh(device_, it->second);
+        bodyMeshes_.erase(it);
+    }
+
+    // 局部坐标生成顶点（不查世界邻居）；图集与注册表由本层提供
+    const mesh::BodyMeshData data = mesh::buildBodyVertices(blocks, textureAtlas_);
+    if (data.vertices.empty() || data.indices.empty())
+        return true;   // 空刚体：不建缓冲
+
+    ChunkMesh m;
+    if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * data.vertices.size(),
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        m.vertexBuffer, m.vertexMemory)) return false;
+    util::mapAndCopy(device_, m.vertexMemory, sizeof(Vertex) * data.vertices.size(), data.vertices.data());
+
+    if (!util::createBuffer(device_, physicalDevice_, sizeof(std::uint32_t) * data.indices.size(),
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        m.indexBuffer, m.indexMemory)) return false;
+    util::mapAndCopy(device_, m.indexMemory, sizeof(std::uint32_t) * data.indices.size(), data.indices.data());
+
+    m.vertexCount = static_cast<std::uint32_t>(data.vertices.size());
+    m.indexCount  = static_cast<std::uint32_t>(data.indices.size());
+    bodyMeshes_[contraptionId] = m;
+
+    LOG_INFO("Vulkan", "刚体网格 id=" + std::to_string(contraptionId)
+        + " 顶点=" + std::to_string(m.vertexCount)
+        + " 索引=" + std::to_string(m.indexCount));
+    return true;
+}
+
+void VulkanContext::setBodyPose(int contraptionId, double x, double y, double z) {
+    bodyPos_[contraptionId] = glm::dvec3{x, y, z};
+}
+
+void VulkanContext::destroyBodyMesh(int contraptionId) {
+    auto it = bodyMeshes_.find(contraptionId);
+    if (it != bodyMeshes_.end()) {
+        destroyChunkMesh(device_, it->second);
+        bodyMeshes_.erase(it);
+    }
+    bodyPos_.erase(contraptionId);
+}
+
+// ---- 实体模型（带骨骼，逐骨骼 draw）----
+
+bool VulkanContext::loadEntityModel(int entityId, const std::string& bbmodelPath,
+                                    const std::string& texturePath) {
+    (void)texturePath;   // 实体贴图由 createEntityTextureResources 统一加载，这里只读模型
+
+    engine::assets::EntityModel model;
+    if (!engine::assets::loadBbModel(bbmodelPath, model))
+        return false;
+
+    const mesh::EntityMeshData data = mesh::buildEntityVertices(model);
+    if (data.bones.size() != model.bones.size())
+        return false;
+
+    EntityGpu gpu;
+    gpu.bones.resize(model.bones.size());
+    gpu.parents.resize(model.bones.size(), -1);
+    gpu.pivots.resize(model.bones.size(), glm::vec3(0.0f));
+
+    for (std::size_t i = 0; i < data.bones.size(); ++i) {
+        const auto& bm = data.bones[i];
+        gpu.parents[i] = model.bones[i].parent;
+        gpu.pivots[i] = model.bones[i].pivot * 0.0625f;   // 16 单位 → 世界单位
+        if (bm.vertices.empty() || bm.indices.empty()) continue;
+
+        EntityBoneGpu& g = gpu.bones[i];
+        if (!util::createBuffer(device_, physicalDevice_,
+                sizeof(Vertex) * bm.vertices.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                g.vertexBuffer, g.vertexMemory)) return false;
+        util::mapAndCopy(device_, g.vertexMemory, sizeof(Vertex) * bm.vertices.size(), bm.vertices.data());
+
+        if (!util::createBuffer(device_, physicalDevice_,
+                sizeof(std::uint32_t) * bm.indices.size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                g.indexBuffer, g.indexMemory)) return false;
+        util::mapAndCopy(device_, g.indexMemory, sizeof(std::uint32_t) * bm.indices.size(), bm.indices.data());
+
+        g.indexCount = static_cast<std::uint32_t>(bm.indices.size());
+    }
+
+    // 拓扑序：父必须排在子前面，每帧按这个顺序从根往下累乘世界矩阵
+    std::vector<std::vector<int>> children(model.bones.size());
+    std::vector<int> indeg(model.bones.size(), 0);
+    for (std::size_t i = 0; i < model.bones.size(); ++i) {
+        const int p = gpu.parents[i];
+        if (p >= 0) { children[p].push_back(static_cast<int>(i)); indeg[i] = 1; }
+    }
+    for (std::size_t i = 0; i < model.bones.size(); ++i)
+        if (indeg[i] == 0) gpu.order.push_back(static_cast<int>(i));
+    for (std::size_t k = 0; k < gpu.order.size(); ++k)
+        for (int c : children[gpu.order[k]]) gpu.order.push_back(c);
+
+    const std::size_t boneCount = gpu.bones.size();
+    entityMeshes_[entityId] = std::move(gpu);
+    entityPose_[entityId] = EntityPose{};
+
+    LOG_INFO("Vulkan", "实体网格 id=" + std::to_string(entityId)
+        + " 骨骼=" + std::to_string(boneCount));
+    return true;
+}
+
+void VulkanContext::setEntityPose(int entityId, double x, double y, double z, float yawDeg) {
+    EntityPose& p = entityPose_[entityId];
+    p.pos = glm::dvec3{x, y, z};
+    p.yawDeg = yawDeg;
+}
+
+void VulkanContext::setEntityVisible(int entityId, bool visible) {
+    auto it = entityMeshes_.find(entityId);
+    if (it != entityMeshes_.end()) it->second.visible = visible;
+}
+
+void VulkanContext::destroyEntityModel(int entityId) {
+    auto it = entityMeshes_.find(entityId);
+    if (it != entityMeshes_.end()) {
+        for (auto& g : it->second.bones) {
+            if (g.vertexBuffer) vkDestroyBuffer(device_, g.vertexBuffer, nullptr);
+            if (g.vertexMemory) vkFreeMemory(device_, g.vertexMemory, nullptr);
+            if (g.indexBuffer)  vkDestroyBuffer(device_, g.indexBuffer, nullptr);
+            if (g.indexMemory)  vkFreeMemory(device_, g.indexMemory, nullptr);
+        }
+        entityMeshes_.erase(it);
+    }
+    entityPose_.erase(entityId);
+}
+
 
 // 创建命令池 + 每帧命令缓冲（2 条轮转）
 bool VulkanContext::createCommandObjects() {
@@ -894,6 +1043,87 @@ bool VulkanContext::createTextureSampler() {
     return true;
 }
 
+// 实体贴图：独立 64×64 图像 + 采样器，并填 entityDescSet_ 的 binding 1。
+// 与方块图集完全分开——角色是一张整图，不参与图集打包。
+bool VulkanContext::createEntityTextureResources() {
+    const char* path = "assets/textures/entity/Player.png";
+    int w = 0, h = 0, ch = 0;
+    stbi_uc* src = stbi_load(path, &w, &h, &ch, STBI_rgb_alpha);
+    if (!src) {
+        LOG_WARN("Vulkan", std::string("实体贴图读不到：") + path + "（实体将不绘制）");
+        return true;   // 缺贴图不算致命：方块照常渲染
+    }
+
+    const VkDeviceSize size = static_cast<VkDeviceSize>(w) * static_cast<VkDeviceSize>(h) * 4;
+    if (!util::createImage(device_, physicalDevice_,
+            static_cast<uint32_t>(w), static_cast<uint32_t>(h), VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            1, VK_SAMPLE_COUNT_1_BIT, entityTextureImage_, entityTextureMemory_)) {
+        stbi_image_free(src);
+        LOG_ERROR("Vulkan", "实体贴图图像创建失败");
+        return false;
+    }
+
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    if (!util::createBuffer(device_, physicalDevice_, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            staging, stagingMem)) {
+        stbi_image_free(src);
+        return false;
+    }
+    void* data = nullptr;
+    vkMapMemory(device_, stagingMem, 0, size, 0, &data);
+    std::memcpy(data, src, static_cast<std::size_t>(size));
+    vkUnmapMemory(device_, stagingMem);
+    stbi_image_free(src);
+
+    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, entityTextureImage_,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    util::copyBufferToImage(device_, graphicsQueue_, cmdPool_, staging, entityTextureImage_,
+        static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, entityTextureImage_,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    vkDestroyBuffer(device_, staging, nullptr);
+    vkFreeMemory(device_, stagingMem, nullptr);
+
+    if (!util::createImageView(device_, entityTextureImage_, VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_ASPECT_COLOR_BIT, entityTextureView_)) {
+        LOG_ERROR("Vulkan", "实体贴图视图创建失败");
+        return false;
+    }
+
+    // 像素画必须最近邻；64×64 是 2 的幂，CLAMP 防边缘泄漏
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = VK_FILTER_NEAREST;
+    si.minFilter = VK_FILTER_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.maxLod = 1.0f;
+    if (vkCreateSampler(device_, &si, nullptr, &entityTextureSampler_) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "实体采样器创建失败");
+        return false;
+    }
+
+    VkDescriptorImageInfo ii{entityTextureSampler_, entityTextureView_,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet wr{};
+    wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wr.dstSet = entityDescSet_;
+    wr.dstBinding = 1;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &ii;
+    vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+
+    LOG_INFO("Vulkan", "实体贴图就绪：" + std::to_string(w) + "x" + std::to_string(h));
+    return true;
+}
+
 // ---- GLFW 输入回调（static 成员定义；经 user pointer 转发到 this）----
 // 描述符集：UBO（binding 0）+ 纹理 sampler（binding 1）
 bool VulkanContext::createUniformObjects() {
@@ -945,12 +1175,12 @@ bool VulkanContext::createUniformObjects() {
     }
 
     VkDescriptorPoolSize poolSizes[2] = {
-    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-    {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},   // ← 新增
+    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
+    {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},   // 图集 + 实体贴图各一份
     };
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 1;
+    poolInfo.maxSets = 2;                              // 方块一套 + 实体一套
     poolInfo.poolSizeCount = 2;
     poolInfo.pPoolSizes = poolSizes;
     if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descPool_) != VK_SUCCESS) {
@@ -958,15 +1188,19 @@ bool VulkanContext::createUniformObjects() {
         return false;
     }
 
+    VkDescriptorSetLayout setLayouts[2] = { descLayout_, descLayout_ };
     VkDescriptorSetAllocateInfo setAllocInfo{};
     setAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     setAllocInfo.descriptorPool = descPool_;
-    setAllocInfo.descriptorSetCount = 1;
-    setAllocInfo.pSetLayouts = &descLayout_;
-    if (vkAllocateDescriptorSets(device_, &setAllocInfo, &descSet_) != VK_SUCCESS) {
+    setAllocInfo.descriptorSetCount = 2;
+    setAllocInfo.pSetLayouts = setLayouts;
+    VkDescriptorSet sets[2]{};
+    if (vkAllocateDescriptorSets(device_, &setAllocInfo, sets) != VK_SUCCESS) {
         LOG_ERROR("Vulkan", "vkAllocateDescriptorSets 失败");
         return false;
     }
+    descSet_ = sets[0];        // 方块图集那套
+    entityDescSet_ = sets[1];  // 实体贴图那套（binding 1 等实体贴图就绪后再写）
 
     VkDescriptorBufferInfo binfo{uboBuffer_, 0, sizeof(UniformBufferObject)};
     VkDescriptorImageInfo iinfo{ textureSampler_, textureImageView_,
@@ -985,6 +1219,16 @@ bool VulkanContext::createUniformObjects() {
     write[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write[1].pImageInfo = &iinfo;
     vkUpdateDescriptorSets(device_, 2, write, 0, nullptr);
+
+    // 实体那套：binding 0 与方块共用同一个 UBO；binding 1 等贴图就绪后再填
+    VkWriteDescriptorSet writeEntity{};
+    writeEntity.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writeEntity.dstSet = entityDescSet_;
+    writeEntity.dstBinding = 0;
+    writeEntity.descriptorCount = 1;
+    writeEntity.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writeEntity.pBufferInfo = &binfo;
+    vkUpdateDescriptorSets(device_, 1, &writeEntity, 0, nullptr);
 
     LOG_INFO("Vulkan", "MVP uniform 就绪（descriptor set + UBO，相机可操作）");
     return true;
@@ -1147,8 +1391,14 @@ bool VulkanContext::drawFrame() {
     vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &descSet_, 0, nullptr);
 
+    // 刚体变换 push constant：静态两趟各推一次单位矩阵。
+    // Cutout 趟必须重推——push constant 是命令缓冲状态，不重推会沿用上一趟的值。
+    const glm::mat4 identityMatrix(1.0f);
+
     // 第一趟：Solid 桶（不透明先画，写深度建立遮挡基准）
     vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    vkCmdPushConstants(cmdBuffers_[frame], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                       0, sizeof(glm::mat4), &identityMatrix);
     for (const auto& [cp, m] : chunkMeshes_) {
         if (m.vertexCount == 0) continue;   // 无 Solid 面跳过
         VkDeviceSize vbOffset = 0;
@@ -1157,8 +1407,95 @@ bool VulkanContext::drawFrame() {
         vkCmdDrawIndexed(cmdBuffers_[frame], m.indexCount, 1, 0, 0, 0);
     }
 
+    // 刚体趟：每刚体一次 draw，push constant 携带它的世界平移。
+    // ubo.view 已经含相机平移（lookAt(camPos, ...)），所以这里必须推"世界坐标"；
+    // 再减一次相机位置等于把偏移算两遍，刚体会飞到视野外。
+    // 精度：bodyPos 是 double，这里转 float；原型阶段世界只有 ±64 格，够用。
+    // 真正远离原点时要走"局部坐标 + 每对象偏移"，见 架构决策-精度方案.md。
+    {
+        // 首帧诊断：确认刚体趟真的拿到了网格与位姿
+        static bool bodyDrawLogged = false;
+        if (!bodyDrawLogged) {
+            bodyDrawLogged = true;
+            std::ostringstream os;
+            os << "刚体趟首帧 数量=" << bodyMeshes_.size();
+            const auto pit0 = bodyPos_.find(0);
+            if (pit0 != bodyPos_.end())
+                os << " 刚体0=(" << pit0->second.x << "," << pit0->second.y << "," << pit0->second.z << ")";
+            LOG_INFO("Vulkan", os.str());
+        }
+        for (const auto& [id, m] : bodyMeshes_) {
+            if (m.vertexCount == 0) continue;
+            const auto pit = bodyPos_.find(id);
+            if (pit == bodyPos_.end()) continue;
+            const glm::vec3 worldPos{
+                static_cast<float>(pit->second.x),
+                static_cast<float>(pit->second.y),
+                static_cast<float>(pit->second.z)};
+            const glm::mat4 bodyModel = glm::translate(glm::mat4(1.0f), worldPos);
+            vkCmdPushConstants(cmdBuffers_[frame], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                               0, sizeof(glm::mat4), &bodyModel);
+            VkDeviceSize vbOffset = 0;
+            vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &m.vertexBuffer, &vbOffset);
+            vkCmdBindIndexBuffer(cmdBuffers_[frame], m.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmdBuffers_[frame], m.indexCount, 1, 0, 0, 0);
+        }
+    }
+
+    // 实体趟：切到实体贴图那套 descriptor，逐骨骼推世界矩阵后 draw
+    if (!entityMeshes_.empty()) {
+        vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout_, 0, 1, &entityDescSet_, 0, nullptr);
+
+        std::vector<glm::mat4> boneWorld;
+        for (const auto& [id, em] : entityMeshes_) {
+            if (!em.visible) continue; // 第一人称隐藏自身
+            const auto pit = entityPose_.find(id);
+            if (pit == entityPose_.end()) continue;
+
+            const glm::vec3 pos{static_cast<float>(pit->second.pos.x),
+                                static_cast<float>(pit->second.pos.y),
+                                static_cast<float>(pit->second.pos.z)};
+            const glm::mat4 rootWorld =
+                glm::translate(glm::mat4(1.0f), pos) *
+                glm::rotate(glm::mat4(1.0f), glm::radians(pit->second.yawDeg), glm::vec3(0.0f, 1.0f, 0.0f));
+
+            // 骨骼世界矩阵：父矩阵 × (平移到枢轴 → 局部旋转 → 平移回来)
+            // 目前局部旋转恒为单位矩阵（未做动画），骨骼顶点位置与建模时一致
+            boneWorld.assign(em.bones.size(), glm::mat4(1.0f));
+            for (std::size_t k = 0; k < em.order.size(); ++k) {
+                const int bi = em.order[k];
+                if (bi < 0 || bi >= static_cast<int>(em.bones.size())) continue;
+                const int par = em.parents[bi];
+                const glm::mat4& parentW = (par >= 0) ? boneWorld[par] : rootWorld;
+                const glm::vec3& piv = em.pivots[bi];
+                const glm::mat4 local =
+                    glm::translate(glm::mat4(1.0f), piv) *
+                    glm::translate(glm::mat4(1.0f), -piv);
+                boneWorld[bi] = parentW * local;
+            }
+
+            for (std::size_t bi = 0; bi < em.bones.size(); ++bi) {
+                const EntityBoneGpu& g = em.bones[bi];
+                if (g.indexCount == 0) continue;
+                vkCmdPushConstants(cmdBuffers_[frame], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                                   0, sizeof(glm::mat4), &boneWorld[bi]);
+                VkDeviceSize vbOffset = 0;
+                vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &g.vertexBuffer, &vbOffset);
+                vkCmdBindIndexBuffer(cmdBuffers_[frame], g.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmdBuffers_[frame], g.indexCount, 1, 0, 0, 0);
+            }
+        }
+
+        // 换回图集那套：后面的 Cutout 趟还在用方块贴图
+        vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout_, 0, 1, &descSet_, 0, nullptr);
+    }
+
     // 第二趟：Cutout 桶（透明/镂空后画，双面 cull NONE）
     vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, cutoutPipeline_);
+    vkCmdPushConstants(cmdBuffers_[frame], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                       0, sizeof(glm::mat4), &identityMatrix);
     for (const auto& [cp, m] : chunkMeshes_) {
         if (m.cutoutVertexCount == 0) continue;   // 无 Cutout 面跳过
         VkDeviceSize vbOffset = 0;
@@ -1266,6 +1603,25 @@ void VulkanContext::destroyRenderObjects() {
     // 增量重建：销毁所有 chunk 网格（每 chunk 的 GPU 资源）
     for (auto& [cp, m] : chunkMeshes_) destroyChunkMesh(device_, m);
     chunkMeshes_.clear();
+    // 刚体网格：与 chunk 网格同结构，同样逐个销毁
+    for (auto& [id, m] : bodyMeshes_) destroyChunkMesh(device_, m);
+    bodyMeshes_.clear();
+    bodyPos_.clear();
+    // 实体：逐骨骼释放缓冲，再释放贴图三件套
+    for (auto& [id, em] : entityMeshes_) {
+        for (auto& g : em.bones) {
+            if (g.vertexBuffer) vkDestroyBuffer(device_, g.vertexBuffer, nullptr);
+            if (g.vertexMemory) vkFreeMemory(device_, g.vertexMemory, nullptr);
+            if (g.indexBuffer)  vkDestroyBuffer(device_, g.indexBuffer, nullptr);
+            if (g.indexMemory)  vkFreeMemory(device_, g.indexMemory, nullptr);
+        }
+    }
+    entityMeshes_.clear();
+    entityPose_.clear();
+    if (entityTextureSampler_) { vkDestroySampler(device_, entityTextureSampler_, nullptr); entityTextureSampler_ = VK_NULL_HANDLE; }
+    if (entityTextureView_)    { vkDestroyImageView(device_, entityTextureView_, nullptr); entityTextureView_ = VK_NULL_HANDLE; }
+    if (entityTextureImage_)   { vkDestroyImage(device_, entityTextureImage_, nullptr); entityTextureImage_ = VK_NULL_HANDLE; }
+    if (entityTextureMemory_)  { vkFreeMemory(device_, entityTextureMemory_, nullptr); entityTextureMemory_ = VK_NULL_HANDLE; }
     if (textureSampler_) { vkDestroySampler(device_, textureSampler_, nullptr); textureSampler_ = VK_NULL_HANDLE; }
     if (textureImageView_) { vkDestroyImageView(device_, textureImageView_, nullptr); textureImageView_ = VK_NULL_HANDLE; }
     if (textureImage_) { vkDestroyImage(device_, textureImage_, nullptr); textureImage_ = VK_NULL_HANDLE; }
@@ -1709,7 +2065,7 @@ std::size_t VulkanContext::buildHudVertices() {
 
     // ---- 所在 chunk + chunk 内局部坐标 ----
     // 先 floor 再位运算：bx & 15 对负数同样落在 0..15（补码），bx >> 4 是算术右移（向 -∞ 取整），
-    // 与 Block.hpp 里 chunkOf 的约定一致。
+    // 与 ChunkPos.hpp 里 chunkOf 的约定一致。
     const int bx = static_cast<int>(std::floor(cx));
     const int by = static_cast<int>(std::floor(cy));
     const int bz = static_cast<int>(std::floor(cz));

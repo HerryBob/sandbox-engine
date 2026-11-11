@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace engine::business {
@@ -34,8 +35,12 @@ public:
     // push 成功才清对应待发位；失败（队列满）保留下 tick 重试（指令可延迟）。
     void syncToPhysics(const std::vector<engine::shared::Block>& fullSnapshot);
 
-    // 业务 Tick 边界：收光回执并消化（位置快照/碰撞体数量 → 原子投影）。
-    void receiveFromPhysics();
+    // 业务 Tick 边界：收光回执并消化。
+    // 位置快照/碰撞体数量 → 原子投影（本类自留）；
+    // 刚体结构事件/位姿 → 输出参数，由调用方（BusinessWorld）转给 RenderBridge。
+    // 两个输出参数都可传 nullptr（调用方不关心时）。
+    void receiveFromPhysics(std::vector<engine::shared::BodyStructureEvent>* bodyEvents,
+                            std::optional<engine::shared::BodyPose>* bodyPose);
 
     // ---- 物理侧访问（装配层分发给物理线程）----
     engine::core::SPSCQueue<engine::shared::PhysicsCommand>& commandQueue();

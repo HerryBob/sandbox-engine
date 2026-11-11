@@ -2,6 +2,8 @@
 #include "core/SPSCQueue.hpp"
 #include "core/TimeManager.hpp"
 #include "shared/protocol/Protocol.hpp"
+#include "shared/state/PlayerBodyState.hpp"
+#include "shared/state/PlayerControlState.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -11,11 +13,17 @@
 
 namespace engine::physics {
 
+// 物理体运动类型（对应 Rapier 的 RigidBodyType）。
+// Static 永不移动（地形，当前不进 bodies_）；Dynamic 按速度积分并做碰撞回退（方块组）；
+// Kinematic 速度由外部设定、受重力、位置由碰撞修正（生物/玩家）。
+enum class MotionType { Static, Dynamic, Kinematic };
+
 // 原型最小刚体（Contraption 打包产物）。
 // 位置用 double（精度设计见架构文档 2.8：复合体=基准+局部坐标）。
 struct RigidBody {
     int    id = 0;              // 刚体 ID（物理分配）
-    double x = 0.0, y = 0.0, z = 0.0; // 世界位置（基准）
+    MotionType motion = MotionType::Dynamic; // 运动类型：方块组=Dynamic，生物=Kinematic
+    double x = 0.0, y = 0.0, z = 0.0; // 世界位置（基准；生物为脚底中心）
     double vx = 0.0, vy = 0.0, vz = 0.0; // 速度（2.3 积分用）
     int    blockCount = 0;      // 打包的方块数
     // 内部方块（局部坐标 + 类型）：世界坐标 = 基准 + 局部坐标（架构 2.8）。
@@ -27,6 +35,8 @@ struct RigidBody {
     // 世界 AABB = [基准+偏移−半宽, 基准+偏移+半宽]。
     double halfExtentX = 0.0, halfExtentY = 0.0, halfExtentZ = 0.0;
     double centerOffsetX = 0.0, centerOffsetY = 0.0, centerOffsetZ = 0.0;
+    // 踩地标志（仅 Kinematic 有意义）：本 tick 竖轴向下回退发生过 = 站在实体方块上。
+    bool   onGround = false;
 };
 
 // 物理世界（25TPS，dt=0.04s）。
@@ -60,6 +70,18 @@ public:
     double     bodyHalfExtentX() const;    // 首个刚体 x 半宽（增量重算后）
     double     bodyCenterOffsetX() const;  // 首个刚体 x 中心偏移（相对基准）
 
+    // 创建一个生物体：运动学、单 AABB、位置锚在脚底中心（形状由 halfExtent/centerOffset 直接给）。
+    // 只能在物理线程启动前调用（装配期单线程），运行期不增删生物。返回分配到的刚体 id。
+    int addPlayerBody(double x, double y, double z);
+
+    // 绑定玩家状态输出槽（相机跟随用）：物理线程每 tick 写玩家位置，输入线程读。
+    // 必须在物理线程启动前调用。
+    void attachPlayerState(engine::shared::PlayerBodyState* out);
+
+    // 绑定玩家操控输入槽：物理线程每 tick 读它驱动玩家水平速度与跳跃。
+    // 必须在物理线程启动前调用。
+    void attachPlayerControl(engine::shared::PlayerControlState* in);
+
 private:
     void maybeLog();
     // 增量重算刚体 AABB：最小包裹（半宽 = (max-min)/2+0.5，偏移 = (min+max)/2）。
@@ -67,10 +89,18 @@ private:
     // 同时更新原子投影供 main 线程运行中采样。
     void recomputeAABB(RigidBody& b);
 
+    // 运动学单轴移动 + 碰撞回退（分轴测试）：axis 0=x / 1=y / 2=z。
+    // 命中时清空该轴速度；竖轴向下命中时置 onGround（踩地）。
+    void moveKinematicAxis(RigidBody& b, int axis);
+
     // tick 银行上限：单帧最多补跑 5 个物理 tick（=200ms 模拟时间）。
     // 超过说明本帧严重落后（卡顿/掉帧），剩余累积时间直接丢弃，
     // 防止"越落后越要补、越补越落后"的螺旋死亡（spiral of death）。
     static constexpr int kMaxStepsPerFrame_ = 5;
+
+    // 跳跃初速度（格/秒）：跳高 = v²/(2g) = 4.9²/(2×9.8) ≈ 1.23 格，略高于 1 格台阶。
+    // 只在 onGround 时生效，空中按跳跃无效。
+    static constexpr double kJumpSpeed_ = 4.9;
 
     engine::core::TimeManager& tm_;
     double                     accumulator_{0.0};
@@ -86,6 +116,9 @@ private:
     // 刚体表（纯物理线程独占读写；bodyCount_ 是它的原子投影供 main 读）。
     std::vector<RigidBody>     bodies_;
     long long                  nextBodyId_{1};    // 刚体 ID 分配器
+    int                        playerBodyId_{-1}; // 玩家体 id（-1 = 未创建）
+    engine::shared::PlayerBodyState* playerState_{nullptr}; // 玩家位置输出槽（装配期注入）
+    engine::shared::PlayerControlState* playerControl_{nullptr}; // 玩家操控输入槽（装配期注入）
     std::atomic<long long>     bodyCount_{0};
     // 主刚体增量碰撞箱的原子投影（main 运行中采样，避免读 bodies_ 数据竞争）。
     std::atomic<long long>     bodyBlockCountProj_{0};
@@ -101,7 +134,7 @@ private:
 
     // 静态方块碰撞体集合（纯物理线程独占；架构 2.7 物理层）。
     // 放置/破坏增量维护；打包时方块转移进刚体（物理形态转移），解包时回写。
-    std::unordered_map<engine::shared::BlockPos, engine::shared::BlockType> colliders_;
+    std::unordered_map<engine::shared::BlockPos, engine::shared::BlockType>  colliders_;
 
     // 接触集合（纯物理线程独占；Rapier Started/Stopped 语义的 Started 部分）：
     // 刚体 id → 接触中的静态方块坐标。碰撞事件只在"接触开始"（新加入集合）时发，

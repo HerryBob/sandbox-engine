@@ -12,14 +12,21 @@
 #include "render/Renderer.hpp"
 #include "render/VulkanContext.hpp"
 #include "render/VulkanMesh.hpp"
+#include "shared/chunk/ChunkData.hpp"
 #include "shared/state/CameraState.hpp"
+#include "shared/state/PlayerBodyState.hpp"
+#include "shared/state/PlayerControlState.hpp"
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerInput.hpp"
 #include "registry/BlockRegistry.hpp"
 #include "modhost/loader/ModLoader.hpp"
+#include "modhost/manifest/Manifest.hpp"
+#include "modhost/sorter/ModSorter.hpp"
 #include "resource/ResourceIndex.hpp"
 #include "render/assets/ModelDef.hpp"
 #include "render/assets/ModelLoader.hpp"
+#include "render/assets/EntityModel.hpp"
+#include "render/assets/BbModelLoader.hpp"
 #include "worldgen/noise/BuiltinNoiseTypes.hpp"
 #include "worldgen/noise/NoiseDefTable.hpp"
 #include "worldgen/noise/NoiseRegistry.hpp"
@@ -56,7 +63,9 @@ using namespace engine;
 
 // 玩家操作说明（输入层常量）：相机控制帮助文本。
 // 原定义在 render/VulkanContext（按键输入迁走后的遗留孤岛），按职责归位到引擎入口。
-constexpr const char* kCameraHelp = "相机控制：WASD=平移 空格/左Shift=上下 鼠标左键拖动=旋转 R=重置视角\n";
+constexpr const char* kCameraHelp =
+    "相机控制：WASD=平移 空格/左Shift=上下 鼠标左键拖动=旋转 R=重置视角\n"
+    "         F4=自由相机/玩家跟随切换 F5=第一人称/第三人称切换（仅玩家模式） F3=调试浮层\n";
 
 // 把工作目录切到 exe 所在目录：稳定解析 shaders/、textures/ 相对路径。
 // 无论从 IDE / 命令行 / 双击启动，资源相对路径都不依赖"进程从哪启动"。
@@ -72,8 +81,17 @@ static void chdirToExeDir() {
 #endif
 }
 
-// 调色板自检：覆盖 4→8→16 两档扩宽，确认扩宽后逐格内容不变、计数正确。
+// ChunkData 自检：坐标编解码互逆 + 调色板 4→8→16 两档扩宽后逐格内容不变、计数正确。
 static bool selfTestPalette() {
+    // ⓪ indexOf / localOf 严格互逆（16³ 全部组合，任一处改动未同步即失败）
+    for (int z = 0; z < 16; ++z)
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 16; ++x) {
+                const auto i = shared::ChunkData::indexOf(x, y, z);
+                const auto p = shared::ChunkData::localOf(i);
+                if (p.x != x || p.y != y || p.z != z) return false;
+            }
+
     // ① 新 chunk 全空
     shared::ChunkData blank;
     if (!blank.isAllAir() || blank.nonAirCount() != 0) return false;
@@ -208,6 +226,96 @@ static bool selfTestModelGeometry() {
     return true;
 }
 
+// 刚体网格：3×3×3 = 27 方块，内部接触面全剔除 → 外层 6×9 = 54 面 = 216 顶点。
+// 空图集走兜底 UV、空注册表走立方体兜底——验的是"只按刚体内部剔除"这条逻辑。
+static bool selfTestBodyMesh() {
+    using engine::shared::Block;
+    using engine::shared::BlockPos;
+    using engine::shared::BlockType;
+
+    std::vector<Block> blocks;
+    blocks.reserve(27);
+    for (int x = -1; x <= 1; ++x)
+        for (int y = -1; y <= 1; ++y)
+            for (int z = -1; z <= 1; ++z)
+                blocks.push_back(Block{static_cast<BlockType>(1), BlockPos{x, y, z}, 0});
+
+    engine::assets::TextureAtlas emptyAtlas;   // 空图集：纹理走兜底格，不影响几何
+    const engine::render::mesh::BodyMeshData body =
+        engine::render::mesh::buildBodyVertices(blocks, emptyAtlas);
+
+    const std::size_t faces = body.indices.size() / 6;
+    const std::size_t verts = body.vertices.size();
+    const bool ok = (faces == 54 && verts == 216);
+
+    std::cout << "刚体网格：3×3×3 面=" << faces << " 顶点=" << verts
+              << (ok ? " 自检通过" : " 自检失败") << "\n";
+    return ok;
+}
+
+// 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
+static bool selfTestModSorter() {
+    using engine::modhost::ModManifest;
+    using engine::modhost::ModPhase;
+    using engine::modhost::ModSorter;
+    using engine::modhost::SortResult;
+
+    // ① 批次倒序：builtin 依赖 normal → 必须拒绝（normal 在它之后才加载）
+    {
+        std::vector<ModManifest> items(2);
+        items[0].id = "a_early";
+        items[0].phase = ModPhase::Builtin;
+        items[0].dependencies.push_back("b_late");
+        items[1].id = "b_late";
+        items[1].phase = ModPhase::Normal;
+
+        const SortResult r = ModSorter::sort(items);
+        if (r.rejected.size() != 1 || r.rejected[0].index != 0) return false;
+        if (r.order.size() != 1 || r.order[0] != 1) return false;
+    }
+
+    // ② 正常跨批：normal 依赖 builtin → 放行，且 builtin 先出队
+    {
+        std::vector<ModManifest> items(2);
+        items[0].id = "a_normal";
+        items[0].phase = ModPhase::Normal;
+        items[0].dependencies.push_back("b_builtin");
+        items[1].id = "b_builtin";
+        items[1].phase = ModPhase::Builtin;
+
+        const SortResult r = ModSorter::sort(items);
+        if (!r.rejected.empty()) return false;
+        if (r.order.size() != 2) return false;
+        if (r.order[0] != 1 || r.order[1] != 0) return false;
+    }
+
+    // ③ 依赖的 id 不存在 → 拒绝
+    {
+        std::vector<ModManifest> items(1);
+        items[0].id = "a_ghost";
+        items[0].dependencies.push_back("nobody");
+
+        const SortResult r = ModSorter::sort(items);
+        if (r.rejected.size() != 1 || r.rejected[0].index != 0) return false;
+        if (!r.order.empty()) return false;
+    }
+
+    // ④ 同批次环：a ↔ b → 双方都拒绝
+    {
+        std::vector<ModManifest> items(2);
+        items[0].id = "a_ring";
+        items[0].dependencies.push_back("b_ring");
+        items[1].id = "b_ring";
+        items[1].dependencies.push_back("a_ring");
+
+        const SortResult r = ModSorter::sort(items);
+        if (r.rejected.size() != 2) return false;
+        if (!r.order.empty()) return false;
+    }
+
+    return true;
+}
+
 // 引擎主流程：装配四轨 → 启动 → 主线程事件循环 → 优雅停止。
 // presetName：世界预设名（不带 .json），由启动参数 --preset 决定。
 static int run(const std::string& presetName) {
@@ -247,7 +355,7 @@ static int run(const std::string& presetName) {
     const bool noiseOk = engine::worldgen::selfTestNoiseTypes();
     engine::worldgen::NoiseRegistry::freeze();
 
-    //区块调色板（ChunkData）：4/8/16 位扩宽 + 判空自检，装配期跑一次。
+    //区块调色板（ChunkData）：坐标编解码互逆 + 4/8/16 位扩宽 + 判空自检，装配期跑一次。
     const bool paletteOk = selfTestPalette();
 
     //元素级旋转（ModelElement::rotation）：绕轴旋转公式自检。
@@ -255,6 +363,12 @@ static int run(const std::string& presetName) {
 
     //元素级旋转的几何落点：rotation 字段 → buildModelVertices 顶点位置。
     const bool modelGeoOk = selfTestModelGeometry();
+
+    //刚体网格（可动方块组）：3×3×3 内部剔除 → 54 面 / 216 顶点。
+    const bool bodyMeshOk = selfTestBodyMesh();
+
+    //模组排序（ModSorter）：跨批次依赖方向、缺失依赖、同批环。
+    const bool sorterOk = selfTestModSorter();
 
     //世界生成数据（data/worldgen/noise/*.json）：扫全目录、逐个解码注册，之后按名字查表。
     //必须在预设加载之前——PresetLoader 只查这张表，不再自己读噪声文件。
@@ -275,12 +389,16 @@ static int run(const std::string& presetName) {
               << " 个（" << modNoise << "），frozen="
               << std::boolalpha << engine::worldgen::NoiseRegistry::frozen()
               << "，自检" << (noiseOk ? "通过" : "失败") << "\n";
-    std::cout << "区块调色板：4/8/16 位扩宽 + 判空自检"
+    std::cout << "区块调色板：坐标互逆 + 4/8/16 位扩宽 + 判空自检"
               << (paletteOk ? "通过" : "失败") << "\n";
     std::cout << "模型元素旋转：绕轴旋转自检"
               << (modelRotOk ? "通过" : "失败") << "\n";
     std::cout << "模型元素旋转：顶点几何自检"
               << (modelGeoOk ? "通过" : "失败") << "\n";
+    std::cout << "刚体网格：3×3×3 内部剔除自检"
+              << (bodyMeshOk ? "通过" : "失败") << "\n";
+    std::cout << "模组排序：跨批次依赖方向 + 缺失依赖 + 同批环自检"
+              << (sorterOk ? "通过" : "失败") << "\n";
 
     // 世界预设（#35）：data/worldgen/presets/<presetName>.json → WorldPreset（纯数据）。
     // 高度场实例化推迟到 ColumnGenerator::prepare()，失败原因在那里报。
@@ -305,6 +423,13 @@ static int run(const std::string& presetName) {
     const bool vkOk = vkCtx.init(1280, 720, "沙盒引擎 · Vulkan 方块+相机");
     if (vkOk) {
         std::cout << kCameraHelp;
+
+        // 玩家模型：bbmodel 定形状、Player.png 定颜色；位置由 setEntityPose 每帧驱动。
+        // 此刻渲染线程尚未启动，VkBuffer 创建是安全的。
+        if (!vkCtx.loadEntityModel(1, "assets/models/entity/PlayerModel.bbmodel",
+                                   "assets/textures/entity/Player.png")) {
+            std::cerr << "玩家模型加载失败（继续运行，但没有玩家外观）\n";
+        }
     }
 
     // 全局 time_scale 单实例，三条轨共享
@@ -320,8 +445,15 @@ static int run(const std::string& presetName) {
     //   PlayerInput ：点击事件（鼠标回调写；业务消费做 DDA）。
     shared::CameraState cameraState;
     shared::PlayerInput  playerInput;
+    // 玩家体位置（物理线程写 → 输入线程读）：F4 切到玩家模式后相机跟随它。
+    shared::PlayerBodyState playerBodyState;
+    // 玩家操控意图（输入线程写 → 物理线程读）：玩家模式下 WASD/空格驱动玩家体。
+    shared::PlayerControlState playerControlState;
     vkCtx.attachCameraState(&cameraState);
 
+    // ---- 刚体（第 4 步）：由业务线程打包驱动、渲染线程消费 ----
+    // 方块列表不再在这一侧手工塞入：物理打包回执带刚体局部坐标，
+    // 经 PhysicsBridge → BusinessWorld → RenderBridge → 渲染线程建网格。
     business::BusinessWorld businessWorld(tm, physicsBridge, renderBridge);
 
     // 世界已构造：交给模组 API 层。loadAll 执行时 World 还不存在，
@@ -375,8 +507,17 @@ static int run(const std::string& presetName) {
     }
 
     physics::PhysicsWorld   physicsWorld(tm);
+    // 首个生物：玩家（运动学、单 AABB、位置锚在脚底中心），从空中落下验证重力与落地。
+    // 物理线程尚未启动，这里属于装配期单线程，可安全增删物理体。
+    physicsWorld.addPlayerBody(0.0, 8.0, 0.0);
+    // 玩家位置共享槽（物理线程写 → 输入线程读）：相机跟随的唯一数据来源。
+    physicsWorld.attachPlayerState(&playerBodyState);
+    // 玩家操控槽（输入线程写 → 物理线程读）：WASD 水平速度 + 空格跳跃。
+    physicsWorld.attachPlayerControl(&playerControlState);
     input::InputSampler inputSampler;
-    inputSampler.attach(vkCtx.window(), &cameraState, &playerInput); // 注册键盘/鼠标回调（真实输入，主线程安全）
+    // 注册键盘/鼠标回调（真实输入，主线程安全）：F4 切换自由相机 / 玩家跟随。
+    inputSampler.attach(vkCtx.window(), &cameraState, &playerInput,
+                        &playerBodyState, &playerControlState);
 
     // 相机出生点：按预热窗口实际最高地表 +2 格（1b 决策点③：用实测值，不写死世界高度）。
     // 不写死的好处：改预设的 baseHeight/amplitude 后相机会自动跟着走。
@@ -417,6 +558,7 @@ static int run(const std::string& presetName) {
     // 流式统计上报节流：每 25 个业务 tick（约 1 秒）打一行。
     // 读 stats() 只能在业务线程做——appliedBlocks/minSurface 等聚合字段由 drainResults 独占写。
     std::size_t streamReportCounter = 0;
+    bool demoPackQueued = false;   // 演示打包只发一次（业务线程独占，无需原子）
     businessLoop.start([&] {
         auto next = std::chrono::steady_clock::now();
         while (!businessLoop.shouldStop()) {
@@ -448,6 +590,29 @@ static int run(const std::string& presetName) {
             businessWorld.syncToPhysics();       // 发指令 → 物理（经 PhysicsBridge）
             businessWorld.receiveFromPhysics();  // 收结果 ← 物理（经 PhysicsBridge）
             businessWorld.flushChanges();        // 变更事件 → 渲染（经 RenderBridge）
+
+            // 演示刚体（第 4 步）：世界出第一列后打包一组 3×3×3 石头并给水平初速度，
+            // 物理线程积分位置，渲染端跟着移动。方块不经 World——本步只验"物理→渲染"链路。
+            if (!demoPackQueued && businessWorld.chunkCount() > 0) {
+                demoPackQueued = true;
+                engine::shared::PhysicsCommand pack;
+                pack.type = engine::shared::PhysicsCommand::Type::PackContraption;
+                pack.contraptionId = 1;
+                pack.ivx = 1.2; pack.ivy = 0.8; pack.ivz = 0.0; // 起飞速度：+X 前进、+Y 微升
+                const std::uint16_t stoneId = engine::registry::g_builtinBlockIds.stone;
+                for (int x = -1; x <= 1; ++x)
+                    for (int y = 5; y <= 7; ++y)
+                        for (int z = -3; z <= -1; ++z)
+                            pack.blocks.push_back(engine::shared::Block{
+                                static_cast<engine::shared::BlockType>(stoneId),
+                                engine::shared::BlockPos{x, y, z}, -1}); // -1 = 主世界坐标
+                pack.blockCount = static_cast<int>(pack.blocks.size());
+                if (physicsBridge.commandQueue().push(pack))
+                    std::cout << "演示刚体：打包指令已发 方块=" << pack.blockCount << "\n";
+                else
+                    std::cout << "演示刚体：指令队列满，未发出\n";
+            }
+
             next += std::chrono::milliseconds(40);
             std::this_thread::sleep_until(next);
         }
@@ -481,6 +646,39 @@ static int run(const std::string& presetName) {
     renderLoop.start([&] {
         while (!renderLoop.shouldStop()) {
             renderer.tick();
+
+            // 刚体结构事件（打包建网格 / 解包销毁）：事件流，逐条处理。
+            engine::shared::BodyStructureEvent bodyEv;
+            while (renderBridge.bodyStructureQueue().pop(bodyEv)) {
+                if (bodyEv.destroy) {
+                    vkCtx.destroyBodyMesh(bodyEv.contraptionId);
+                } else if (!vkCtx.uploadBodyMesh(bodyEv.contraptionId, bodyEv.blocks)) {
+                    std::cout << "刚体网格上传失败 id=" << bodyEv.contraptionId << "\n";
+                }
+            }
+
+            // 刚体位姿：状态语义，逐条应用——同 id 的后一条覆盖前一条，
+            // 不同 id 各自留最新（多刚体后不能再只取全局最后一条）。
+            engine::shared::BodyPose bodyPose;
+            while (renderBridge.bodyPoseQueue().pop(bodyPose)) {
+                vkCtx.setBodyPose(bodyPose.contraptionId,
+                                  bodyPose.x, bodyPose.y, bodyPose.z);
+            }
+
+            // 玩家模型位姿：直读共享槽（原子）。位置语义 = 脚底中心，与模型原点一致。
+            // 朝向暂固定 0（模型面朝 +Z），等程序化动画阶段接 yaw。
+            if (playerBodyState.valid.load(std::memory_order_relaxed)) {
+                vkCtx.setEntityPose(1,
+                    playerBodyState.x.load(std::memory_order_relaxed),
+                    playerBodyState.y.load(std::memory_order_relaxed),
+                    playerBodyState.z.load(std::memory_order_relaxed),
+                    0.0f);
+            }
+            // 第一人称隐藏自身模型：相机就在眼位，模型会糊满整个视野。
+            // viewMode：0=自由相机 1=第一人称 2=第三人称（见 CameraState）。
+            vkCtx.setEntityVisible(1,
+                cameraState.viewMode.load(std::memory_order_relaxed) != 1);
+
             vkCtx.drawFrame();
             // 这里原本有一行 sleep_for(5ms) 做限速，已删除：节奏由 FIFO(vsync) 的
             // vkAcquireNextImageKHR 阻塞决定，帧率上限 = 显示器刷新率；
@@ -551,6 +749,29 @@ int main(int argc, char** argv) {
     // 日志：控制台 + logs/engine.log（10MB×5 滚动），异步写不阻塞线程。
     engine::core::initLog(parseLogLevelArg(argc, argv));
     engine::core::setLogThreadName("main");   // 主线程标识；子线程由 ThreadLoop::start 自动登记
+
+    // 临时自检入口：--check-model 只加载实体模型并打印骨骼表，用于核对解析结果
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) != "--check-model") continue;
+        engine::assets::EntityModel em;
+        const bool ok = engine::assets::loadBbModel("assets/models/entity/PlayerModel.bbmodel", em);
+        if (!ok) {
+            engine::core::shutdownLog();
+            return 2;
+        }
+        std::cout << "[实体] 骨骼=" << em.bones.size()
+                  << " 贴图=" << em.texturePaths.size()
+                  << " 分辨率=" << em.texWidth << "x" << em.texHeight << "\n";
+        for (const auto& b : em.bones) {
+            std::cout << "  " << b.name
+                      << " parent=" << b.parent
+                      << " pivot=(" << b.pivot.x << "," << b.pivot.y << "," << b.pivot.z << ")"
+                      << " from=(" << b.cubes[0].from.x << "," << b.cubes[0].from.y << "," << b.cubes[0].from.z << ")"
+                      << " to=(" << b.cubes[0].to.x << "," << b.cubes[0].to.y << "," << b.cubes[0].to.z << ")\n";
+        }
+        engine::core::shutdownLog();
+        return 0;
+    }
 
     const int code = run(parsePresetArg(argc, argv));
 

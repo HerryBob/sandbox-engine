@@ -21,6 +21,12 @@ BusinessWorld::BusinessWorld(engine::core::TimeManager& tm,
 }
 
 void BusinessWorld::advanceTick(double scale) {
+    // 首个业务 tick 强制一次全量同步：地形预热在装配期（主线程）完成，
+    // 业务线程起来后没有新列可触发 requestPhysicsResync，物理侧会一直空集合。
+    if (firstTick_) {
+        firstTick_ = false;
+        resyncPending_ = true;
+    }
     // 25TPS：每个业务 tick 推进 dt=0.04s，受 time_scale 缩放（与物理线程统一 25/25）。
     // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
     // 本类只负责世界状态推进与裁决；事件由调用方在 tick 边界自行驱动。
@@ -48,8 +54,15 @@ void BusinessWorld::syncToPhysics() {
 }
 
 void BusinessWorld::receiveFromPhysics() {
-    // tick 边界：委托 PhysicsBridge 收物理回执（位置快照/碰撞体数量）。
-    physicsBridge_.receiveFromPhysics();
+    // tick 边界：委托 PhysicsBridge 收物理回执（位置快照/碰撞体数量/刚体数据）。
+    std::vector<engine::shared::BodyStructureEvent> bodyEvents;
+    std::optional<engine::shared::BodyPose> bodyPose;
+    physicsBridge_.receiveFromPhysics(&bodyEvents, &bodyPose);
+    // 刚体数据转给渲染桥：结构事件逐条送（事件流），位姿只送最新（状态）。
+    // 结构事件队列深度 16，远高于实际事件速率（每次打包/解包一条），
+    // push 失败即逻辑异常，不在此处重试。
+    for (const auto& ev : bodyEvents) renderBridge_.pushBodyStructure(ev);
+    if (bodyPose) renderBridge_.pushBodyPose(*bodyPose);
 }
 
 void BusinessWorld::flushChanges() {

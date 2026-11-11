@@ -1,0 +1,44 @@
+#pragma once
+#include "shared/block/Block.hpp"
+
+#include <cstddef>
+
+namespace engine::shared {
+
+// 区块边长：每轴 16 个方块，构成 16³ 立方体。
+constexpr int CHUNK_SIZE   = 16;
+// 单个区块的方块总数（16³ = 4096）。
+constexpr int CHUNK_VOLUME = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+
+// 区块坐标 = 世界坐标 >> 4，每个 chunk 覆盖 [pos*16, pos*16+15]。
+struct ChunkPos {
+    int x = 0;
+    int y = 0;
+    int z = 0;
+
+    // 手写逐成员比较（与 BlockPos 一致，显式清晰）。
+    bool operator==(const ChunkPos& rhs) const {
+        return x == rhs.x && y == rhs.y && z == rhs.z;
+    }
+};
+
+// 世界坐标 → 区块坐标（算术右移向下取整：-1 属于 chunk -1，块内 15）。
+inline ChunkPos chunkOf(const BlockPos& p) {
+    return ChunkPos{p.x >> 4, p.y >> 4, p.z >> 4};
+}
+
+} // namespace engine::shared
+
+// std::hash 特化：让 ChunkPos 可作 unordered_map 的 key（坐标映射）。
+namespace std {
+template <>
+struct hash<engine::shared::ChunkPos> {
+    size_t operator()(const engine::shared::ChunkPos& p) const noexcept {
+        // 与 BlockPos 同款混合散列（区块坐标也是三维整数坐标）。
+        size_t h = static_cast<size_t>(p.x);
+        h = h * 31 + static_cast<size_t>(p.y);
+        h = h * 31 + static_cast<size_t>(p.z);
+        return h;
+    };
+};
+} // namespace std

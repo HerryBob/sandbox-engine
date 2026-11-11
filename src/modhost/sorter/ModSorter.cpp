@@ -64,7 +64,8 @@ SortResult ModSorter::sort(const std::vector<ModManifest>& items) {
                 reason[i] = "依赖不存在：" + dep;
                 break;
             }
-            if (items[it->second].phase < items[i].phase) {
+            // 被依赖方的批次晚于自己 → 它在自己之后才加载，依赖拿不到
+            if (items[it->second].phase > items[i].phase) {
                 rejectedFlag[i] = true;
                 reason[i] = "依赖了更晚批次的模组：" + dep;
                 break;

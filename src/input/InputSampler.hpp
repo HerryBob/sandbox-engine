@@ -1,5 +1,7 @@
 #pragma once
 #include "shared/state/CameraState.hpp"
+#include "shared/state/PlayerBodyState.hpp"
+#include "shared/state/PlayerControlState.hpp"
 #include "shared/state/PlayerInput.hpp"
 
 #include <atomic>
@@ -23,10 +25,14 @@ class InputSampler {
 public:
     InputSampler();
 
-    // 绑定窗口与两个输出槽：注册键盘/鼠标回调 + 初始化光标基准。
+    // 绑定窗口与三个输出槽 + 两个玩家槽：注册键盘/鼠标回调 + 初始化光标基准。
+    // player  玩家体状态槽（F4 切到玩家模式后相机跟随它，可空）。
+    // control 玩家操控意图槽（玩家模式下 WASD/空格写这里，物理线程读，可空）。
     void attach(GLFWwindow* window,
                 engine::shared::CameraState* camera,
-                engine::shared::PlayerInput* clicks);
+                engine::shared::PlayerInput* clicks,
+                engine::shared::PlayerBodyState* player,
+                engine::shared::PlayerControlState* control);
 
     // 输入线程每 tick 调用：消费视角增量 + 键盘状态 → 更新相机 → 写 CameraState。
     void sample();
@@ -48,7 +54,33 @@ private:
 
     engine::shared::CameraState* cameraOut_ = nullptr;   // 相机输出槽（attach 后非空）
     engine::shared::PlayerInput* clickOut_ = nullptr;    // 点击输出槽（attach 后非空）
+    engine::shared::PlayerBodyState* playerOut_ = nullptr; // 玩家体状态槽（可空）
+    engine::shared::PlayerControlState* controlOut_ = nullptr; // 玩家操控意图槽（可空）
     GLFWwindow* window_ = nullptr;
+
+    // 相机模式：false = 自由相机（WASD 飞行），true = 玩家模式（位置跟随玩家体）。
+    // 输入线程独占（sample 里翻转，写 cameraState 时按它分支）。
+    bool playerMode_ = false;
+
+    // 玩家模式下的视角：false = 第一人称（相机在眼位），true = 第三人称（沿视线后退）。
+    // 只在 playerMode_ 为 true 时有意义；F5 翻转。
+    bool thirdPerson_ = false;
+
+    // 玩家眼高（脚底到眼睛）：玩家体 1.8 高，取 1.62（MC 同值）。
+    static constexpr double kEyeHeight_ = 1.62;
+
+    // 第三人称相机距离（格）：相机沿视线反方向后退这么多，视线仍穿过瞄准点。
+    static constexpr double kThirdPersonDist_ = 4.0;
+
+    // 第三人称瞄准点高度（相对脚底）：比眼位略低，让角色落在画面偏下、前方露出更多。
+    static constexpr double kThirdPersonAim_ = 1.35;
+
+    // 玩家步行速度（格/秒）：MC 步行 4.317，取 4.3。
+    static constexpr double kWalkSpeed_ = 4.3;
+
+    // 空格的上一帧按住状态：玩家模式下空格改成"跳跃"（需要按下边沿），
+    // 自由相机模式下仍是"按住上升"，所以两种语义各判各的。
+    bool spaceHeldPrev_ = false;
 
     // ---- 回调写 / 输入线程读（原子）----
     std::atomic<bool> keyW_{false}, keyS_{false}, keyA_{false}, keyD_{false};
@@ -61,6 +93,12 @@ private:
     // F3 调试浮层开关的按住状态（只在回调里读写，主线程独占 → 不需要原子）。
     // 作用：把 auto-repeat 和 GLFW 偶发的 REPEAT 误报都归并成"按一下切一次"。
     bool f3Held_ = false;
+
+    // F4 相机模式切换的按住状态（同上：只归并边沿，不承担状态）。
+    bool f4Held_ = false;
+
+    // F5 第一/第三人称切换的按住状态（同上）。
+    bool f5Held_ = false;
 
     // ---- 相机状态（输入线程独占写）----
     // 出生点：装配期由 main 按生成地形实际高度设定（不写死世界高度）；R 键回到这里。

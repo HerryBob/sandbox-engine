@@ -65,10 +65,12 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
     g_api.block.host          = &g_host;
     g_api.block.log           = &logImpl;
     g_api.block.registerBlock = &registerBlockImpl;
+
     g_api.noise.version       = modapi::kEngineApiVersion;
     g_api.noise.host          = &g_host;
     g_api.noise.log           = &logImpl;
     g_api.noise.registerNoise = &registerNoiseImpl;
+
     g_api.world.version            = modapi::kEngineApiVersion;
     g_api.world.host               = &g_host;
     g_api.world.log                = &logImpl;
@@ -76,13 +78,12 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
     g_api.world.forEachBlockInAABB = &forEachBlockInAABBImpl;
     g_api.world.getWorldInfo       = &getWorldInfoImpl;
 
-    // 一个子目录 = 一个模组：目录内一个 *.dll + 可选的 mod.json。
+    // 一个子目录 = 一个模组：目录内一个 *.dll + 一个必需的 mod.json。
     // 先收集再排序，不依赖目录枚举顺序，保证每次启动的加载次序一致。
     struct Candidate {
         fs::path    dll;          // 目录内唯一的 DLL
-        std::string dirName;      // 目录名（日志标识 / 无清单时的排序键）
-        bool        hasManifest;  // 目录里有没有 mod.json
-        ModManifest manifest;     // hasManifest 为 true 时有效
+        std::string dirName;      // 目录名（日志标识）
+        ModManifest manifest;     // 清单（收集阶段已保证存在）
     };
 
     std::vector<Candidate> candidates;
@@ -99,48 +100,36 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
         if (c.dll.empty()) continue;
 
         const fs::path manifestPath = entry.path() / "mod.json";
-        if (fs::exists(manifestPath)) {
-            if (!ManifestReader::load(manifestPath.string(), c.manifest)) {
-                LOG_ERROR("Mod", "拒绝加载 " + c.dirName + "：mod.json 非法");
-                continue;
-            }
-            c.hasManifest = true;
-            LOG_INFO("Mod", "清单：" + c.manifest.id + "（phase=" +
-                             phaseName(c.manifest.phase) + "，依赖 " +
-                             std::to_string(c.manifest.dependencies.size()) + " 个）");
-        } else {
-            c.hasManifest = false;
-            LOG_INFO("Mod", "无 mod.json，按 normal 处理：" + c.dirName);
+        if (!fs::exists(manifestPath)) {
+            LOG_WARN("Mod", "跳过 " + c.dirName + "：缺少 mod.json（模组必须有清单）");
+            continue;
         }
+        if (!ManifestReader::load(manifestPath.string(), c.manifest)) {
+            LOG_ERROR("Mod", "拒绝加载 " + c.dirName + "：mod.json 非法");
+            continue;
+        }
+        LOG_INFO("Mod", "清单：" + c.manifest.id + "（phase=" +
+                       phaseName(c.manifest.phase) + "，依赖 " +
+                       std::to_string(c.manifest.dependencies.size()) + " 个）");
         candidates.push_back(c);
     }
 
-    // 排序：先 phase 升序，同 phase 按 id（无清单的用目录名）。
+    // 排序：先 phase 升序，同 phase 按 id。
     // 这一步只固定"同层节点"的先后，真正的前后关系由依赖排序决定。
     std::sort(candidates.begin(), candidates.end(),
-              [](const Candidate& a, const Candidate& b) {
-                  const ModPhase pa = a.hasManifest ? a.manifest.phase : ModPhase::Normal;
-                  const ModPhase pb = b.hasManifest ? b.manifest.phase : ModPhase::Normal;
-                  if (pa != pb) {
-                      return static_cast<std::int32_t>(pa) < static_cast<std::int32_t>(pb);
-                  }
-                  const std::string& ia = a.hasManifest ? a.manifest.id : a.dirName;
-                  const std::string& ib = b.hasManifest ? b.manifest.id : b.dirName;
-                  return ia < ib;
-              });
+        [](const Candidate& a, const Candidate& b) {
+            if (a.manifest.phase != b.manifest.phase) {
+                return static_cast<std::int32_t>(a.manifest.phase) <
+                       static_cast<std::int32_t>(b.manifest.phase);
+            }
+            return a.manifest.id < b.manifest.id;
+        });
 
-    // 排序输入：无清单的模组合成 id（"<dir>" + 目录名，不会与真 id 冲突），无依赖、归 normal。
+    // 排序输入：每条模组一份清单（收集阶段已保证清单存在）
     std::vector<ModManifest> items;
     items.reserve(candidates.size());
     for (const Candidate& c : candidates) {
-        if (c.hasManifest) {
-            items.push_back(c.manifest);
-        } else {
-            ModManifest m;
-            m.id = "<dir>" + c.dirName;
-            m.phase = ModPhase::Normal;
-            items.push_back(m);
-        }
+        items.push_back(c.manifest);
     }
 
     const SortResult sorted = ModSorter::sort(items);
@@ -206,7 +195,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
         g_host.currentMod = mod->name();
 
         // 清单 id 与 DLL 自报名字不一致：只警告，不拒绝（排序与拒绝以清单为准）
-        if (c.hasManifest && c.manifest.id != mod->name()) {
+        if (c.manifest.id != mod->name()) {
             LOG_WARN("Mod", "清单 id 与 IMod::name() 不一致：" + c.manifest.id +
                              " vs " + mod->name() + "（" + shown + "）");
         }

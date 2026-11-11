@@ -14,10 +14,14 @@ InputSampler::InputSampler()
 
 void InputSampler::attach(GLFWwindow* window,
                           engine::shared::CameraState* camera,
-                          engine::shared::PlayerInput* clicks) {
+                          engine::shared::PlayerInput* clicks,
+                          engine::shared::PlayerBodyState* player,
+                          engine::shared::PlayerControlState* control) {
     window_ = window;
     cameraOut_ = camera;
     clickOut_ = clicks;
+    playerOut_ = player;
+    controlOut_ = control;
     s_self_ = this; // 单实例：回调经静态指针取本对象
     glfwSetKeyCallback(window, keyboardCb);
     glfwSetMouseButtonCallback(window, mouseButtonCb);
@@ -31,15 +35,101 @@ void InputSampler::attach(GLFWwindow* window,
 }
 
 void InputSampler::sample() {
+    // 模式切换请求（F4 按下时由键盘回调置位，本线程取走）：自由相机 ↔ 玩家跟随。
+    bool modeChanged = false;
+    if (clickOut_ != nullptr &&
+        clickOut_->togglePlayerMode.exchange(false, std::memory_order_relaxed)) {
+        playerMode_ = !playerMode_;
+        modeChanged = true;
+    }
+
+    // 第一/第三人称切换（F5）：只在玩家模式下有意义，自由相机时忽略请求。
+    if (clickOut_ != nullptr &&
+        clickOut_->toggleThirdPerson.exchange(false, std::memory_order_relaxed)) {
+        if (playerMode_) {
+            thirdPerson_ = !thirdPerson_;
+            modeChanged = true;
+        }
+    }
+
     // 消费视角增量（回调累加 / 本线程取走），clamp 俯仰防翻跟头。
     yaw_   += yawDelta_.exchange(0.0, std::memory_order_relaxed);
     pitch_ += pitchDelta_.exchange(0.0, std::memory_order_relaxed);
     pitch_ = std::clamp(pitch_, -1.45, 1.45); // ±83°
 
-    // 键盘移动（速度 2.5 格/s，与原渲染线程逻辑一致；125Hz → dt=0.008）。
-    const double speed = 8 * 0.008;
+    // 朝向基向量（两种模式共用；yaw = 0 时朝 -Z）。
     const double fwdX = std::sin(yaw_),  fwdZ = -std::cos(yaw_); // 前方向
     const double rgtX = std::cos(yaw_),  rgtZ =  std::sin(yaw_); // 右方向
+    const bool   spaceDown = keySpace_.load(std::memory_order_relaxed);
+
+    // 玩家模式：位置锁在玩家体（脚底 + 眼高），视角仍归鼠标；
+    // WASD 写操控意图（物理线程每 tick 取走当水平速度），空格改成跳跃。
+    if (playerMode_) {
+        if (playerOut_ != nullptr &&
+            playerOut_->valid.load(std::memory_order_relaxed)) {
+            const double px = playerOut_->x.load(std::memory_order_relaxed);
+            const double py = playerOut_->y.load(std::memory_order_relaxed);
+            const double pz = playerOut_->z.load(std::memory_order_relaxed);
+            if (thirdPerson_) {
+                // 第三人称：相机 = 瞄准点沿视线反方向后退固定距离。
+                // 因为相机位置是从瞄准点沿 lookDir 反向推出来的，视线正好穿过瞄准点，
+                // 玩家始终在画面中心，view 矩阵不用改（yaw/pitch 语义保持不变）。
+                const double cp = std::cos(pitch_);
+                const double sp = std::sin(pitch_);
+                camX_ = px - fwdX * cp * kThirdPersonDist_;
+                camY_ = py + kThirdPersonAim_ - sp * kThirdPersonDist_;
+                camZ_ = pz - fwdZ * cp * kThirdPersonDist_;
+            } else {
+                // 第一人称：相机就在眼位。自身模型要由渲染侧隐藏，否则在头/躯干内部。
+                camX_ = px;
+                camY_ = py + kEyeHeight_;
+                camZ_ = pz;
+            }
+        }
+        if (keyR_.load(std::memory_order_relaxed)) { // R：只重置朝向（位置归玩家体）
+            yaw_ = spawnYaw_; pitch_ = spawnPitch_;
+        }
+
+        if (controlOut_ != nullptr) {
+            // WASD 先合成方向再归一化：斜向走不会比直走快。
+            double dx = 0.0, dz = 0.0;
+            if (keyW_.load(std::memory_order_relaxed)) { dx += fwdX; dz += fwdZ; }
+            if (keyS_.load(std::memory_order_relaxed)) { dx -= fwdX; dz -= fwdZ; }
+            if (keyD_.load(std::memory_order_relaxed)) { dx += rgtX; dz += rgtZ; }
+            if (keyA_.load(std::memory_order_relaxed)) { dx -= rgtX; dz -= rgtZ; }
+            const double len = std::sqrt(dx * dx + dz * dz);
+            if (len > 1e-9) { dx /= len; dz /= len; }
+            controlOut_->vx.store(dx * kWalkSpeed_, std::memory_order_relaxed);
+            controlOut_->vz.store(dz * kWalkSpeed_, std::memory_order_relaxed);
+            // 空格取按下边沿：按住不连跳。
+            if (spaceDown && !spaceHeldPrev_) {
+                controlOut_->jumpRequested.store(true, std::memory_order_relaxed);
+            }
+        }
+
+        writeCameraState();
+        spaceHeldPrev_ = spaceDown;
+        if (modeChanged) {
+            std::ostringstream os;
+            os << "相机模式：玩家跟随 " << (thirdPerson_ ? "第三人称" : "第一人称")
+               << " 眼高=" << kEyeHeight_ << " 距离=" << (thirdPerson_ ? kThirdPersonDist_ : 0.0)
+               << " 相机=(" << camX_ << "," << camY_ << "," << camZ_ << ")";
+            LOG_INFO("Input", os.str());
+        }
+        return;
+    }
+
+    // 自由相机模式：原逻辑（速度 8 格/s；125Hz → 每 tick 0.064 格）。
+    // 这里空格仍是"按住上升"，不是跳跃。
+    const double speed = 8 * 0.008;
+
+    // 自由相机不驱动玩家体：必须每帧清零操控意图。
+    // 否则从玩家模式切过来时，物理线程会继续读到上一帧残留的走速，人一直滑不停。
+    if (controlOut_ != nullptr) {
+        controlOut_->vx.store(0.0, std::memory_order_relaxed);
+        controlOut_->vz.store(0.0, std::memory_order_relaxed);
+    }
+
     if (keyW_.load(std::memory_order_relaxed)) {
         camX_ += fwdX * speed; camZ_ += fwdZ * speed;
     }
@@ -52,7 +142,7 @@ void InputSampler::sample() {
     if (keyA_.load(std::memory_order_relaxed)) {
         camX_ -= rgtX * speed; camZ_ -= rgtZ * speed;
     }
-    if (keySpace_.load(std::memory_order_relaxed)) camY_ += speed;
+    if (spaceDown) camY_ += speed;
     if (keyShift_.load(std::memory_order_relaxed)) camY_ -= speed;
     if (keyR_.load(std::memory_order_relaxed)) { // 重置视角（回出生点：生成地形的地表上方）
         camX_ = spawnX_; camY_ = spawnY_; camZ_ = spawnZ_;
@@ -60,6 +150,12 @@ void InputSampler::sample() {
     }
 
     writeCameraState();
+    spaceHeldPrev_ = spaceDown;
+    if (modeChanged) {
+        std::ostringstream os;
+        os << "相机模式：自由相机 相机=(" << camX_ << "," << camY_ << "," << camZ_ << ")";
+        LOG_INFO("Input", os.str());
+    }
 }
 
 void InputSampler::setSpawn(double x, double y, double z, double yawRad, double pitchRad) {
@@ -77,6 +173,9 @@ void InputSampler::writeCameraState() {
     cameraOut_->camZ.store(camZ_, std::memory_order_relaxed);
     cameraOut_->yaw.store(yaw_, std::memory_order_relaxed);
     cameraOut_->pitch.store(pitch_, std::memory_order_relaxed);
+    // 渲染线程据此决定要不要画自身模型（第一人称必须隐藏）。
+    const int mode = !playerMode_ ? 0 : (thirdPerson_ ? 2 : 1);
+    cameraOut_->viewMode.store(mode, std::memory_order_relaxed);
 }
 
 // 键盘回调（主线程 pollEvents 触发）：只记录按下/松开状态，不做事。
@@ -100,6 +199,35 @@ void InputSampler::keyboardCb(GLFWwindow* w, int key, int scancode, int action, 
         self->f3Held_ = true;
         if (self->clickOut_) {
             self->clickOut_->toggleHud.store(true, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    // F4 同上：边沿判定后置请求位，模式状态由输入线程翻转。
+    if (key == GLFW_KEY_F4) {
+        if (action == GLFW_RELEASE) {
+            self->f4Held_ = false;
+            return;
+        }
+        if (self->f4Held_) return;
+        self->f4Held_ = true;
+        if (self->clickOut_) {
+            self->clickOut_->togglePlayerMode.store(true, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    // F5：玩家模式下切换第一/第三人称（自由相机模式下按了无效，直接忽略）。
+    // 状态只在输入线程改，这里只置请求位。
+    if (key == GLFW_KEY_F5) {
+        if (action == GLFW_RELEASE) {
+            self->f5Held_ = false;
+            return;
+        }
+        if (self->f5Held_) return;
+        self->f5Held_ = true;
+        if (self->clickOut_) {
+            self->clickOut_->toggleThirdPerson.store(true, std::memory_order_relaxed);
         }
         return;
     }
@@ -138,10 +266,14 @@ void InputSampler::cursorPosCb(GLFWwindow* w, double x, double y) {
     constexpr double kSens = 0.005; // 拖动灵敏度（弧度/像素）
     const double dx = x - self->lastCursorX_.load(std::memory_order_relaxed);
     const double dy = y - self->lastCursorY_.load(std::memory_order_relaxed);
-    self->yawDelta_.fetch_add(dx * kSens, std::memory_order_relaxed);
-    self->pitchDelta_.fetch_add(-dy * kSens, std::memory_order_relaxed);
     self->lastCursorX_.store(x, std::memory_order_relaxed);
     self->lastCursorY_.store(y, std::memory_order_relaxed);
+    // 窗口被移动/最大化后，光标相对窗口的坐标会整体跳一次：这么大的位移不可能是真拖动，
+    // 只重设基准、不转视角，否则画面会突然甩到别处。
+    constexpr double kJumpPx = 200.0;
+    if (std::abs(dx) > kJumpPx || std::abs(dy) > kJumpPx) return;
+    self->yawDelta_.fetch_add(dx * kSens, std::memory_order_relaxed);
+    self->pitchDelta_.fetch_add(-dy * kSens, std::memory_order_relaxed);
 }
 
 } // namespace engine::input

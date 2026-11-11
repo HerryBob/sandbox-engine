@@ -1,5 +1,5 @@
 #pragma once
-#include "shared/block/Block.hpp"
+#include "shared/chunk/ChunkData.hpp"
 
 #include <cstdint>
 #include <unordered_map>
@@ -12,8 +12,9 @@ namespace engine::business::base {
 // 线程安全由调用方负责（业务线程经 World 加锁；其他上下文自行约定）。
 
 // 脏原因常量（ChunkData.dirty 位掩码；替换 magic number）。
-inline constexpr std::uint32_t DIRTY_PLACED  = 0x08; // 放置标记脏（持久留档）
-inline constexpr std::uint32_t DIRTY_REMOVED = 0x10; // 破坏标记脏（持久留档）
+inline constexpr std::uint32_t DIRTY_GENERATED = 0x01; // 生成装载标记脏
+inline constexpr std::uint32_t DIRTY_PLACED    = 0x08; // 放置标记脏（持久留档）
+inline constexpr std::uint32_t DIRTY_REMOVED   = 0x10; // 破坏标记脏（持久留档）
 
 // 标脏：把 cp 自身 + 边界方向邻居（方块 p 若在 chunk 边缘）插入 dirty 集合。
 // 集合自动去重；规则只存在这一处（单一事实来源）。

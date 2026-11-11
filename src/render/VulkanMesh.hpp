@@ -5,7 +5,9 @@
 #include "VulkanContext.hpp"
 #include "render/assets/ModelDef.hpp"
 #include "render/assets/TextureAtlas.hpp"
+#include "shared/block/Block.hpp"
 #include <cstdint>
+#include <vector>
 namespace engine::render::mesh {
 
 // 方块几何（硬编码）：24 顶点 + 36 索引（每面独立 4 顶点、独立颜色）。
@@ -27,5 +29,18 @@ std::vector<Vertex> buildModelVertices(const glm::vec3& offset,
                                        const engine::assets::ModelDef& model,
                                        std::uint8_t occlusionFaceMask,
                                        const engine::assets::TextureAtlas& atlas);
+
+// 刚体网格数据：顶点 + 索引（每面 4 顶点、6 索引）。
+struct BodyMeshData {
+    std::vector<Vertex>            vertices;
+    std::vector<std::uint32_t>     indices;
+};
+
+// 刚体几何：按刚体局部坐标的方块列表生成，面剔除只看列表内部。
+// blocks：局部坐标方块列表（Block.pos 为刚体局部坐标，contraptionId ≥ 0）。
+// atlas：图集（面纹理名 → 格 → UV，未注册走兜底格）。
+// 外部六个方向一律算可见——刚体离开原位后那些面会露出来，不能按世界邻居剔除。
+BodyMeshData buildBodyVertices(const std::vector<engine::shared::Block>& blocks,
+                               const engine::assets::TextureAtlas& atlas);
 
 } // namespace engine::render::mesh

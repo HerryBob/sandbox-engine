@@ -22,6 +22,13 @@ struct PlayerInput {
     // F3 调试浮层开关请求：键盘回调在"按下"瞬间置 true，渲染线程 exchange(false) 消费。
     // 用请求位而不是共享 bool：输入线程只管发事件，可见性状态归渲染线程独占。
     std::atomic<bool> toggleHud{ false };
+
+    // F4 相机模式切换请求（自由相机 ↔ 玩家跟随）：键盘回调置位，输入线程 exchange(false) 消费。
+    // 模式状态归输入线程独占（相机由它写），回调只发请求。
+    std::atomic<bool> togglePlayerMode{ false };
+
+    // F5 第一/第三人称切换请求（只在玩家模式下有效）：同上，回调置位、输入线程消费。
+    std::atomic<bool> toggleThirdPerson{ false };
 };
 
 } // namespace engine::shared

@@ -12,6 +12,36 @@ PhysicsWorld::PhysicsWorld(engine::core::TimeManager& tm)
       startWall_(std::chrono::steady_clock::now()),
       lastLog_(std::chrono::steady_clock::now()) {}
 
+int PhysicsWorld::addPlayerBody(double x, double y, double z) {
+    // 生物体：运动学、单 AABB（0.6 × 1.8 × 0.6）、位置锚在脚底中心。
+    // blocks 留空——形状由 halfExtent/centerOffset 直接给，不走 recomputeAABB
+    //（后者在 blocks 为空时会把 AABB 清零）。
+    RigidBody b;
+    b.id = static_cast<int>(nextBodyId_++);
+    b.motion = MotionType::Kinematic;
+    b.x = x;
+    b.y = y;
+    b.z = z;
+    b.halfExtentX = 0.3;
+    b.halfExtentY = 0.9;
+    b.halfExtentZ = 0.3;
+    b.centerOffsetX = 0.0;
+    b.centerOffsetY = 0.9; // AABB 中心在脚底上方 0.9，底部正好落在基准 y
+    b.centerOffsetZ = 0.0;
+    bodies_.push_back(b);
+    bodyCount_.store(static_cast<long long>(bodies_.size()), std::memory_order_relaxed);
+    playerBodyId_ = b.id;
+    return b.id;
+}
+
+void PhysicsWorld::attachPlayerState(engine::shared::PlayerBodyState* out) {
+    playerState_ = out;
+}
+
+void PhysicsWorld::attachPlayerControl(engine::shared::PlayerControlState* in) {
+    playerControl_ = in;
+}
+
 void PhysicsWorld::advance(double scale, double wallDt,
                            engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness) {
     // 累积待处理模拟时间（文档 2.2）：残差持续保留，自动处理非整数配比。
@@ -98,10 +128,15 @@ void PhysicsWorld::advance(double scale, double wallDt,
                 bodyCount_.store(static_cast<long long>(bodies_.size()),
                                  std::memory_order_relaxed);
                 // 回执：打包完成（回执必须逐条送达，不参与快照合并）。
+                // 带局部坐标方块列表 + 刚体位置：业务不必自留副本，渲染端直接拿它建网格。
                 engine::shared::PhysicsResult r;
                 r.type = engine::shared::PhysicsResult::Type::ContraptionPacked;
                 r.contraptionId = body.id;
                 r.blockCount = body.blockCount;
+                r.rx = body.x;
+                r.ry = body.y;
+                r.rz = body.z;
+                r.blocks = body.blocks;
                 pendingReceipts_.push_back(r);
                 break;
             }
@@ -142,6 +177,7 @@ void PhysicsWorld::advance(double scale, double wallDt,
         // 推力模拟已删除（飞船推力输入移除）；刚体按当前速度匀速运动
         //（v 无变化，只有 x += v×dt）。dt=0.04 固定步长（原型无重力/阻尼）。
         for (auto& b : bodies_) {
+            if (b.motion != MotionType::Dynamic) continue; // 运动学体走下方分轴路径
             b.x += b.vx * 0.04;
             b.y += b.vy * 0.04;
             b.z += b.vz * 0.04;
@@ -155,6 +191,7 @@ void PhysicsWorld::advance(double scale, double wallDt,
         // 每帧可重复（顶着方块持续重叠），但事件只在"接触开始"（新加入接触集合）时发
         // 一次——同一对 (刚体, 方块) 不重复上报，业务按真实碰撞次数裁决。
         for (auto& b : bodies_) {
+            if (b.motion != MotionType::Dynamic) continue; // 运动学体由下方独立分支处理
             const double leftX  = b.x + b.centerOffsetX - b.halfExtentX;
             const double rightX = b.x + b.centerOffsetX + b.halfExtentX;
             const double leftY  = b.y + b.centerOffsetY - b.halfExtentY;
@@ -222,6 +259,38 @@ void PhysicsWorld::advance(double scale, double wallDt,
             }
         }
 
+        // ---- 生物（运动学）推进：重力 + 分轴移动 + 碰撞回退 ----
+        // 与方块组路径完全分离：Dynamic 走"三轴一次积分 + 只回退 x"，
+        // 运动学体需要"逐轴移动逐轴回退"，否则"站立"与"水平阻挡"无法同时成立。
+        for (auto& b : bodies_) {
+            if (b.motion != MotionType::Kinematic) continue;
+            // 外部驱动：读操控意图灌水平速度。
+            // 跳跃必须在清 onGround 之前判——它要用的是"上一个 tick 落地回退的结果"，
+            // 而下面这行 b.onGround = false 会把它抹掉。
+            if (b.id == playerBodyId_ && playerControl_ != nullptr) {
+                b.vx = playerControl_->vx.load(std::memory_order_relaxed);
+                b.vz = playerControl_->vz.load(std::memory_order_relaxed);
+                // 请求位先消费再判落地：空中按跳跃直接丢弃，不做预输入（不会落地瞬间自动弹起）。
+                const bool wantJump =
+                    playerControl_->jumpRequested.exchange(false, std::memory_order_relaxed);
+                if (wantJump && b.onGround) {
+                    b.vy = kJumpSpeed_;
+                }
+            }
+            b.onGround = false;
+            b.vy -= 9.8 * 0.04;      // 重力（原型固定 9.8，无阻尼）
+            moveKinematicAxis(b, 1); // 先竖轴：落地 / 顶头
+            moveKinematicAxis(b, 0); // 再横轴
+            moveKinematicAxis(b, 2);
+            // 玩家位置回传（相机跟随用）：只写共享槽，不占业务结果队列。
+            if (b.id == playerBodyId_ && playerState_ != nullptr) {
+                playerState_->x.store(b.x, std::memory_order_relaxed);
+                playerState_->y.store(b.y, std::memory_order_relaxed);
+                playerState_->z.store(b.z, std::memory_order_relaxed);
+                playerState_->valid.store(true, std::memory_order_relaxed);
+            }
+        }
+
         // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
         simTime_.store(simTime_.load(std::memory_order_relaxed) + 0.04,
                        std::memory_order_relaxed);
@@ -251,20 +320,21 @@ void PhysicsWorld::syncToBusiness(
     // ② 刚体位置快照（合并语义，数据层 ② 修正）：有刚体就发最新位置，
     // 但只发"新模拟时刻"——物理循环每墙钟帧调本函数，模拟 tick 却只有 25Hz，
     // 同一模拟时刻重复发会淹没业务双槽（插值窗口退化，实测 1647 条回执大量同戳）。
-    // 刚体自己积分在动，不依赖命令；原型只有 1 个刚体（飞船），发第一个。
+    // 每个刚体各发一条（生物进容器后不能再只发 bodies_.front()）。
     if (!bodies_.empty()) {
         const double st = simTime_.load(std::memory_order_relaxed);
-        if (st != lastPosSentSimT_) { // 模拟时刻已推进 → 发一条新位置快照
+        if (st != lastPosSentSimT_) { // 模拟时刻已推进 → 每个刚体各发一条新位置快照
             lastPosSentSimT_ = st;
-            const RigidBody& b = bodies_.front();
-            engine::shared::PhysicsResult pos;
-            pos.type = engine::shared::PhysicsResult::Type::RigidBodyPos;
-            pos.contraptionId = b.id;
-            pos.rx = b.x;
-            pos.ry = b.y;
-            pos.rz = b.z;
-            pos.simTime = st;
-            q.push(pos); // 满则丢：业务消化不过来时丢弃旧快照可接受
+            for (const RigidBody& b : bodies_) {
+                engine::shared::PhysicsResult pos;
+                pos.type = engine::shared::PhysicsResult::Type::RigidBodyPos;
+                pos.contraptionId = b.id;
+                pos.rx = b.x;
+                pos.ry = b.y;
+                pos.rz = b.z;
+                pos.simTime = st;
+                q.push(pos); // 满则丢：业务消化不过来时丢弃旧快照可接受
+            }
         }
     }
 
@@ -312,6 +382,71 @@ long long PhysicsWorld::collisions() const {
     return collisions_.load(std::memory_order_relaxed);
 }
 
+void PhysicsWorld::moveKinematicAxis(RigidBody& b, int axis) {
+    // 分轴测试（axis 0=x / 1=y / 2=z）：先沿该轴移动一步，再把 AABB 与静态方块的重叠
+    // 按"该轴最紧的那一格"回退，并清零该轴速度。竖轴向下命中即踩地（onGround）。
+    const double dt = 0.04;
+    const double delta = (axis == 0) ? b.vx * dt : (axis == 1) ? b.vy * dt : b.vz * dt;
+    if (delta == 0.0) return;
+
+    if (axis == 0) b.x += delta;
+    else if (axis == 1) b.y += delta;
+    else b.z += delta;
+
+    const double leftX  = b.x + b.centerOffsetX - b.halfExtentX;
+    const double rightX = b.x + b.centerOffsetX + b.halfExtentX;
+    const double leftY  = b.y + b.centerOffsetY - b.halfExtentY;
+    const double rightY = b.y + b.centerOffsetY + b.halfExtentY;
+    const double leftZ  = b.z + b.centerOffsetZ - b.halfExtentZ;
+    const double rightZ = b.z + b.centerOffsetZ + b.halfExtentZ;
+
+    const int x0 = static_cast<int>(std::floor(leftX));
+    const int x1 = static_cast<int>(std::floor(rightX));
+    const int y0 = static_cast<int>(std::floor(leftY));
+    const int y1 = static_cast<int>(std::floor(rightY));
+    const int z0 = static_cast<int>(std::floor(leftZ));
+    const int z1 = static_cast<int>(std::floor(rightZ));
+
+    bool hit  = false;
+    int  best = 0; // 该轴最紧的一格：正方向取最大、负方向取最小
+    for (int iy = y0; iy <= y1; ++iy) {
+        for (int iz = z0; iz <= z1; ++iz) {
+            for (int ix = x0; ix <= x1; ++ix) {
+                if (colliders_.find(engine::shared::BlockPos{ix, iy, iz}) ==
+                    colliders_.end())
+                    continue;
+                // 严格区间重叠（贴边不算），与方块组路径用同一判据。
+                if (!(rightX > ix && leftX < ix + 1.0 &&
+                      rightY > iy && leftY < iy + 1.0 &&
+                      rightZ > iz && leftZ < iz + 1.0))
+                    continue;
+                const int cur = (axis == 0) ? ix : (axis == 1) ? iy : iz;
+                if (!hit) { best = cur; hit = true; }
+                else if (delta > 0.0 ? cur > best : cur < best) best = cur;
+            }
+        }
+    }
+    if (!hit) return;
+
+    if (axis == 0) {
+        b.x = (delta > 0.0)
+            ? static_cast<double>(best) - b.centerOffsetX - b.halfExtentX
+            : static_cast<double>(best + 1) - b.centerOffsetX + b.halfExtentX;
+        b.vx = 0.0;
+    } else if (axis == 1) {
+        b.y = (delta > 0.0)
+            ? static_cast<double>(best) - b.centerOffsetY - b.halfExtentY
+            : static_cast<double>(best + 1) - b.centerOffsetY + b.halfExtentY;
+        b.vy = 0.0;
+        if (delta < 0.0) b.onGround = true; // 向下被挡 = 踩地
+    } else {
+        b.z = (delta > 0.0)
+            ? static_cast<double>(best) - b.centerOffsetZ - b.halfExtentZ
+            : static_cast<double>(best + 1) - b.centerOffsetZ + b.halfExtentZ;
+        b.vz = 0.0;
+    }
+}
+
 void PhysicsWorld::recomputeAABB(RigidBody& b) {
     // 增量重算刚体 AABB（最小包裹）：半宽 = (max-min)/2 + 0.5，中心偏移 = (min+max)/2。
     // 刚体内方块增删后调用，碰撞箱实时贴合方块组（Sable handleBlockChange 对应物）。
@@ -320,7 +455,10 @@ void PhysicsWorld::recomputeAABB(RigidBody& b) {
         b.halfExtentX = b.halfExtentY = b.halfExtentZ = 0.0;
         b.centerOffsetX = b.centerOffsetY = b.centerOffsetZ = 0.0;
     } else {
-        int minX = 0, maxX = 0, minY = 0, maxY = 0, minZ = 0, maxZ = 0;
+        // 用第一个方块初始化极值：全部坐标为正时，从 0 起会算出错误的 min（AABB 撑到 0）。
+        int minX = b.blocks.front().pos.x, maxX = minX;
+        int minY = b.blocks.front().pos.y, maxY = minY;
+        int minZ = b.blocks.front().pos.z, maxZ = minZ;
         for (const auto& blk : b.blocks) {
             minX = std::min(minX, blk.pos.x); maxX = std::max(maxX, blk.pos.x);
             minY = std::min(minY, blk.pos.y); maxY = std::max(maxY, blk.pos.y);
@@ -372,6 +510,15 @@ void PhysicsWorld::maybeLog() {
            << " 碰撞=" << collisions()
            << " 方块=(" << blockX() << "," << blockY() << "," << blockZ() << ")"
            << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Physics);
+        // 各物理体位置（物理线程内遍历 bodies_ 安全）：动态体与生物分开标名
+        for (const auto& b : bodies_) {
+            if (b.motion == MotionType::Dynamic) {
+                os << " 刚体" << b.id << "=(" << b.x << "," << b.y << "," << b.z << ")";
+            } else if (b.motion == MotionType::Kinematic) {
+                os << " 生物" << b.id << "=(" << b.x << "," << b.y << "," << b.z
+                   << ") 在地面=" << (b.onGround ? 1 : 0);
+            }
+        }
         LOG_INFO("Physics", os.str());
     }
 }

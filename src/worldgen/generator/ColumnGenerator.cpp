@@ -2,7 +2,7 @@
 
 #include "core/Log.hpp"
 #include "registry/BlockRegistry.hpp"
-#include "shared/block/Block.hpp"
+#include "shared/chunk/ChunkData.hpp"
 #include "worldgen/noise/NoiseRegistry.hpp"
 
 #include <algorithm>

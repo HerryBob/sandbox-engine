@@ -129,6 +129,7 @@ endif()
 # 模组 DLL（#41 最小骨架）
 # ============================================================================
 # mods_src/ 下每个子目录 = 一个模组工程；产物拷到 exe 同级的 mods/<模组名>/（目录即模组单元）。
+# 目录内必须有一个 *.dll 和一个 mod.json；缺清单的目录在加载期跳过（ModLoader::loadAll）。
 # MODULE 库在 Windows 上就是 .dll（PREFIX "" 去掉 lib 前缀）。
 # 关键：DLL 只 include modapi/，绝不 include src/ —— 否则会拿到注册表的独立副本。
 # 运行库必须与 exe 一致（Debug 下 MSVC 默认都是 /MDd；不要单独设 /MT）。

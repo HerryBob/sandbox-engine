@@ -1,6 +1,6 @@
 #pragma once
 
-#include "shared/block/Block.hpp"
+#include "shared/chunk/ChunkData.hpp"
 
 #include <array>
 #include <cstddef>

@@ -12,7 +12,7 @@
 #include <unordered_set>
 
 #include <glm/glm.hpp>
-#include "shared/block/Block.hpp"
+#include "shared/chunk/ChunkPos.hpp"
 #include "render/assets/TextureAtlas.hpp"
 #include "render/hud/HudInfo.hpp"
 #include "render/hud/HudTextBuilder.hpp"
@@ -46,7 +46,7 @@ struct UniformBufferObject {
     glm::mat4 proj;
 };
 
-// 一个 chunk 的网格（GPU 资源 + 计数）。key = ChunkPos（Block.hpp 已提供 hash）。
+// 一个 chunk 的网格（GPU 资源 + 计数）。key = ChunkPos（ChunkPos.hpp 已提供 hash）。
 // 增量重建：每个 chunk 独立持有自己的顶点/索引缓冲，脏 chunk 只重建自己那份；
 // 全量接口保留为"重建全部 chunk"（首帧/世界重建用）。
 // 分桶：一个 chunk 可同时持有 Solid 桶 + Cutout 桶两组网格（玻璃等），
@@ -66,6 +66,31 @@ struct ChunkMesh {
     VkDeviceMemory cutoutIndexMemory = VK_NULL_HANDLE;
     uint32_t       cutoutVertexCount = 0;
     uint32_t       cutoutIndexCount = 0;
+};
+
+// 一根骨骼的 GPU 网格：与 ChunkMesh 的 Solid 桶同构（实体不需要 Cutout 桶）。
+struct EntityBoneGpu {
+    VkBuffer       vertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+    VkBuffer       indexBuffer  = VK_NULL_HANDLE;
+    VkDeviceMemory indexMemory  = VK_NULL_HANDLE;
+    uint32_t       indexCount   = 0;
+};
+
+// 一个实体的全部骨骼资源与骨骼树。
+// order 是拓扑序（父一定排在子前面），每帧按它顺序累乘世界矩阵。
+struct EntityGpu {
+    std::vector<EntityBoneGpu> bones;
+    std::vector<int>           parents;   // -1 = 根
+    std::vector<glm::vec3>     pivots;    // 模型局部空间（世界单位）
+    std::vector<int>           order;
+    bool                       visible = true; // false = 本趟跳过不画（第一人称隐藏自身）
+};
+
+// 实体的每帧位姿：位置 + 绕 y 轴朝向（度）。
+struct EntityPose {
+    glm::dvec3 pos{0.0, 0.0, 0.0};
+    float      yawDeg = 0.0f;
 };
 
 class VulkanContext {
@@ -126,6 +151,25 @@ public:
         const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks); // 请求 mesh 重建
     bool rebuildChunkMeshes(const std::vector<engine::shared::Block>& blocks, const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks); // 增量重建：只重建 dirtyChunks 里的 chunk
 
+    // ---- 刚体网格（可动方块组）----
+    // 结构变化时上传/替换（打包、方块变动）；位姿每帧只改 bodyPos_，不碰缓冲。
+    // blocks：刚体局部坐标方块列表（网格由图集 + 方块注册表现场生成）。
+    // 只能在渲染线程（或初始化期尚未启线程时）调用：VkBuffer 创建非线程安全。
+    bool uploadBodyMesh(int contraptionId, const std::vector<engine::shared::Block>& blocks);
+    void setBodyPose(int contraptionId, double x, double y, double z);
+    void destroyBodyMesh(int contraptionId);
+
+    // ---- 实体模型（带骨骼，逐骨骼 draw）----
+    // 加载 bbmodel + 独立贴图，按骨骼切分网格上传。id 与刚体 id 是两套编号。
+    // 只能在渲染线程（或初始化期尚未启线程时）调用：VkBuffer 创建非线程安全。
+    bool loadEntityModel(int entityId, const std::string& bbmodelPath,
+                         const std::string& texturePath);
+    void setEntityPose(int entityId, double x, double y, double z, float yawDeg);
+    // 实体可见性：false 时本趟跳过该实体（第一人称要把自身模型藏起来，
+    // 否则相机正好位于头/躯干内部，视野被自己的模型糊住）。
+    void setEntityVisible(int entityId, bool visible);
+    void destroyEntityModel(int entityId);
+
 
 private:
     bool createInstance();
@@ -149,6 +193,7 @@ private:
     bool createTextureImage();      // staging 搬运：CPU 写临时缓冲 → GPU 拷进显存
     bool createTextureImageView();  // 视图：图像 → 可采样视图
     bool createTextureSampler();    // 采样器：告诉 GPU 怎么取样（过滤/寻址）
+    bool createEntityTextureResources(); // 实体贴图（图像/视图/采样器）+ 独立描述符集
     void updateViewProj(double dt); // 从 CameraState 读相机状态 → 算 MVP 写 UBO（drawFrame 开头调用，只读不处理输入）
     void destroyUniformObjects();
 
@@ -206,6 +251,10 @@ private:
     std::vector<VkFramebuffer> framebuffers_;
     // 增量重建：每 chunk 一份网格（旧全局 buffer 逐步替换；chunk 空则无条目）。
     std::unordered_map<engine::shared::ChunkPos, ChunkMesh> chunkMeshes_;
+    // 刚体网格：key = contraptionId。与 chunkMeshes_ 同结构，但生命周期跟刚体走（打包建、解包销）。
+    std::unordered_map<int, ChunkMesh>  bodyMeshes_;
+    // 刚体世界原点（double：远离原点时 float 精度不足）。位姿更新只动这里。
+    std::unordered_map<int, glm::dvec3> bodyPos_;
     VkCommandPool        cmdPool_ = VK_NULL_HANDLE;
     VkCommandBuffer      cmdBuffers_[kMaxFramesInFlight]{}; // 每帧槽一条（2 组轮转）
     VkSemaphore          imageAvailable_[kMaxFramesInFlight]{}; // acquire 信号量：2 组轮转
@@ -237,6 +286,16 @@ private:
     uint32_t        texWidth_ = 0;
     uint32_t        texHeight_ = 0;
     engine::assets::TextureAtlas    textureAtlas_;   // 图集：纹理名 → 格 → UV（meshing 查询用）
+
+    // ---- 实体（带骨骼的模型）----
+    // 贴图独立于方块图集：角色是整张 64×64，不参与图集打包。
+    VkImage             entityTextureImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory      entityTextureMemory_ = VK_NULL_HANDLE;
+    VkImageView         entityTextureView_ = VK_NULL_HANDLE;
+    VkSampler           entityTextureSampler_ = VK_NULL_HANDLE;
+    VkDescriptorSet     entityDescSet_ = VK_NULL_HANDLE;  // binding 0 = 同一个 UBO，binding 1 = 实体贴图
+    std::unordered_map<int, EntityGpu>  entityMeshes_;
+    std::unordered_map<int, EntityPose> entityPose_;
 
     // ---- HUD（游戏内调试浮层）----
     // 顶点容量：12288 顶点 = 2048 个字符 × 6 顶点。HUD 满打满算约 900 字符，留足余量。

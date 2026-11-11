@@ -3,7 +3,7 @@
 #include "business/RenderBridge.hpp"
 #include "business/World.hpp"
 #include "core/TimeManager.hpp"
-#include "shared/block/Block.hpp"
+#include "shared/chunk/ChunkPos.hpp"
 #include "shared/state/CameraState.hpp"
 #include "shared/state/PlayerInput.hpp"
 
@@ -113,6 +113,7 @@ private:
 
     std::atomic<long long> playerActions_{ 0 };  // 已处理玩家点击计数
     bool resyncPending_ = false;                 // 待重下发全量方块集（业务线程独占）
+    bool firstTick_ = true;                      // 首个业务 tick 强制全量同步：地形预热在主线程完成，业务线程无新列可触发
 
     std::atomic<long long> blocksPlaced_{0};       // 成功放置（裁决通过）次数
     std::atomic<long long> blocksRemoved_{0};      // 成功破坏次数

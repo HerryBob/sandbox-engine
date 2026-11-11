@@ -187,7 +187,7 @@ void World::applyGeneratedChunk(const engine::shared::ChunkPos& cp,
 
     auto& slot = chunks_[cp];   // 已有则取用、没有则缺省构造
     slot = data;                // 整体覆盖：生成是权威写入，不做旧值合并
-    slot.markDirty(0x01);       // 修改跟踪：生成装载
+    slot.markDirty(base::DIRTY_GENERATED); // 修改跟踪：生成装载
 
     // 运行期必须进脏集合：渲染端只按它请求增量重建
     dirtyChunksThisTick_.insert(cp);

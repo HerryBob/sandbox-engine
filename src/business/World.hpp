@@ -1,5 +1,5 @@
 #pragma once
-#include "shared/block/Block.hpp"
+#include "shared/chunk/ChunkData.hpp"
 
 #include <cstdint>
 #include <functional> // std::function（forEachBlockInAABB 回调）

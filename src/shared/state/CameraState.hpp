@@ -14,6 +14,11 @@ struct CameraState {
     std::atomic<double> camZ{ 0.0 };
     std::atomic<double> yaw{ 0.0 };   // 左右旋转（弧度）
     std::atomic<double> pitch{ 0.0 };  // 上下旋转（弧度）
+    // 视角模式（输入线程写，渲染线程读）：
+    //   0 = 自由相机（WASD 飞行）
+    //   1 = 第一人称（相机在玩家眼位，自身模型需隐藏，否则视线被自己的头/躯干堵住）
+    //   2 = 第三人称（相机沿视线反方向后退固定距离，能看到自己）
+    std::atomic<int> viewMode{ 0 };
 };
 
 } // namespace engine::shared
