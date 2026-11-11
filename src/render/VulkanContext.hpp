@@ -84,13 +84,24 @@ struct EntityGpu {
     std::vector<int>           parents;   // -1 = 根
     std::vector<glm::vec3>     pivots;    // 模型局部空间（世界单位）
     std::vector<int>           order;
-    bool                       visible = true; // false = 本趟跳过不画（第一人称隐藏自身）
+    VkDescriptorSet            textureSet = VK_NULL_HANDLE; // 该实体用的贴图 descriptor
 };
 
-// 实体的每帧位姿：位置 + 绕 y 轴朝向（度）。
+// 实体的每帧状态：位置 + 绕 y 轴朝向（度）+ 可见性。
+// visible 属于实例而不是资源：同一个模型可以被多个实例共用，隐藏其中一个不该连带隐藏别人。
 struct EntityPose {
     glm::dvec3 pos{0.0, 0.0, 0.0};
     float      yawDeg = 0.0f;
+    bool       visible = true;
+};
+
+// 一张实体贴图及其 descriptor set。按贴图路径建一次，多个实体可共用同一张。
+struct EntityTextureRes {
+    VkImage         image   = VK_NULL_HANDLE;
+    VkDeviceMemory  memory  = VK_NULL_HANDLE;
+    VkImageView     view    = VK_NULL_HANDLE;
+    VkSampler       sampler = VK_NULL_HANDLE;
+    VkDescriptorSet set     = VK_NULL_HANDLE;
 };
 
 class VulkanContext {
@@ -193,7 +204,9 @@ private:
     bool createTextureImage();      // staging 搬运：CPU 写临时缓冲 → GPU 拷进显存
     bool createTextureImageView();  // 视图：图像 → 可采样视图
     bool createTextureSampler();    // 采样器：告诉 GPU 怎么取样（过滤/寻址）
-    bool createEntityTextureResources(); // 实体贴图（图像/视图/采样器）+ 独立描述符集
+    // 确保某张实体贴图已加载（图像/视图/采样器 + 自己的 descriptor set）。
+    // 按路径去重：重复调用同一路径只建一次。返回 false 表示该贴图不可用。
+    bool ensureEntityTexture(const std::string& texturePath);
     void updateViewProj(double dt); // 从 CameraState 读相机状态 → 算 MVP 写 UBO（drawFrame 开头调用，只读不处理输入）
     void destroyUniformObjects();
 
@@ -289,11 +302,8 @@ private:
 
     // ---- 实体（带骨骼的模型）----
     // 贴图独立于方块图集：角色是整张 64×64，不参与图集打包。
-    VkImage             entityTextureImage_ = VK_NULL_HANDLE;
-    VkDeviceMemory      entityTextureMemory_ = VK_NULL_HANDLE;
-    VkImageView         entityTextureView_ = VK_NULL_HANDLE;
-    VkSampler           entityTextureSampler_ = VK_NULL_HANDLE;
-    VkDescriptorSet     entityDescSet_ = VK_NULL_HANDLE;  // binding 0 = 同一个 UBO，binding 1 = 实体贴图
+    // 按路径缓存：同一张贴图只建一次，多个实体实例共用同一份 image/view/set。
+    std::unordered_map<std::string, EntityTextureRes> entityTextures_;
     std::unordered_map<int, EntityGpu>  entityMeshes_;
     std::unordered_map<int, EntityPose> entityPose_;
 

@@ -13,6 +13,8 @@ namespace engine::modhost {
 struct HostContext {
     // id 0 恒为空气；方块 id 从 1 起由注册顺序分配（内置 blocks 模组最先加载，占 1..6）。
     std::uint16_t nextBlockId = 1;
+    // 实体类型 id 分配器：从 0 起（类型 id 与实体实例 id 是两套编号）。
+    std::int32_t nextEntityTypeId = 0;
     // 当前正在加载的模组名（注册来源标记用）。必须是 std::string 副本：
     // mod->name() 返回的是 DLL 静态字符串，FreeLibrary 之后即悬空。
     std::string currentMod;

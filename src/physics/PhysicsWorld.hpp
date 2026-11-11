@@ -70,9 +70,12 @@ public:
     double     bodyHalfExtentX() const;    // 首个刚体 x 半宽（增量重算后）
     double     bodyCenterOffsetX() const;  // 首个刚体 x 中心偏移（相对基准）
 
-    // 创建一个生物体：运动学、单 AABB、位置锚在脚底中心（形状由 halfExtent/centerOffset 直接给）。
+    // 创建一个生物体：运动学、单 AABB、位置锚在脚底中心。
+    // 碰撞箱半宽与跳跃初速由调用方按实体类型定义传入（引擎不再写死某个生物的数值）。
     // 只能在物理线程启动前调用（装配期单线程），运行期不增删生物。返回分配到的刚体 id。
-    int addPlayerBody(double x, double y, double z);
+    int addPlayerBody(double x, double y, double z,
+                      double halfExtentX, double halfExtentY, double halfExtentZ,
+                      double jumpSpeed);
 
     // 绑定玩家状态输出槽（相机跟随用）：物理线程每 tick 写玩家位置，输入线程读。
     // 必须在物理线程启动前调用。
@@ -98,9 +101,9 @@ private:
     // 防止"越落后越要补、越补越落后"的螺旋死亡（spiral of death）。
     static constexpr int kMaxStepsPerFrame_ = 5;
 
-    // 跳跃初速度（格/秒）：跳高 = v²/(2g) = 4.9²/(2×9.8) ≈ 1.23 格，略高于 1 格台阶。
-    // 只在 onGround 时生效，空中按跳跃无效。
-    static constexpr double kJumpSpeed_ = 4.9;
+    // 跳跃初速度（格/秒）：跳高 = v²/(2g)。默认 4.9 ⇒ 约 1.23 格，略高于 1 格台阶。
+    // 装配期由 addPlayerBody 按实体类型定义覆盖；只在 onGround 时生效，空中按跳跃无效。
+    double                     jumpSpeed_{4.9};
 
     engine::core::TimeManager& tm_;
     double                     accumulator_{0.0};

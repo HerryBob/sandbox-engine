@@ -41,6 +41,10 @@ public:
     // 同时覆盖当前位置，立即生效（渲染首帧前调用）。
     void setSpawn(double x, double y, double z, double yawRad, double pitchRad);
 
+    // 按实体类型定义注入体型数值（装配期调用，输入线程未启动时安全）。
+    // 只在值为正数时覆盖，无效值保留默认。
+    void setBodyMetrics(double eyeHeight, double walkSpeed);
+
     // ---- GLFW 回调（静态，单实例经 s_self_ 分发）----
     static void keyboardCb(GLFWwindow* w, int key, int scancode, int action, int mods);
     static void mouseButtonCb(GLFWwindow* w, int button, int action, int mods);
@@ -66,17 +70,17 @@ private:
     // 只在 playerMode_ 为 true 时有意义；F5 翻转。
     bool thirdPerson_ = false;
 
-    // 玩家眼高（脚底到眼睛）：玩家体 1.8 高，取 1.62（MC 同值）。
-    static constexpr double kEyeHeight_ = 1.62;
+    // 玩家眼高（脚底到眼睛）与步行速度（格/秒）。
+    // 默认值是 MC 口径（1.62 / 4.3），装配期由 setBodyMetrics 按实体类型定义覆盖。
+    // 用成员而非 constexpr：同一套输入采样要能服务不同体型的实体。
+    double eyeHeight_ = 1.62;
+    double walkSpeed_ = 4.3;
 
     // 第三人称相机距离（格）：相机沿视线反方向后退这么多，视线仍穿过瞄准点。
     static constexpr double kThirdPersonDist_ = 4.0;
 
     // 第三人称瞄准点高度（相对脚底）：比眼位略低，让角色落在画面偏下、前方露出更多。
     static constexpr double kThirdPersonAim_ = 1.35;
-
-    // 玩家步行速度（格/秒）：MC 步行 4.317，取 4.3。
-    static constexpr double kWalkSpeed_ = 4.3;
 
     // 空格的上一帧按住状态：玩家模式下空格改成"跳跃"（需要按下边沿），
     // 自由相机模式下仍是"按住上升"，所以两种语义各判各的。

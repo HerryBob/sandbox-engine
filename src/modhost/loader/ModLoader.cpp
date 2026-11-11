@@ -2,6 +2,9 @@
 
 #include "core/Log.hpp"
 #include "modhost/block/BlockApi.hpp"
+#include "modhost/entity/EntityApi.hpp"
+#include "modhost/entity/EntityDefTable.hpp"
+#include "modhost/entity/EntityInstanceTable.hpp"
 #include "modhost/manifest/Manifest.hpp"
 #include "modhost/noise/NoiseApi.hpp"
 #include "modhost/shared/HostContext.hpp"
@@ -77,6 +80,11 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
     g_api.world.getBlock           = &getBlockImpl;
     g_api.world.forEachBlockInAABB = &forEachBlockInAABBImpl;
     g_api.world.getWorldInfo       = &getWorldInfoImpl;
+
+    g_api.entity.version        = modapi::kEngineApiVersion;
+    g_api.entity.host           = &g_host;
+    g_api.entity.log            = &logImpl;
+    g_api.entity.registerEntity = &registerEntityImpl;
 
     // 一个子目录 = 一个模组：目录内一个 *.dll + 一个必需的 mod.json。
     // 先收集再排序，不依赖目录枚举顺序，保证每次启动的加载次序一致。
@@ -270,6 +278,28 @@ void ModLoader::unloadAll() {
             LOG_INFO("Mod", "保留方块定义 " + std::to_string(keptBlocks) +
                                 " 个（" + m.name + "，纯数据副本，卸载后仍可用）");
         }
+        // 实体类型必须清除（与方块相反）：EntityTypeInfo 里存着 onAnimate 函数指针，
+        // 指向 DLL 代码段，FreeLibrary 之后就是悬垂指针。方块定义没这个问题。
+        // 顺序：先按类型销毁引用它的实例，再擦类型本身。
+        {
+            std::vector<std::int32_t> owned;
+            const std::string& owner = m.name;
+            for (auto it = engine::modhost::g_entityTypeRegistry.begin();
+                 it != engine::modhost::g_entityTypeRegistry.end(); ++it) {
+                if (engine::modhost::g_entityTypeRegistry.ownerOf(it->first) == owner)
+                    owned.push_back(it->first);
+            }
+            std::size_t removedInstances = 0;
+            for (std::int32_t typeId : owned) {
+                removedInstances += engine::modhost::destroyEntityInstancesOfType(typeId);
+                engine::modhost::g_entityTypeRegistry.erase(typeId);
+            }
+            if (!owned.empty()) {
+                LOG_INFO("Mod", "已清理实体类型 " + std::to_string(owned.size())
+                                    + " 个、实例 " + std::to_string(removedInstances)
+                                    + " 个（" + m.name + "）");
+            }
+        }
         if (m.handle != nullptr) {
             ::FreeLibrary(static_cast<HMODULE>(m.handle));
             m.handle = nullptr;
@@ -278,12 +308,14 @@ void ModLoader::unloadAll() {
     }
     s_mods_.clear();
 
-    // 卸载闭环自检：噪声表应只剩引擎自身注册的（owner 为空），方块表按策略保留。
-    // 这行是"按来源清除没有误删引擎内置内容"的直接证据。
+    // 卸载闭环自检：噪声表与实体类型表应只剩引擎自身注册的（owner 为空），
+    // 方块表按策略保留（id 已进 chunk 数据）。这是"按来源清除没有误删引擎内置内容"的直接证据。
     LOG_INFO("Mod", "卸载后注册表：方块 " +
                         std::to_string(engine::registry::g_blockRegistry.size()) +
                         " 个（按策略保留），噪声 " +
                         std::to_string(engine::worldgen::NoiseRegistry::size()) +
+                        " 个，实体类型 " +
+                        std::to_string(engine::modhost::g_entityTypeRegistry.size()) +
                         " 个（模组注册的已按来源清除）");
 }
 

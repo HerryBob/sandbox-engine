@@ -12,8 +12,11 @@ PhysicsWorld::PhysicsWorld(engine::core::TimeManager& tm)
       startWall_(std::chrono::steady_clock::now()),
       lastLog_(std::chrono::steady_clock::now()) {}
 
-int PhysicsWorld::addPlayerBody(double x, double y, double z) {
-    // 生物体：运动学、单 AABB（0.6 × 1.8 × 0.6）、位置锚在脚底中心。
+int PhysicsWorld::addPlayerBody(double x, double y, double z,
+                                double halfExtentX, double halfExtentY, double halfExtentZ,
+                                double jumpSpeed) {
+    // 生物体：运动学、单 AABB、位置锚在脚底中心。
+    // 形状与跳跃初速来自实体类型定义（经装配层传入），本文件不再写死某个生物的尺寸。
     // blocks 留空——形状由 halfExtent/centerOffset 直接给，不走 recomputeAABB
     //（后者在 blocks 为空时会把 AABB 清零）。
     RigidBody b;
@@ -22,12 +25,13 @@ int PhysicsWorld::addPlayerBody(double x, double y, double z) {
     b.x = x;
     b.y = y;
     b.z = z;
-    b.halfExtentX = 0.3;
-    b.halfExtentY = 0.9;
-    b.halfExtentZ = 0.3;
+    b.halfExtentX = halfExtentX;
+    b.halfExtentY = halfExtentY;
+    b.halfExtentZ = halfExtentZ;
     b.centerOffsetX = 0.0;
-    b.centerOffsetY = 0.9; // AABB 中心在脚底上方 0.9，底部正好落在基准 y
+    b.centerOffsetY = halfExtentY; // AABB 中心在脚底上方半高，底部正好落在基准 y
     b.centerOffsetZ = 0.0;
+    if (jumpSpeed > 0.0) jumpSpeed_ = jumpSpeed;
     bodies_.push_back(b);
     bodyCount_.store(static_cast<long long>(bodies_.size()), std::memory_order_relaxed);
     playerBodyId_ = b.id;
@@ -274,7 +278,7 @@ void PhysicsWorld::advance(double scale, double wallDt,
                 const bool wantJump =
                     playerControl_->jumpRequested.exchange(false, std::memory_order_relaxed);
                 if (wantJump && b.onGround) {
-                    b.vy = kJumpSpeed_;
+                    b.vy = jumpSpeed_;
                 }
             }
             b.onGround = false;

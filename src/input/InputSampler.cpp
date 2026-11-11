@@ -82,7 +82,7 @@ void InputSampler::sample() {
             } else {
                 // 第一人称：相机就在眼位。自身模型要由渲染侧隐藏，否则在头/躯干内部。
                 camX_ = px;
-                camY_ = py + kEyeHeight_;
+                camY_ = py + eyeHeight_;
                 camZ_ = pz;
             }
         }
@@ -99,8 +99,8 @@ void InputSampler::sample() {
             if (keyA_.load(std::memory_order_relaxed)) { dx -= rgtX; dz -= rgtZ; }
             const double len = std::sqrt(dx * dx + dz * dz);
             if (len > 1e-9) { dx /= len; dz /= len; }
-            controlOut_->vx.store(dx * kWalkSpeed_, std::memory_order_relaxed);
-            controlOut_->vz.store(dz * kWalkSpeed_, std::memory_order_relaxed);
+            controlOut_->vx.store(dx * walkSpeed_, std::memory_order_relaxed);
+            controlOut_->vz.store(dz * walkSpeed_, std::memory_order_relaxed);
             // 空格取按下边沿：按住不连跳。
             if (spaceDown && !spaceHeldPrev_) {
                 controlOut_->jumpRequested.store(true, std::memory_order_relaxed);
@@ -112,7 +112,7 @@ void InputSampler::sample() {
         if (modeChanged) {
             std::ostringstream os;
             os << "相机模式：玩家跟随 " << (thirdPerson_ ? "第三人称" : "第一人称")
-               << " 眼高=" << kEyeHeight_ << " 距离=" << (thirdPerson_ ? kThirdPersonDist_ : 0.0)
+               << " 眼高=" << eyeHeight_ << " 距离=" << (thirdPerson_ ? kThirdPersonDist_ : 0.0)
                << " 相机=(" << camX_ << "," << camY_ << "," << camZ_ << ")";
             LOG_INFO("Input", os.str());
         }
@@ -164,6 +164,13 @@ void InputSampler::setSpawn(double x, double y, double z, double yawRad, double 
     camX_ = x; camY_ = y; camZ_ = z;
     yaw_ = yawRad; pitch_ = pitchRad;
     writeCameraState(); // 立即生效（渲染首帧前调用，避免首帧还在旧位置）
+}
+
+void InputSampler::setBodyMetrics(double eyeHeight, double walkSpeed) {
+    if (eyeHeight > 0.0) eyeHeight_ = eyeHeight;
+    if (walkSpeed > 0.0) walkSpeed_ = walkSpeed;
+    LOG_INFO("Input", "体型数值注入：眼高=" + std::to_string(eyeHeight_)
+        + " 步速=" + std::to_string(walkSpeed_));
 }
 
 void InputSampler::writeCameraState() {

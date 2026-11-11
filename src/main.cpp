@@ -19,6 +19,8 @@
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerInput.hpp"
 #include "registry/BlockRegistry.hpp"
+#include "modhost/entity/EntityDefTable.hpp"
+#include "modhost/entity/EntityInstanceTable.hpp"
 #include "modhost/loader/ModLoader.hpp"
 #include "modhost/manifest/Manifest.hpp"
 #include "modhost/sorter/ModSorter.hpp"
@@ -333,6 +335,13 @@ static int run(const std::string& presetName) {
     const auto modCount = engine::modhost::ModLoader::loadAll("mods");
     engine::registry::freezeBlockRegistry();
     engine::registry::resolveBuiltinBlockIds();
+    // 实体类型表：与方块表同一窗口封表。模组的 onLoad 只能登记描述，
+    // 真正的模型/贴图加载放到 vkCtx.init 之后（那时 Vulkan 才就绪）。
+    engine::modhost::freezeEntityTypeRegistry();
+    engine::modhost::reserveEntityInstanceIdZero();
+    std::cout << "实体类型注册表：共 " << engine::modhost::g_entityTypeRegistry.size()
+              << " 个类型，frozen="
+              << std::boolalpha << engine::modhost::g_entityTypeRegistry.frozen() << "\n";
     std::cout << "方块注册表：共 " << engine::registry::g_blockRegistry.size()
               << " 个（成功加载模组 " << modCount << " 个），frozen="
               << std::boolalpha << engine::registry::g_blockRegistry.frozen() << "\n";
@@ -421,14 +430,34 @@ static int run(const std::string& presetName) {
 
     engine::render::VulkanContext vkCtx;
     const bool vkOk = vkCtx.init(1280, 720, "沙盒引擎 · Vulkan 方块+相机");
+
+    // 玩家实体 id / 类型定义：类型表里按名字找，模型、贴图、体型数值全由模组定义提供。
+    // id = -1 表示没找到（模组没加载），后续位姿/可见性写入全部跳过。
+    // playerType 供后面的物理与输入注入读数值，因此提到外层作用域。
+    std::int32_t playerEntityId = -1;
+    const engine::modhost::EntityTypeInfo* playerType = nullptr;
     if (vkOk) {
         std::cout << kCameraHelp;
 
-        // 玩家模型：bbmodel 定形状、Player.png 定颜色；位置由 setEntityPose 每帧驱动。
+        // ---- 实体外观：类型表 → 实例 → GPU 模型 ----
+        // 模型/贴图路径已不在本文件写死，全部来自模组注册的类型定义。
         // 此刻渲染线程尚未启动，VkBuffer 创建是安全的。
-        if (!vkCtx.loadEntityModel(1, "assets/models/entity/PlayerModel.bbmodel",
-                                   "assets/textures/entity/Player.png")) {
-            std::cerr << "玩家模型加载失败（继续运行，但没有玩家外观）\n";
+        const std::int32_t playerTypeId = engine::modhost::findEntityTypeId("player");
+        if (playerTypeId >= 0) {
+            playerType = engine::modhost::g_entityTypeRegistry.find(playerTypeId);
+            if (playerType) {
+                playerEntityId = engine::modhost::createEntityInstance(playerTypeId);
+                if (!vkCtx.loadEntityModel(playerEntityId, playerType->model, playerType->texture)) {
+                    std::cerr << "玩家模型加载失败（类型=" << playerType->name
+                              << " 模型=" << playerType->model << "），继续运行但没有玩家外观\n";
+                } else {
+                    std::cout << "玩家实体：id=" << playerEntityId
+                              << " 类型=" << playerType->name << "（id=" << playerTypeId << "）"
+                              << " 模型=" << playerType->model << "\n";
+                }
+            }
+        } else {
+            std::cerr << "未找到名为 player 的实体类型（模组未加载？），玩家不可见\n";
         }
     }
 
@@ -508,13 +537,25 @@ static int run(const std::string& presetName) {
 
     physics::PhysicsWorld   physicsWorld(tm);
     // 首个生物：玩家（运动学、单 AABB、位置锚在脚底中心），从空中落下验证重力与落地。
+    // 碰撞箱半宽/半高/半深与跳跃初速全部取自实体类型定义（模组没加载时退回 MC 口径默认）。
     // 物理线程尚未启动，这里属于装配期单线程，可安全增删物理体。
-    physicsWorld.addPlayerBody(0.0, 8.0, 0.0);
+    {
+        const double halfX = (playerType ? playerType->width : 0.6) * 0.5;
+        const double halfY = (playerType ? playerType->height : 1.8) * 0.5;
+        const double halfZ = (playerType ? playerType->depth : 0.6) * 0.5;
+        const double jump  = (playerType ? playerType->jumpSpeed : 4.9);
+        physicsWorld.addPlayerBody(0.0, 8.0, 0.0, halfX, halfY, halfZ, jump);
+        std::cout << "玩家碰撞箱：半宽=" << halfX << " 半高=" << halfY << " 半深=" << halfZ
+                  << " 跳跃初速=" << jump << "\n";
+    }
     // 玩家位置共享槽（物理线程写 → 输入线程读）：相机跟随的唯一数据来源。
     physicsWorld.attachPlayerState(&playerBodyState);
     // 玩家操控槽（输入线程写 → 物理线程读）：WASD 水平速度 + 空格跳跃。
     physicsWorld.attachPlayerControl(&playerControlState);
     input::InputSampler inputSampler;
+    // 眼高与步速同样来自实体类型定义（第一人称相机位置、WASD 速度都读它们）。
+    inputSampler.setBodyMetrics(playerType ? playerType->eyeHeight : 1.62,
+                                playerType ? playerType->moveSpeed : 4.3);
     // 注册键盘/鼠标回调（真实输入，主线程安全）：F4 切换自由相机 / 玩家跟随。
     inputSampler.attach(vkCtx.window(), &cameraState, &playerInput,
                         &playerBodyState, &playerControlState);
@@ -667,8 +708,9 @@ static int run(const std::string& presetName) {
 
             // 玩家模型位姿：直读共享槽（原子）。位置语义 = 脚底中心，与模型原点一致。
             // 朝向暂固定 0（模型面朝 +Z），等程序化动画阶段接 yaw。
-            if (playerBodyState.valid.load(std::memory_order_relaxed)) {
-                vkCtx.setEntityPose(1,
+            // playerEntityId 由装配层按类型名解析；-1 表示没有玩家实体，跳过。
+            if (playerEntityId > 0 && playerBodyState.valid.load(std::memory_order_relaxed)) {
+                vkCtx.setEntityPose(playerEntityId,
                     playerBodyState.x.load(std::memory_order_relaxed),
                     playerBodyState.y.load(std::memory_order_relaxed),
                     playerBodyState.z.load(std::memory_order_relaxed),
@@ -676,8 +718,10 @@ static int run(const std::string& presetName) {
             }
             // 第一人称隐藏自身模型：相机就在眼位，模型会糊满整个视野。
             // viewMode：0=自由相机 1=第一人称 2=第三人称（见 CameraState）。
-            vkCtx.setEntityVisible(1,
-                cameraState.viewMode.load(std::memory_order_relaxed) != 1);
+            if (playerEntityId > 0) {
+                vkCtx.setEntityVisible(playerEntityId,
+                    cameraState.viewMode.load(std::memory_order_relaxed) != 1);
+            }
 
             vkCtx.drawFrame();
             // 这里原本有一行 sleep_for(5ms) 做限速，已删除：节奏由 FIFO(vsync) 的
@@ -750,16 +794,20 @@ int main(int argc, char** argv) {
     engine::core::initLog(parseLogLevelArg(argc, argv));
     engine::core::setLogThreadName("main");   // 主线程标识；子线程由 ThreadLoop::start 自动登记
 
-    // 临时自检入口：--check-model 只加载实体模型并打印骨骼表，用于核对解析结果
+    // 临时自检入口：--check-model [模型路径] 只加载实体模型并打印骨骼表，用于核对解析结果。
+    // 不给路径时用玩家模组里的模型（模型版权归模组，引擎 assets 里不再留副本）。
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) != "--check-model") continue;
+        const std::string modelPath = (i + 1 < argc)
+            ? std::string(argv[i + 1])
+            : std::string("mods/player_entity/assets/models/entity/PlayerModel.bbmodel");
         engine::assets::EntityModel em;
-        const bool ok = engine::assets::loadBbModel("assets/models/entity/PlayerModel.bbmodel", em);
+        const bool ok = engine::assets::loadBbModel(modelPath, em);
         if (!ok) {
             engine::core::shutdownLog();
             return 2;
         }
-        std::cout << "[实体] 骨骼=" << em.bones.size()
+        std::cout << "[实体] 模型=" << modelPath << " 骨骼=" << em.bones.size()
                   << " 贴图=" << em.texturePaths.size()
                   << " 分辨率=" << em.texWidth << "x" << em.texHeight << "\n";
         for (const auto& b : em.bones) {

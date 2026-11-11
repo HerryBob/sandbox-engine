@@ -170,8 +170,24 @@ set_target_properties(mod_noise PROPERTIES
     FOLDER "mods"
 )
 
+# player_entity：玩家角色的外观与数值（bbmodel 模型 + 贴图 + 碰撞箱/眼高/步速/跳速）。
+# 原先这些写死在 main.cpp 与 InputSampler/PhysicsWorld 里；现在由模组登记类型定义，
+# 引擎在 vkCtx.init 之后按类型表统一加载。删掉 mods/player_entity/ 就没有玩家外观。
+add_library(player_entity MODULE
+    mods_src/player_entity/PlayerEntityMod.cpp
+)
+target_include_directories(player_entity PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(player_entity PRIVATE /utf-8)
+endif()
+set_target_properties(player_entity PROPERTIES
+    PREFIX ""
+    SUFFIX ".dll"
+    FOLDER "mods"
+)
+
 # 先建 DLL 再链接 exe（保证运行前 mods/ 已就绪）
-add_dependencies(sandbox_engine builtin_blocks mod_noise)
+add_dependencies(sandbox_engine builtin_blocks mod_noise player_entity)
 
 # 拷贝挂在各自 DLL 的 POST_BUILD：DLL 重链即同步 mods/ 副本。
 # （挂在 sandbox_engine 上会有漏洞：只改模组源码时 exe 不重链，POST_BUILD 不执行，
@@ -188,7 +204,7 @@ add_custom_command(TARGET builtin_blocks POST_BUILD
 # 用 ALL 目标而不是 DLL 的 POST_BUILD（POST_BUILD 只在 DLL 重新链接时执行）；
 # 先 remove_directory 再 copy_directory（copy_directory 只增不删，删掉的资源会残留）。
 # EXISTS 在配置期求值：新增/删除某模组的 assets 或 data 目录后要重新配置一次。
-foreach(mod_dir blocks noise)
+foreach(mod_dir blocks noise player_entity)
     foreach(res_kind assets data)
         set(res_src "${CMAKE_CURRENT_SOURCE_DIR}/mods_src/${mod_dir}/${res_kind}")
         if(EXISTS "${res_src}")
@@ -209,4 +225,13 @@ add_custom_command(TARGET mod_noise POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/mods_src/noise/mod.json"
         "$<TARGET_FILE_DIR:sandbox_engine>/mods/noise/mod.json"
+)
+# player_entity：DLL + 清单（assets/ 由上面的 foreach 整体拷贝）
+add_custom_command(TARGET player_entity POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:sandbox_engine>/mods/player_entity"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:player_entity>" "$<TARGET_FILE_DIR:sandbox_engine>/mods/player_entity/player_entity.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/mods_src/player_entity/mod.json"
+        "$<TARGET_FILE_DIR:sandbox_engine>/mods/player_entity/mod.json"
 )

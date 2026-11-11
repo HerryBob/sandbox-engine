@@ -72,7 +72,9 @@ bool VulkanContext::init(int width, int height, const char* title) {
     if (!createTextureImageView()) return false;
     if (!createTextureSampler()) return false;
     if (!createUniformObjects()) return false;    // descLayout_ 就绪
-    if (!createEntityTextureResources()) return false; // 实体贴图 + entityDescSet_ 的 binding 1
+    // 实体贴图不在这里加载：贴图路径由模组的实体类型定义决定，而类型表要等
+    // 模组 onLoad 跑完才齐。init 之后由装配层遍历类型表调 loadEntityModel，
+    // 那里再按需 ensureEntityTexture（按路径缓存，同一张只建一次）。
     if (!createPipeline()) return false;          // ← 移到这：引用 descLayout_
     if (!createHudResources()) return false;      // HUD：字体纹理 + 独立管线 + 顶点缓冲（依赖 renderPass_）
     if (!createSyncObjects()) return false;
@@ -862,11 +864,14 @@ void VulkanContext::destroyBodyMesh(int contraptionId) {
 
 bool VulkanContext::loadEntityModel(int entityId, const std::string& bbmodelPath,
                                     const std::string& texturePath) {
-    (void)texturePath;   // 实体贴图由 createEntityTextureResources 统一加载，这里只读模型
-
     engine::assets::EntityModel model;
     if (!engine::assets::loadBbModel(bbmodelPath, model))
         return false;
+
+    // 贴图路径由实体类型定义给出；空串表示"由模型文件自己寻址"。
+    // 模型自寻址（bbmodel 内嵌 base64 导出）还没做，因此空串时直接不加载贴图，
+    // 该实体不绘制——渲染层不再假设"默认玩家贴图"这种东西。
+    const std::string texPath = texturePath;
 
     const mesh::EntityMeshData data = mesh::buildEntityVertices(model);
     if (data.bones.size() != model.bones.size())
@@ -911,6 +916,13 @@ bool VulkanContext::loadEntityModel(int entityId, const std::string& bbmodelPath
     for (std::size_t k = 0; k < gpu.order.size(); ++k)
         for (int c : children[gpu.order[k]]) gpu.order.push_back(c);
 
+    // 贴图：加载失败则 textureSet 保持空，绘制趟跳过这个实体（不影响方块）
+    if (ensureEntityTexture(texPath)) {
+        gpu.textureSet = entityTextures_[texPath].set;
+    } else {
+        LOG_WARN("Vulkan", "实体 id=" + std::to_string(entityId) + " 无可用贴图，将不绘制");
+    }
+
     const std::size_t boneCount = gpu.bones.size();
     entityMeshes_[entityId] = std::move(gpu);
     entityPose_[entityId] = EntityPose{};
@@ -926,9 +938,11 @@ void VulkanContext::setEntityPose(int entityId, double x, double y, double z, fl
     p.yawDeg = yawDeg;
 }
 
+// 可见性写在实例状态（entityPose_）而不是资源（entityMeshes_）：
+// 同一份网格可能被多个实例共用，隐藏其中一个不该连带隐藏别人。
 void VulkanContext::setEntityVisible(int entityId, bool visible) {
-    auto it = entityMeshes_.find(entityId);
-    if (it != entityMeshes_.end()) it->second.visible = visible;
+    auto it = entityPose_.find(entityId);
+    if (it != entityPose_.end()) it->second.visible = visible;
 }
 
 void VulkanContext::destroyEntityModel(int entityId) {
@@ -1043,24 +1057,42 @@ bool VulkanContext::createTextureSampler() {
     return true;
 }
 
-// 实体贴图：独立 64×64 图像 + 采样器，并填 entityDescSet_ 的 binding 1。
-// 与方块图集完全分开——角色是一张整图，不参与图集打包。
-bool VulkanContext::createEntityTextureResources() {
-    const char* path = "assets/textures/entity/Player.png";
+// 确保某张实体贴图已加载：图像 + 视图 + 最近邻采样器 + 自己的 descriptor set。
+// 按路径缓存——同一张贴图被多个实体类型引用时只建一次。
+bool VulkanContext::ensureEntityTexture(const std::string& path) {
+    // 空路径 = 类型定义没给贴图，也没做模型自寻址：直接判无贴图，不占描述符额度。
+    if (path.empty()) return false;
+
+    auto it = entityTextures_.find(path);
+    if (it != entityTextures_.end()) return it->second.set != VK_NULL_HANDLE;
+
+    EntityTextureRes res;
+
+    // 先占一个 descriptor set：池里按 kMaxEntityTextures 预留了额度
+    VkDescriptorSetAllocateInfo setAlloc{};
+    setAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    setAlloc.descriptorPool = descPool_;
+    setAlloc.descriptorSetCount = 1;
+    setAlloc.pSetLayouts = &descLayout_;
+    if (vkAllocateDescriptorSets(device_, &setAlloc, &res.set) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "实体贴图描述符集分配失败：" + path);
+        return false;
+    }
+
     int w = 0, h = 0, ch = 0;
-    stbi_uc* src = stbi_load(path, &w, &h, &ch, STBI_rgb_alpha);
+    stbi_uc* src = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
     if (!src) {
-        LOG_WARN("Vulkan", std::string("实体贴图读不到：") + path + "（实体将不绘制）");
-        return true;   // 缺贴图不算致命：方块照常渲染
+        LOG_WARN("Vulkan", "实体贴图读不到：" + path + "（引用它的实体不绘制）");
+        return false;
     }
 
     const VkDeviceSize size = static_cast<VkDeviceSize>(w) * static_cast<VkDeviceSize>(h) * 4;
     if (!util::createImage(device_, physicalDevice_,
             static_cast<uint32_t>(w), static_cast<uint32_t>(h), VK_FORMAT_R8G8B8A8_SRGB,
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            1, VK_SAMPLE_COUNT_1_BIT, entityTextureImage_, entityTextureMemory_)) {
+            1, VK_SAMPLE_COUNT_1_BIT, res.image, res.memory)) {
         stbi_image_free(src);
-        LOG_ERROR("Vulkan", "实体贴图图像创建失败");
+        LOG_ERROR("Vulkan", "实体贴图图像创建失败：" + path);
         return false;
     }
 
@@ -1078,23 +1110,23 @@ bool VulkanContext::createEntityTextureResources() {
     vkUnmapMemory(device_, stagingMem);
     stbi_image_free(src);
 
-    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, entityTextureImage_,
+    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, res.image,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    util::copyBufferToImage(device_, graphicsQueue_, cmdPool_, staging, entityTextureImage_,
+    util::copyBufferToImage(device_, graphicsQueue_, cmdPool_, staging, res.image,
         static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, entityTextureImage_,
+    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, res.image,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(device_, staging, nullptr);
     vkFreeMemory(device_, stagingMem, nullptr);
 
-    if (!util::createImageView(device_, entityTextureImage_, VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_ASPECT_COLOR_BIT, entityTextureView_)) {
-        LOG_ERROR("Vulkan", "实体贴图视图创建失败");
+    if (!util::createImageView(device_, res.image, VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_ASPECT_COLOR_BIT, res.view)) {
+        LOG_ERROR("Vulkan", "实体贴图视图创建失败：" + path);
         return false;
     }
 
-    // 像素画必须最近邻；64×64 是 2 的幂，CLAMP 防边缘泄漏
+    // 像素画必须最近邻；CLAMP 防边缘泄漏
     VkSamplerCreateInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     si.magFilter = VK_FILTER_NEAREST;
@@ -1104,23 +1136,31 @@ bool VulkanContext::createEntityTextureResources() {
     si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.maxLod = 1.0f;
-    if (vkCreateSampler(device_, &si, nullptr, &entityTextureSampler_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "实体采样器创建失败");
+    if (vkCreateSampler(device_, &si, nullptr, &res.sampler) != VK_SUCCESS) {
+        LOG_ERROR("Vulkan", "实体采样器创建失败：" + path);
         return false;
     }
 
-    VkDescriptorImageInfo ii{entityTextureSampler_, entityTextureView_,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet wr{};
-    wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wr.dstSet = entityDescSet_;
-    wr.dstBinding = 1;
-    wr.descriptorCount = 1;
-    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wr.pImageInfo = &ii;
-    vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+    // binding 0 = 与方块共用的同一个 UBO；binding 1 = 这张贴图
+    VkDescriptorBufferInfo binfo{ uboBuffer_, 0, sizeof(UniformBufferObject) };
+    VkDescriptorImageInfo  ii{ res.sampler, res.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet wr[2]{};
+    wr[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wr[0].dstSet = res.set;
+    wr[0].dstBinding = 0;
+    wr[0].descriptorCount = 1;
+    wr[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    wr[0].pBufferInfo = &binfo;
+    wr[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wr[1].dstSet = res.set;
+    wr[1].dstBinding = 1;
+    wr[1].descriptorCount = 1;
+    wr[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr[1].pImageInfo = &ii;
+    vkUpdateDescriptorSets(device_, 2, wr, 0, nullptr);
 
-    LOG_INFO("Vulkan", "实体贴图就绪：" + std::to_string(w) + "x" + std::to_string(h));
+    entityTextures_[path] = res;
+    LOG_INFO("Vulkan", "实体贴图就绪：" + path + "（" + std::to_string(w) + "x" + std::to_string(h) + "）");
     return true;
 }
 
@@ -1174,13 +1214,17 @@ bool VulkanContext::createUniformObjects() {
         return false;
     }
 
+    // 一套 set 的组成：binding 0 = UBO，binding 1 = 贴图。
+    // 额度 = 方块图集 1 套 + 实体贴图各 1 套。实体贴图数量上限 6 张，
+    // 超出的 ensureEntityTexture 会在分配 set 时报错返回 false（不是崩溃）。
+    constexpr uint32_t kMaxEntityTextures = 6;
     VkDescriptorPoolSize poolSizes[2] = {
-    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2},
-    {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},   // 图集 + 实体贴图各一份
+    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 + kMaxEntityTextures},
+    {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 + kMaxEntityTextures},   // 图集 + 各实体贴图
     };
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 2;                              // 方块一套 + 实体一套
+    poolInfo.maxSets = 1 + kMaxEntityTextures;         // 方块一套 + 每个实体贴图一套
     poolInfo.poolSizeCount = 2;
     poolInfo.pPoolSizes = poolSizes;
     if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descPool_) != VK_SUCCESS) {
@@ -1188,19 +1232,19 @@ bool VulkanContext::createUniformObjects() {
         return false;
     }
 
-    VkDescriptorSetLayout setLayouts[2] = { descLayout_, descLayout_ };
+    // 方块图集那一套在这里一次性分配；实体贴图的 set 由 ensureEntityTexture 按需分配
+    VkDescriptorSetLayout setLayouts[1] = { descLayout_ };
     VkDescriptorSetAllocateInfo setAllocInfo{};
     setAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     setAllocInfo.descriptorPool = descPool_;
-    setAllocInfo.descriptorSetCount = 2;
+    setAllocInfo.descriptorSetCount = 1;
     setAllocInfo.pSetLayouts = setLayouts;
-    VkDescriptorSet sets[2]{};
+    VkDescriptorSet sets[1]{};
     if (vkAllocateDescriptorSets(device_, &setAllocInfo, sets) != VK_SUCCESS) {
         LOG_ERROR("Vulkan", "vkAllocateDescriptorSets 失败");
         return false;
     }
     descSet_ = sets[0];        // 方块图集那套
-    entityDescSet_ = sets[1];  // 实体贴图那套（binding 1 等实体贴图就绪后再写）
 
     VkDescriptorBufferInfo binfo{uboBuffer_, 0, sizeof(UniformBufferObject)};
     VkDescriptorImageInfo iinfo{ textureSampler_, textureImageView_,
@@ -1219,16 +1263,6 @@ bool VulkanContext::createUniformObjects() {
     write[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write[1].pImageInfo = &iinfo;
     vkUpdateDescriptorSets(device_, 2, write, 0, nullptr);
-
-    // 实体那套：binding 0 与方块共用同一个 UBO；binding 1 等贴图就绪后再填
-    VkWriteDescriptorSet writeEntity{};
-    writeEntity.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writeEntity.dstSet = entityDescSet_;
-    writeEntity.dstBinding = 0;
-    writeEntity.descriptorCount = 1;
-    writeEntity.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writeEntity.pBufferInfo = &binfo;
-    vkUpdateDescriptorSets(device_, 1, &writeEntity, 0, nullptr);
 
     LOG_INFO("Vulkan", "MVP uniform 就绪（descriptor set + UBO，相机可操作）");
     return true;
@@ -1442,16 +1476,17 @@ bool VulkanContext::drawFrame() {
         }
     }
 
-    // 实体趟：切到实体贴图那套 descriptor，逐骨骼推世界矩阵后 draw
+    // 实体趟：每个实体绑自己那张贴图的 descriptor，逐骨骼推世界矩阵后 draw
     if (!entityMeshes_.empty()) {
-        vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipelineLayout_, 0, 1, &entityDescSet_, 0, nullptr);
-
         std::vector<glm::mat4> boneWorld;
         for (const auto& [id, em] : entityMeshes_) {
-            if (!em.visible) continue; // 第一人称隐藏自身
+            if (em.textureSet == VK_NULL_HANDLE) continue;    // 没贴图就不画
             const auto pit = entityPose_.find(id);
             if (pit == entityPose_.end()) continue;
+            if (!pit->second.visible) continue;               // 第一人称隐藏自身
+
+            vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipelineLayout_, 0, 1, &em.textureSet, 0, nullptr);
 
             const glm::vec3 pos{static_cast<float>(pit->second.pos.x),
                                 static_cast<float>(pit->second.pos.y),
@@ -1618,10 +1653,14 @@ void VulkanContext::destroyRenderObjects() {
     }
     entityMeshes_.clear();
     entityPose_.clear();
-    if (entityTextureSampler_) { vkDestroySampler(device_, entityTextureSampler_, nullptr); entityTextureSampler_ = VK_NULL_HANDLE; }
-    if (entityTextureView_)    { vkDestroyImageView(device_, entityTextureView_, nullptr); entityTextureView_ = VK_NULL_HANDLE; }
-    if (entityTextureImage_)   { vkDestroyImage(device_, entityTextureImage_, nullptr); entityTextureImage_ = VK_NULL_HANDLE; }
-    if (entityTextureMemory_)  { vkFreeMemory(device_, entityTextureMemory_, nullptr); entityTextureMemory_ = VK_NULL_HANDLE; }
+    // 实体贴图：按路径缓存的多份，逐份释放（descriptor set 随池统一回收，不单独销毁）
+    for (auto& [path, tex] : entityTextures_) {
+        if (tex.sampler) vkDestroySampler(device_, tex.sampler, nullptr);
+        if (tex.view)    vkDestroyImageView(device_, tex.view, nullptr);
+        if (tex.image)   vkDestroyImage(device_, tex.image, nullptr);
+        if (tex.memory)  vkFreeMemory(device_, tex.memory, nullptr);
+    }
+    entityTextures_.clear();
     if (textureSampler_) { vkDestroySampler(device_, textureSampler_, nullptr); textureSampler_ = VK_NULL_HANDLE; }
     if (textureImageView_) { vkDestroyImageView(device_, textureImageView_, nullptr); textureImageView_ = VK_NULL_HANDLE; }
     if (textureImage_) { vkDestroyImage(device_, textureImage_, nullptr); textureImage_ = VK_NULL_HANDLE; }
