@@ -34,3 +34,6 @@ third_party/JoltPhysics/
 
 # 个人通读笔记（逐单元走查记录 + STATE_OF_CODE + 文件分析），本地保留、不入库
 docs/通读记录/
+
+# 学习用参考代码（vulkanStudy 等），本地保留、不入库
+reference/
