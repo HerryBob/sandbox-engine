@@ -14,7 +14,7 @@ VkShaderModule loadShaderModule(VkDevice dev, const char* spvPath) {
     if (!f) {
         std::ostringstream os;
         os << "打不开着色器文件: " << spvPath;
-        LOG_ERROR("Shader", os.str());
+        ENGINE_LOG_ERROR("Shader", os.str());
         return VK_NULL_HANDLE;
     }
     const std::streamsize size = f.tellg();
@@ -30,7 +30,7 @@ VkShaderModule loadShaderModule(VkDevice dev, const char* spvPath) {
     if (vkCreateShaderModule(dev, &createInfo, nullptr, &mod) != VK_SUCCESS) {
         std::ostringstream os;
         os << "vkCreateShaderModule 失败: " << spvPath;
-        LOG_ERROR("Shader", os.str());
+        ENGINE_LOG_ERROR("Shader", os.str());
         return VK_NULL_HANDLE;
     }
     return mod;

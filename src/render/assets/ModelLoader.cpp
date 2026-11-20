@@ -31,7 +31,7 @@ std::uint8_t faceIndexOf(std::string_view s) {
 // 解析 JSON 数组 [x,y,z] → glm::vec3；缺成员/非数组 → 警告 + 返回零向量
 glm::vec3 parseVec3(const rapidjson::Value& v, const char* what, const std::string& rel) {
     if (!v.IsArray() || v.Size() < 3) {
-        LOG_WARN("Model", rel + "：" + what + " 须为 3 元素数组");
+        ENGINE_LOG_WARN("Model", rel + "：" + what + " 须为 3 元素数组");
         return glm::vec3{0.0f};
     }
     return { v[0].GetFloat(), v[1].GetFloat(), v[2].GetFloat() };
@@ -54,7 +54,7 @@ bool decodeModelDef(const rapidjson::Value& doc, ModelDef& def, const std::strin
     // elements：盒子列表（可以没有——几何来自 parent）
     if (!doc.HasMember("elements") || !doc["elements"].IsArray()) {
         if (def.parent.empty()) {
-            LOG_WARN("Model", rel + " 缺 elements 且无 parent → 跳过");
+            ENGINE_LOG_WARN("Model", rel + " 缺 elements 且无 parent → 跳过");
             return false;
         }
         return true;
@@ -63,7 +63,7 @@ bool decodeModelDef(const rapidjson::Value& doc, ModelDef& def, const std::strin
         if (!el.IsObject()) continue;
         ModelElement me;
         if (!el.HasMember("from") || !el.HasMember("to")) {
-            LOG_WARN("Model", rel + " 某元素缺 from/to → 跳过该元素");
+            ENGINE_LOG_WARN("Model", rel + " 某元素缺 from/to → 跳过该元素");
             continue;
         }
         me.from = parseVec3(el["from"], "from", rel);
@@ -76,7 +76,7 @@ bool decodeModelDef(const rapidjson::Value& doc, ModelDef& def, const std::strin
             if (rv.HasMember("axis") && rv["axis"].IsString()) {
                 const std::string a = rv["axis"].GetString();
                 if (!a.empty() && (a[0] == 'x' || a[0] == 'y' || a[0] == 'z')) me.rotation.axis = a[0];
-                else LOG_WARN("Model", rel + " rotation.axis 须为 x/y/z");
+                else ENGINE_LOG_WARN("Model", rel + " rotation.axis 须为 x/y/z");
             }
             if (rv.HasMember("angle") && rv["angle"].IsNumber())
                 me.rotation.angle = rv["angle"].GetFloat();
@@ -105,7 +105,7 @@ bool decodeModelDef(const rapidjson::Value& doc, ModelDef& def, const std::strin
 
     // 元素全被过滤掉时：有 parent 仍能继承父几何，否则非法
     if (def.elements.empty() && def.parent.empty()) {
-        LOG_WARN("Model", rel + " 无有效元素且无 parent → 跳过");
+        ENGINE_LOG_WARN("Model", rel + " 无有效元素且无 parent → 跳过");
         return false;
     }
     return true;
@@ -158,13 +158,13 @@ bool resolveOne(const std::string& name,
     }
 
     if (!visiting.insert(name).second) {
-        LOG_WARN("Model", "parent 循环引用：" + name);
+        ENGINE_LOG_WARN("Model", "parent 循环引用：" + name);
         return false;
     }
 
     const auto self = raw.find(name);
     if (self == raw.end()) {
-        LOG_WARN("Model", "parent 指向不存在的模型：" + name);
+        ENGINE_LOG_WARN("Model", "parent 指向不存在的模型：" + name);
         visiting.erase(name);
         return false;
     }
@@ -188,7 +188,7 @@ bool resolveOne(const std::string& name,
     visiting.erase(name);
 
     if (result.elements.empty()) {
-        LOG_WARN("Model", "最终无几何（自身与父都没有 elements）：" + name);
+        ENGINE_LOG_WARN("Model", "最终无几何（自身与父都没有 elements）：" + name);
         return false;
     }
 
@@ -225,7 +225,7 @@ void resolveModelParents() {
         if (it != resolved.end()) v = it->second;
     });
 
-    LOG_INFO("Model", "parent 烘焙 " + std::to_string(resolved.size()) + " 条，失败兜底 " +
+    ENGINE_LOG_INFO("Model", "parent 烘焙 " + std::to_string(resolved.size()) + " 条，失败兜底 " +
                       std::to_string(failed) + " 条");
 
     // ④ 逐条诊断：烘焙后的元素数与关键面纹理（验收与走查用）
@@ -238,7 +238,7 @@ void resolveModelParents() {
             line += " +Y=" + el.faces[2].texture;
             line += " -Y=" + el.faces[3].texture;
         }
-        LOG_INFO("Model", line);
+        ENGINE_LOG_INFO("Model", line);
     }
 }
 

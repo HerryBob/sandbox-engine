@@ -79,7 +79,7 @@ void JsonRegistry<T>::load(ResourceKind kind, const std::string& relDir,
                            const char* tag) {
     const std::vector<std::string> files = g_resourceIndex.list(kind, relDir, ext);
     if (files.empty()) {
-        LOG_WARN(tag, "索引中没有 " + relDir + "/*" + ext);
+        ENGINE_LOG_WARN(tag, "索引中没有 " + relDir + "/*" + ext);
         return;
     }
 
@@ -88,7 +88,7 @@ void JsonRegistry<T>::load(ResourceKind kind, const std::string& relDir,
     for (const std::string& rel : files) {
         std::filesystem::path path;
         if (!g_resourceIndex.find(kind, rel, path)) {
-            LOG_WARN(tag, "文件丢失：" + rel);
+            ENGINE_LOG_WARN(tag, "文件丢失：" + rel);
             ++failed;
             continue;
         }
@@ -96,7 +96,7 @@ void JsonRegistry<T>::load(ResourceKind kind, const std::string& relDir,
 
         std::ifstream in(path);
         if (!in) {
-            LOG_WARN(tag, "无法打开：" + rel + "（由 " + owner + " 提供）");
+            ENGINE_LOG_WARN(tag, "无法打开：" + rel + "（由 " + owner + " 提供）");
             ++failed;
             continue;
         }
@@ -106,14 +106,14 @@ void JsonRegistry<T>::load(ResourceKind kind, const std::string& relDir,
 
         rapidjson::Document doc;
         if (doc.Parse(text.c_str()).HasParseError()) {
-            LOG_WARN(tag, "解析失败：" + rel + "（由 " + owner + " 提供）");
+            ENGINE_LOG_WARN(tag, "解析失败：" + rel + "（由 " + owner + " 提供）");
             ++failed;
             continue;
         }
 
         T value;
         if (!decode(doc, value, rel)) {
-            LOG_WARN(tag, "定义非法：" + rel + "（由 " + owner + " 提供）");
+            ENGINE_LOG_WARN(tag, "定义非法：" + rel + "（由 " + owner + " 提供）");
             ++failed;
             continue;
         }
@@ -121,7 +121,7 @@ void JsonRegistry<T>::load(ResourceKind kind, const std::string& relDir,
         const std::string name = std::filesystem::path(rel).stem().string();
         auto it = items_.find(name);
         if (it != items_.end()) {
-            LOG_WARN(tag, "冲突：" + rel + " 已由 " + it->second.owner +
+            ENGINE_LOG_WARN(tag, "冲突：" + rel + " 已由 " + it->second.owner +
                             " 提供，忽略 " + owner);
             continue;
         }
@@ -129,7 +129,7 @@ void JsonRegistry<T>::load(ResourceKind kind, const std::string& relDir,
         ++loaded;
     }
 
-    LOG_INFO(tag, "注册 " + std::to_string(loaded) + " 条（" + relDir + "），失败 " +
+    ENGINE_LOG_INFO(tag, "注册 " + std::to_string(loaded) + " 条（" + relDir + "），失败 " +
                   std::to_string(failed) + " 条");
 }
 

@@ -23,7 +23,8 @@ struct ChunkPos {
 };
 
 // 世界坐标 → 区块坐标（算术右移向下取整：-1 属于 chunk -1，块内 15）。
-inline ChunkPos chunkOf(const BlockPos& p) {
+// 这里 >> 4 强绑定区块大小
+inline ChunkPos toChunkOf(const BlockPos& p) {
     return ChunkPos{p.x >> 4, p.y >> 4, p.z >> 4};
 }
 

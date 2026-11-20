@@ -1,6 +1,7 @@
-﻿// 沙盒引擎 · 单机入口
+// 沙盒引擎 · 单机入口
 // 引擎本体在 core/business/physics/input/render；本文件只做装配：
 //   Vulkan 上下文 → 进程内 SPSC 队列 → 四线程启动 → 主线程 GLFW 事件循环 → 优雅停止。
+#include "SelfTest.hpp"
 #include "business/BusinessWorld.hpp"
 #include "business/PhysicsBridge.hpp"
 #include "business/RenderBridge.hpp"
@@ -83,241 +84,6 @@ static void chdirToExeDir() {
 #endif
 }
 
-// ChunkData 自检：坐标编解码互逆 + 调色板 4→8→16 两档扩宽后逐格内容不变、计数正确。
-static bool selfTestPalette() {
-    // ⓪ indexOf / localOf 严格互逆（16³ 全部组合，任一处改动未同步即失败）
-    for (int z = 0; z < 16; ++z)
-        for (int y = 0; y < 16; ++y)
-            for (int x = 0; x < 16; ++x) {
-                const auto i = shared::ChunkData::indexOf(x, y, z);
-                const auto p = shared::ChunkData::localOf(i);
-                if (p.x != x || p.y != y || p.z != z) return false;
-            }
-
-    // ① 新 chunk 全空
-    shared::ChunkData blank;
-    if (!blank.isAllAir() || blank.nonAirCount() != 0) return false;
-    if (blank.bits() != 4 || blank.paletteSize() != 1) return false;
-
-    // ② 4→8 扩宽（第 17 个条目触发）
-    shared::ChunkData a;
-    for (int i = 0; i < 20; ++i)
-        a.set(i % 16, (i / 16) % 16, 0, static_cast<shared::PaletteEntry>(2000 + i));
-    if (a.bits() != 8 || a.paletteSize() != 21) return false;
-    for (int i = 0; i < 20; ++i)
-        if (a.get(i % 16, (i / 16) % 16, 0) != static_cast<shared::PaletteEntry>(2000 + i))
-            return false;
-    if (a.nonAirCount() != 20) return false;
-
-    // ③ 8→16 扩宽（第 257 个条目触发），写满 300 项后再逐格核对
-    shared::ChunkData b;
-    for (int i = 0; i < 300; ++i)
-        b.set(i % 16, (i / 16) % 16, i / 256, static_cast<shared::PaletteEntry>(3000 + i));
-    if (b.bits() != 16 || b.paletteSize() != 301) return false;
-    for (int i = 0; i < 300; ++i)
-        if (b.get(i % 16, (i / 16) % 16, i / 256) !=
-            static_cast<shared::PaletteEntry>(3000 + i))
-            return false;
-    for (std::int32_t i = 300; i < shared::CHUNK_VOLUME; ++i)
-        if (b.getAt(i) != shared::kAirEntry) return false;
-    if (b.nonAirCount() != 300) return false;
-
-    // ④ 写回 Air：字典里仍留着非空气条目，判空必须逐格扫完才返回 true
-    shared::ChunkData c;
-    const shared::PaletteEntry five = static_cast<shared::PaletteEntry>(5);
-    c.set(1, 1, 1, five);
-    if (c.get(1, 1, 1) != five) return false;
-    c.set(1, 1, 1, shared::kAirEntry);
-    if (!c.isAllAir() || c.nonAirCount() != 0) return false;
-    return true;
-}
-
-// 元素级旋转：绕轴旋转公式 + 原点不动，纯数学自检（不依赖图集与窗口）
-static bool selfTestModelRotation() {
-    using engine::assets::applyModelRotation;
-    using engine::assets::ModelRotation;
-
-    // ① 绕 Z 轴 45°：点 (16,8,8) 绕原点 (8,8,8) → (8+8cos45, 8+8sin45, 8)
-    ModelRotation rz;
-    rz.origin = glm::vec3{8.0f, 8.0f, 8.0f};
-    rz.axis = 'z';
-    rz.angle = 45.0f;
-    const glm::vec3 a = applyModelRotation(glm::vec3{16.0f, 8.0f, 8.0f}, rz);
-    const float e = 8.0f + 8.0f * 0.70710678f;
-    if (std::fabs(a.x - e) > 0.01f || std::fabs(a.y - e) > 0.01f || std::fabs(a.z - 8.0f) > 0.01f)
-        return false;
-
-    // ② 旋转原点自身不动
-    const glm::vec3 o = applyModelRotation(rz.origin, rz);
-    if (std::fabs(o.x - 8.0f) > 0.01f || std::fabs(o.y - 8.0f) > 0.01f || std::fabs(o.z - 8.0f) > 0.01f)
-        return false;
-
-    // ③ 绕 Y 轴 90°：+X 转到 -Z（右手系）
-    ModelRotation ry;
-    ry.origin = glm::vec3{8.0f, 8.0f, 8.0f};
-    ry.axis = 'y';
-    ry.angle = 90.0f;
-    const glm::vec3 b = applyModelRotation(glm::vec3{16.0f, 8.0f, 8.0f}, ry);
-    if (std::fabs(b.x - 8.0f) > 0.01f || std::fabs(b.y - 8.0f) > 0.01f || std::fabs(b.z - 0.0f) > 0.01f)
-        return false;
-
-    // ④ 绕 X 轴 90°：+Y 转到 +Z
-    ModelRotation rx;
-    rx.origin = glm::vec3{8.0f, 8.0f, 8.0f};
-    rx.axis = 'x';
-    rx.angle = 90.0f;
-    const glm::vec3 d = applyModelRotation(glm::vec3{8.0f, 16.0f, 8.0f}, rx);
-    if (std::fabs(d.x - 8.0f) > 0.01f || std::fabs(d.y - 8.0f) > 0.01f || std::fabs(d.z - 16.0f) > 0.01f)
-        return false;
-
-    return true;
-}
-
-// 元素级旋转的几何落点：直接跑 buildModelVertices，验旋转后顶点的包围盒尺寸。
-// 公式自检只证明数学，这里证明"模型里的 rotation 字段确实进到了顶点"。
-static bool selfTestModelGeometry() {
-    using engine::render::Vertex;
-
-    engine::assets::ModelDef def;
-    engine::assets::ModelElement el;
-    el.from = glm::vec3{0.0f, 0.0f, 0.0f};
-    el.to   = glm::vec3{16.0f, 16.0f, 16.0f};
-    for (int f = 0; f < 6; ++f) {
-        el.faces[f].texture = "default";
-        el.faces[f].cullFace = 0;          // 永不剔 → 6 面全生成
-    }
-    el.rotation.origin = glm::vec3{8.0f, 8.0f, 8.0f};
-    el.rotation.axis = 'z';
-    el.rotation.angle = 45.0f;
-    def.elements.push_back(el);
-
-    engine::assets::TextureAtlas emptyAtlas;   // 空图集：纹理走兜底格，不影响位置
-    const std::vector<Vertex> verts =
-        engine::render::mesh::buildModelVertices(glm::vec3{0.0f, 0.0f, 0.0f}, def, 0u, emptyAtlas);
-    if (verts.size() != 24) return false;      // 6 面 × 4 顶点
-
-    // 绕 Z 转 45°：X/Y 跨度 16√2 ≈ 22.627，Z 跨度仍 16；÷16 后 → 1.414 / 1.0
-    glm::vec3 lo{1e30f, 1e30f, 1e30f};
-    glm::vec3 hi{-1e30f, -1e30f, -1e30f};
-    for (const Vertex& v : verts) {
-        lo = glm::min(lo, v.pos);
-        hi = glm::max(hi, v.pos);
-    }
-    const glm::vec3 span = hi - lo;
-    const float diag = 22.6274f * 0.0625f;
-    if (std::fabs(span.x - diag) > 0.05f) return false;
-    if (std::fabs(span.y - diag) > 0.05f) return false;
-    if (std::fabs(span.z - 1.0f) > 0.05f) return false;
-
-    // 同一元素不旋转：三轴跨度都应是 1.0（确认走的是同一条路径的恒等分支）
-    def.elements.front().rotation.angle = 0.0f;
-    const std::vector<Vertex> plain =
-        engine::render::mesh::buildModelVertices(glm::vec3{0.0f, 0.0f, 0.0f}, def, 0u, emptyAtlas);
-    if (plain.size() != 24) return false;
-    glm::vec3 lo2{1e30f, 1e30f, 1e30f};
-    glm::vec3 hi2{-1e30f, -1e30f, -1e30f};
-    for (const Vertex& v : plain) {
-        lo2 = glm::min(lo2, v.pos);
-        hi2 = glm::max(hi2, v.pos);
-    }
-    const glm::vec3 span2 = hi2 - lo2;
-    if (std::fabs(span2.x - 1.0f) > 0.01f) return false;
-    if (std::fabs(span2.y - 1.0f) > 0.01f) return false;
-    if (std::fabs(span2.z - 1.0f) > 0.01f) return false;
-
-    return true;
-}
-
-// 刚体网格：3×3×3 = 27 方块，内部接触面全剔除 → 外层 6×9 = 54 面 = 216 顶点。
-// 空图集走兜底 UV、空注册表走立方体兜底——验的是"只按刚体内部剔除"这条逻辑。
-static bool selfTestBodyMesh() {
-    using engine::shared::Block;
-    using engine::shared::BlockPos;
-    using engine::shared::BlockType;
-
-    std::vector<Block> blocks;
-    blocks.reserve(27);
-    for (int x = -1; x <= 1; ++x)
-        for (int y = -1; y <= 1; ++y)
-            for (int z = -1; z <= 1; ++z)
-                blocks.push_back(Block{static_cast<BlockType>(1), BlockPos{x, y, z}, 0});
-
-    engine::assets::TextureAtlas emptyAtlas;   // 空图集：纹理走兜底格，不影响几何
-    const engine::render::mesh::BodyMeshData body =
-        engine::render::mesh::buildBodyVertices(blocks, emptyAtlas);
-
-    const std::size_t faces = body.indices.size() / 6;
-    const std::size_t verts = body.vertices.size();
-    const bool ok = (faces == 54 && verts == 216);
-
-    std::cout << "刚体网格：3×3×3 面=" << faces << " 顶点=" << verts
-              << (ok ? " 自检通过" : " 自检失败") << "\n";
-    return ok;
-}
-
-// 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
-static bool selfTestModSorter() {
-    using engine::modhost::ModManifest;
-    using engine::modhost::ModPhase;
-    using engine::modhost::ModSorter;
-    using engine::modhost::SortResult;
-
-    // ① 批次倒序：builtin 依赖 normal → 必须拒绝（normal 在它之后才加载）
-    {
-        std::vector<ModManifest> items(2);
-        items[0].id = "a_early";
-        items[0].phase = ModPhase::Builtin;
-        items[0].dependencies.push_back("b_late");
-        items[1].id = "b_late";
-        items[1].phase = ModPhase::Normal;
-
-        const SortResult r = ModSorter::sort(items);
-        if (r.rejected.size() != 1 || r.rejected[0].index != 0) return false;
-        if (r.order.size() != 1 || r.order[0] != 1) return false;
-    }
-
-    // ② 正常跨批：normal 依赖 builtin → 放行，且 builtin 先出队
-    {
-        std::vector<ModManifest> items(2);
-        items[0].id = "a_normal";
-        items[0].phase = ModPhase::Normal;
-        items[0].dependencies.push_back("b_builtin");
-        items[1].id = "b_builtin";
-        items[1].phase = ModPhase::Builtin;
-
-        const SortResult r = ModSorter::sort(items);
-        if (!r.rejected.empty()) return false;
-        if (r.order.size() != 2) return false;
-        if (r.order[0] != 1 || r.order[1] != 0) return false;
-    }
-
-    // ③ 依赖的 id 不存在 → 拒绝
-    {
-        std::vector<ModManifest> items(1);
-        items[0].id = "a_ghost";
-        items[0].dependencies.push_back("nobody");
-
-        const SortResult r = ModSorter::sort(items);
-        if (r.rejected.size() != 1 || r.rejected[0].index != 0) return false;
-        if (!r.order.empty()) return false;
-    }
-
-    // ④ 同批次环：a ↔ b → 双方都拒绝
-    {
-        std::vector<ModManifest> items(2);
-        items[0].id = "a_ring";
-        items[0].dependencies.push_back("b_ring");
-        items[1].id = "b_ring";
-        items[1].dependencies.push_back("a_ring");
-
-        const SortResult r = ModSorter::sort(items);
-        if (r.rejected.size() != 2) return false;
-        if (!r.order.empty()) return false;
-    }
-
-    return true;
-}
-
 // 引擎主流程：装配四轨 → 启动 → 主线程事件循环 → 优雅停止。
 // presetName：世界预设名（不带 .json），由启动参数 --preset 决定。
 static int run(const std::string& presetName) {
@@ -365,19 +131,19 @@ static int run(const std::string& presetName) {
     engine::worldgen::NoiseRegistry::freeze();
 
     //区块调色板（ChunkData）：坐标编解码互逆 + 4/8/16 位扩宽 + 判空自检，装配期跑一次。
-    const bool paletteOk = selfTestPalette();
+    const bool paletteOk = engine::selftest::palette();
 
     //元素级旋转（ModelElement::rotation）：绕轴旋转公式自检。
-    const bool modelRotOk = selfTestModelRotation();
+    const bool modelRotOk = engine::selftest::modelRotation();
 
     //元素级旋转的几何落点：rotation 字段 → buildModelVertices 顶点位置。
-    const bool modelGeoOk = selfTestModelGeometry();
+    const bool modelGeoOk = engine::selftest::modelGeometry();
 
     //刚体网格（可动方块组）：3×3×3 内部剔除 → 54 面 / 216 顶点。
-    const bool bodyMeshOk = selfTestBodyMesh();
+    const bool bodyMeshOk = engine::selftest::bodyMesh();
 
     //模组排序（ModSorter）：跨批次依赖方向、缺失依赖、同批环。
-    const bool sorterOk = selfTestModSorter();
+    const bool sorterOk = engine::selftest::modSorter();
 
     //世界生成数据（data/worldgen/noise/*.json）：扫全目录、逐个解码注册，之后按名字查表。
     //必须在预设加载之前——PresetLoader 只查这张表，不再自己读噪声文件。
@@ -703,18 +469,24 @@ static int run(const std::string& presetName) {
             engine::shared::BodyPose bodyPose;
             while (renderBridge.bodyPoseQueue().pop(bodyPose)) {
                 vkCtx.setBodyPose(bodyPose.contraptionId,
-                                  bodyPose.x, bodyPose.y, bodyPose.z);
+                                  bodyPose.x, bodyPose.y, bodyPose.z,
+                                  bodyPose.qx, bodyPose.qy, bodyPose.qz, bodyPose.qw);
             }
 
             // 玩家模型位姿：直读共享槽（原子）。位置语义 = 脚底中心，与模型原点一致。
-            // 朝向暂固定 0（模型面朝 +Z），等程序化动画阶段接 yaw。
             // playerEntityId 由装配层按类型名解析；-1 表示没有玩家实体，跳过。
             if (playerEntityId > 0 && playerBodyState.valid.load(std::memory_order_relaxed)) {
-                vkCtx.setEntityPose(playerEntityId,
-                    playerBodyState.x.load(std::memory_order_relaxed),
-                    playerBodyState.y.load(std::memory_order_relaxed),
-                    playerBodyState.z.load(std::memory_order_relaxed),
-                    0.0f);
+                // 插值读：模型位置必须与相机取同一个插值结果。否则两者错开一拍，
+                // 第三人称下会看到"相机平滑、角色仍在 40ms 一跳"的相对运动，反而更刺眼。
+                double px = 0.0, py = 0.0, pz = 0.0;
+                playerBodyState.readInterpolated(px, py, pz);
+
+                // 朝向换算：相机 yaw = 0 朝 -Z，模型 yawDeg = 0 脸朝 +Z，两套约定差一个镜像，
+                // 所以取 180° - yaw。yaw 是累加量，不归一化（glm::rotate 接受任意角度）。
+                const double yawRad = playerBodyState.yaw.load(std::memory_order_relaxed);
+                const double modelYawDeg = 180.0 - yawRad * (180.0 / 3.14159265358979323846);
+                vkCtx.setEntityPose(playerEntityId, px, py, pz,
+                                    static_cast<float>(modelYawDeg));
             }
             // 第一人称隐藏自身模型：相机就在眼位，模型会糊满整个视野。
             // viewMode：0=自由相机 1=第一人称 2=第三人称（见 CameraState）。
@@ -764,10 +536,10 @@ static engine::core::LogLevel parseLogLevelArg(int argc, char** argv) {
         const std::string arg(argv[i]);
         const std::string prefix = "--log-level=";
         if (arg.rfind(prefix, 0) == 0) {
-            level = engine::core::parseLogLevel(arg.substr(prefix.size()), level);
+            level = engine::core::logParseLevel(arg.substr(prefix.size()), level);
         } else if (arg == "--log-level" && (i + 1) < argc) {
             ++i;
-            level = engine::core::parseLogLevel(argv[i], level);
+            level = engine::core::logParseLevel(argv[i], level);
         }
     }
     return level;
@@ -791,8 +563,8 @@ int main(int argc, char** argv) {
     chdirToExeDir();
 
     // 日志：控制台 + logs/engine.log（10MB×5 滚动），异步写不阻塞线程。
-    engine::core::initLog(parseLogLevelArg(argc, argv));
-    engine::core::setLogThreadName("main");   // 主线程标识；子线程由 ThreadLoop::start 自动登记
+    engine::core::logInit(parseLogLevelArg(argc, argv));
+    engine::core::logSetThreadName("main");   // 主线程标识；子线程由 ThreadLoop::start 自动登记
 
     // 临时自检入口：--check-model [模型路径] 只加载实体模型并打印骨骼表，用于核对解析结果。
     // 不给路径时用玩家模组里的模型（模型版权归模组，引擎 assets 里不再留副本）。
@@ -804,7 +576,7 @@ int main(int argc, char** argv) {
         engine::assets::EntityModel em;
         const bool ok = engine::assets::loadBbModel(modelPath, em);
         if (!ok) {
-            engine::core::shutdownLog();
+            engine::core::logShutdown();
             return 2;
         }
         std::cout << "[实体] 模型=" << modelPath << " 骨骼=" << em.bones.size()
@@ -817,12 +589,12 @@ int main(int argc, char** argv) {
                       << " from=(" << b.cubes[0].from.x << "," << b.cubes[0].from.y << "," << b.cubes[0].from.z << ")"
                       << " to=(" << b.cubes[0].to.x << "," << b.cubes[0].to.y << "," << b.cubes[0].to.z << ")\n";
         }
-        engine::core::shutdownLog();
+        engine::core::logShutdown();
         return 0;
     }
 
     const int code = run(parsePresetArg(argc, argv));
 
-    engine::core::shutdownLog();   // 停止后台线程并 flush 剩余队列
+    engine::core::logShutdown();   // 停止后台线程并 flush 剩余队列
     return code;
 }

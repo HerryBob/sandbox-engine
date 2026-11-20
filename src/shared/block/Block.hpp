@@ -41,6 +41,7 @@ struct Block {
     BlockType type = BlockType::Air;
     BlockPos  pos;
     int       contraptionId = -1; // -1=主世界，≥0=刚体（局部坐标）
+    //这里有些问题 不应该将刚体属性合并到这里
 };
 
 } // namespace engine::shared

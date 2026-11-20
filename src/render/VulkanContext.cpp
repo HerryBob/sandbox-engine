@@ -29,7 +29,7 @@ namespace engine::render {
 // 初始化渲染上下文：窗口→实例→设备→交换链→管线→每帧对象，任一失败返回 false
 bool VulkanContext::init(int width, int height, const char* title) {
     if (glfwInit() != GLFW_TRUE) {
-        LOG_ERROR("Vulkan", "glfw 初始化失败");
+        ENGINE_LOG_ERROR("Vulkan", "glfw 初始化失败");
         return false;
     }
     glfwInitialized_ = true;
@@ -37,7 +37,7 @@ bool VulkanContext::init(int width, int height, const char* title) {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     window_ = glfwCreateWindow(width, height, title, nullptr, nullptr);
     if (!window_) {
-        LOG_ERROR("Vulkan", "glfwCreateWindow 失败");
+        ENGINE_LOG_ERROR("Vulkan", "glfwCreateWindow 失败");
         return false;
     }
     glfwSetWindowUserPointer(window_, this);
@@ -46,7 +46,7 @@ bool VulkanContext::init(int width, int height, const char* title) {
     {
         std::ostringstream os;
         os << "GLFW 窗口已创建 " << width << "x" << height;
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
     //注册准星
     glfwSetInputMode(window_, GLFW_CURSOR, GLFW_CURSOR_DISABLED);//禁用鼠标光标
@@ -59,7 +59,7 @@ bool VulkanContext::init(int width, int height, const char* title) {
     if (!createSwapchain()) return false;
     depthFormat_ = util::pickDepthFormat(physicalDevice_); // 深度格式探测（RX 6750 GRE 支持 D32）
     if (depthFormat_ == VK_FORMAT_UNDEFINED) {
-        LOG_ERROR("Vulkan", "无支持的深度格式");
+        ENGINE_LOG_ERROR("Vulkan", "无支持的深度格式");
         return false;
     }
     msaaSamples_ = util::getMaxUsableSampleCount(physicalDevice_); // 先问出采样数（后面全用它）
@@ -98,12 +98,12 @@ bool VulkanContext::createInstance() {
         else {
             std::ostringstream os;
             os << "实例扩展不可用（跳过）: " << ext;
-            LOG_WARN("Vulkan", os.str());
+            ENGINE_LOG_WARN("Vulkan", os.str());
         }
 
     std::vector<const char*> enabledLayers;
     if (util::hasInstanceLayer(util::kValidationLayer)) enabledLayers.push_back(util::kValidationLayer);
-    else LOG_WARN("Vulkan", "验证层不可用，跳过（发布环境正常）");
+    else ENGINE_LOG_WARN("Vulkan", "验证层不可用，跳过（发布环境正常）");
 
     VkInstanceCreateInfo instanceInfo{};
     instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -117,14 +117,14 @@ bool VulkanContext::createInstance() {
     if (r != VK_SUCCESS) {
         std::ostringstream os;
         os << "vkCreateInstance 失败 result=" << r;
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
     {
         std::ostringstream os;
         os << "实例创建成功（扩展 " << enabledExts.size()
            << " 验证层 " << enabledLayers.size() << "）";
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
     return true;
 }
@@ -135,10 +135,10 @@ bool VulkanContext::createSurface() {
     if (r != VK_SUCCESS) {
         std::ostringstream os;
         os << "glfwCreateWindowSurface 失败 result=" << r;
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
-    LOG_INFO("Vulkan", "surface 创建成功（窗口↔GPU 连接点）");
+    ENGINE_LOG_INFO("Vulkan", "surface 创建成功（窗口↔GPU 连接点）");
     return true;
 }
 
@@ -146,7 +146,7 @@ bool VulkanContext::createSurface() {
 bool VulkanContext::pickDevice() {
     devices_ = util::enumeratePhysicalDevices(instance_);
     if (devices_.empty()) {
-        LOG_ERROR("Vulkan", "未找到物理设备（无显卡？）");
+        ENGINE_LOG_ERROR("Vulkan", "未找到物理设备（无显卡？）");
         return false;
     }
 
@@ -158,7 +158,7 @@ bool VulkanContext::pickDevice() {
            << " | " << util::deviceTypeName(p.deviceType)
            << " | API " << VK_VERSION_MAJOR(p.apiVersion) << "."
            << VK_VERSION_MINOR(p.apiVersion) << "." << VK_VERSION_PATCH(p.apiVersion);
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
 
     VkPhysicalDevice chosen = VK_NULL_HANDLE;
@@ -170,7 +170,7 @@ bool VulkanContext::pickDevice() {
         if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) break; // 离散卡已是最优
     }
     if (chosen == VK_NULL_HANDLE) {
-        LOG_ERROR("Vulkan", "无支持 surface 呈现的设备");
+        ENGINE_LOG_ERROR("Vulkan", "无支持 surface 呈现的设备");
         return false;
     }
     physicalDevice_ = chosen;
@@ -181,14 +181,14 @@ bool VulkanContext::pickDevice() {
 bool VulkanContext::createDevice() {
     graphicsQueueFamily_ = util::findGraphicsPresentFamily(physicalDevice_, surface_);
     if (graphicsQueueFamily_ == UINT32_MAX) {
-        LOG_ERROR("Vulkan", "无 graphics+present 队列族");
+        ENGINE_LOG_ERROR("Vulkan", "无 graphics+present 队列族");
         return false;
     }
     {
         std::ostringstream os;
         os << "选中队列族 #" << graphicsQueueFamily_
            << "（graphics+present，容量 " << util::queueFamilyQueueCount(physicalDevice_, graphicsQueueFamily_) << "）";
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
 
     const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
@@ -213,11 +213,11 @@ bool VulkanContext::createDevice() {
     if (r != VK_SUCCESS) {
         std::ostringstream os;
         os << "vkCreateDevice 失败 result=" << r;
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
     vkGetDeviceQueue(device_, graphicsQueueFamily_, 0, &graphicsQueue_);
-    LOG_INFO("Vulkan", "逻辑设备创建成功（图形队列就绪）");
+    ENGINE_LOG_INFO("Vulkan", "逻辑设备创建成功（图形队列就绪）");
     return true;
 }
 
@@ -252,7 +252,7 @@ bool VulkanContext::createSwapchain() {
     if (r != VK_SUCCESS) {
         std::ostringstream os;
         os << "vkCreateSwapchainKHR 失败 result=" << r;
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
 
@@ -276,7 +276,7 @@ bool VulkanContext::createSwapchain() {
         vci.subresourceRange.layerCount = 1;
         VkImageView view;
         if (vkCreateImageView(device_, &vci, nullptr, &view) != VK_SUCCESS) {
-            LOG_ERROR("Vulkan", "vkCreateImageView 失败");
+            ENGINE_LOG_ERROR("Vulkan", "vkCreateImageView 失败");
             return false;
         }
         swapchainImageViews_.push_back(view);
@@ -288,7 +288,7 @@ bool VulkanContext::createSwapchain() {
            << " 格式=" << swapchainFormat_
            << " 尺寸=" << swapchainExtent_.width << "x" << swapchainExtent_.height
            << " 呈现=" << (presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX(低延迟)" : "FIFO(vsync)");
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
     return true;
 }
@@ -319,14 +319,14 @@ bool VulkanContext::recreateSwapchain() {
         std::ostringstream os;
         os << "[重建] 触发 recreateSwapchain（新尺寸 "
            << w << "x" << h << "）";
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
     if (w == 0 || h == 0) {
         // 窗口最小化/拖成 0 尺寸：extent 无效，无法重建 → 直接返回，等下一帧再试
         // （绝不能 while 阻塞等事件：渲染线程会卡死，主线程 join 也跟着卡死）
         std::ostringstream os;
         os << "[重建] 尺寸为 0，跳过本帧（等窗口恢复）";
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
         return false;
     }
     vkDeviceWaitIdle(device_); // 必须！确保所有队列上的旧资源引用已执行完
@@ -335,10 +335,10 @@ bool VulkanContext::recreateSwapchain() {
     destroySwapchain();        // 交换链 + 图像视图
     destroyColorResources();   // MSAA 颜色图（尺寸绑定）
     destroyDepthResources();   // 深度图（尺寸绑定）
-    if (!createSwapchain()) { LOG_ERROR("Vulkan", "重建失败：swapchain");     return false; }
-    if (!createColorResources()) { LOG_ERROR("Vulkan", "重建失败：MSAA 颜色图"); return false; }
-    if (!createDepthResources()) { LOG_ERROR("Vulkan", "重建失败：深度图");      return false; }
-    if (!createFramebuffers()) { LOG_ERROR("Vulkan", "重建失败：帧缓冲");      return false; }
+    if (!createSwapchain()) { ENGINE_LOG_ERROR("Vulkan", "重建失败：swapchain");     return false; }
+    if (!createColorResources()) { ENGINE_LOG_ERROR("Vulkan", "重建失败：MSAA 颜色图"); return false; }
+    if (!createDepthResources()) { ENGINE_LOG_ERROR("Vulkan", "重建失败：深度图");      return false; }
+    if (!createFramebuffers()) { ENGINE_LOG_ERROR("Vulkan", "重建失败：帧缓冲");      return false; }
     framebufferResized_ = false;
     return true;
 }
@@ -404,10 +404,10 @@ bool VulkanContext::createRenderPass() {
     renderPassInfo.pDependencies = &dep;
 
     if (vkCreateRenderPass(device_, &renderPassInfo, nullptr, &renderPass_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "vkCreateRenderPass 失败");
+        ENGINE_LOG_ERROR("Vulkan", "vkCreateRenderPass 失败");
         return false;
     }
-    LOG_INFO("Vulkan", "RenderPass 创建成功（颜色 CLEAR→画→STORE 呈现 + 深度 CLEAR→画→丢弃）");
+    ENGINE_LOG_INFO("Vulkan", "RenderPass 创建成功（颜色 CLEAR→画→STORE 呈现 + 深度 CLEAR→画→丢弃）");
     return true;
 }
 
@@ -420,21 +420,21 @@ bool VulkanContext::createDepthResources() {
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
             1, msaaSamples_,
             depthImage_, depthImageMemory_)) {
-        LOG_ERROR("Vulkan", "深度图像创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "深度图像创建失败");
         return false;
     }
 
     // 视图：固定样板走通用工具（2D、深度 aspect、全 mip 全层）
     if (!util::createImageView(device_, depthImage_, depthFormat_,
             VK_IMAGE_ASPECT_DEPTH_BIT, depthImageView_)) {
-        LOG_ERROR("Vulkan", "深度图像视图创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "深度图像视图创建失败");
         return false;
     }
     {
         std::ostringstream os;
         os << "深度缓冲就绪（格式 " << util::depthFormatName(depthFormat_)
            << " " << swapchainExtent_.width << "x" << swapchainExtent_.height << "）";
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
     return true;
 }
@@ -450,7 +450,7 @@ bool VulkanContext::createColorResources() {
     // ② 视图（通用工具：image=colorBuffer_、format=swapchainFormat_、aspect=COLOR）
     if (!util::createImageView(device_, colorBuffer_, swapchainFormat_,
             VK_IMAGE_ASPECT_COLOR_BIT, colorBufferView_)) {
-        LOG_ERROR("Vulkan", "MSAA 颜色视图创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "MSAA 颜色视图创建失败");
         return false;
     }
     {
@@ -458,7 +458,7 @@ bool VulkanContext::createColorResources() {
         os << "MSAA 颜色附件就绪（"
             << swapchainExtent_.width << "x" << swapchainExtent_.height
             << " @ " << msaaSamples_ << "x 采样）";
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
     return true;
 }
@@ -569,7 +569,7 @@ bool VulkanContext::createPipeline() {
     pipelineLayoutInfo.pushConstantRangeCount = 1;
     pipelineLayoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(device_, &pipelineLayoutInfo, nullptr, &pipelineLayout_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "vkCreatePipelineLayout 失败");
+        ENGINE_LOG_ERROR("Vulkan", "vkCreatePipelineLayout 失败");
         vkDestroyShaderModule(device_, vert, nullptr);
         vkDestroyShaderModule(device_, frag, nullptr);
         return false;
@@ -603,12 +603,12 @@ bool VulkanContext::createPipeline() {
     if (r != VK_SUCCESS) {
         std::ostringstream os;
         os << "vkCreateGraphicsPipelines 失败 result=" << r;
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
     pipeline_ = out[0];
     cutoutPipeline_ = out[1];
-    LOG_INFO("Vulkan", "图形管线创建成功（Solid + Cutout 双管线）");
+    ENGINE_LOG_INFO("Vulkan", "图形管线创建成功（Solid + Cutout 双管线）");
     return true;
 }
 
@@ -627,7 +627,7 @@ bool VulkanContext::createFramebuffers() {
         framebufferInfo.layers = 1;
         VkFramebuffer fb = VK_NULL_HANDLE;
         if (vkCreateFramebuffer(device_, &framebufferInfo, nullptr, &fb) != VK_SUCCESS) {
-            LOG_ERROR("Vulkan", "vkCreateFramebuffer 失败");
+            ENGINE_LOG_ERROR("Vulkan", "vkCreateFramebuffer 失败");
             return false;
         }
         framebuffers_.push_back(fb);
@@ -636,7 +636,7 @@ bool VulkanContext::createFramebuffers() {
         std::ostringstream os;
         os << "帧缓冲创建成功（" << framebuffers_.size()
            << " 个，每交换链图像一个，含深度附件）";
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
     return true;
 }
@@ -647,7 +647,7 @@ bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Bloc
     std::unordered_set<engine::shared::ChunkPos> allChunks;
     for (const auto& b : blocks) {
         if (b.type == engine::shared::BlockType::Air || b.contraptionId != -1) continue;
-        allChunks.insert(engine::shared::chunkOf(b.pos)); // 现成工具：BlockPos → ChunkPos
+        allChunks.insert(engine::shared::toChunkOf(b.pos)); // 现成工具：BlockPos → ChunkPos
     }
     if (allChunks.empty()) return true;
     return rebuildChunkMeshes(blocks, allChunks);
@@ -803,7 +803,7 @@ bool VulkanContext::rebuildChunkMeshes(
             os << "重建 chunk=(" << cp.x << "," << cp.y << "," << cp.z
                 << ") 面=" << (m.indexCount + m.cutoutIndexCount) / 6
                 << " 顶点=" << (m.vertexCount + m.cutoutVertexCount);
-            LOG_INFO("Vulkan", os.str());
+            ENGINE_LOG_INFO("Vulkan", os.str());
         }
     }
     return true;
@@ -841,14 +841,17 @@ bool VulkanContext::uploadBodyMesh(int contraptionId, const std::vector<engine::
     m.indexCount  = static_cast<std::uint32_t>(data.indices.size());
     bodyMeshes_[contraptionId] = m;
 
-    LOG_INFO("Vulkan", "刚体网格 id=" + std::to_string(contraptionId)
+    ENGINE_LOG_INFO("Vulkan", "刚体网格 id=" + std::to_string(contraptionId)
         + " 顶点=" + std::to_string(m.vertexCount)
         + " 索引=" + std::to_string(m.indexCount));
     return true;
 }
 
-void VulkanContext::setBodyPose(int contraptionId, double x, double y, double z) {
+void VulkanContext::setBodyPose(int contraptionId, double x, double y, double z,
+                                float qx, float qy, float qz, float qw) {
     bodyPos_[contraptionId] = glm::dvec3{x, y, z};
+    // glm::quat 的构造顺序是 (w, x, y, z) —— 这里显式换序，避免 (x,y,z,w) 误用。
+    bodyRot_[contraptionId] = glm::quat{qw, qx, qy, qz};
 }
 
 void VulkanContext::destroyBodyMesh(int contraptionId) {
@@ -858,6 +861,7 @@ void VulkanContext::destroyBodyMesh(int contraptionId) {
         bodyMeshes_.erase(it);
     }
     bodyPos_.erase(contraptionId);
+    bodyRot_.erase(contraptionId);
 }
 
 // ---- 实体模型（带骨骼，逐骨骼 draw）----
@@ -920,14 +924,14 @@ bool VulkanContext::loadEntityModel(int entityId, const std::string& bbmodelPath
     if (ensureEntityTexture(texPath)) {
         gpu.textureSet = entityTextures_[texPath].set;
     } else {
-        LOG_WARN("Vulkan", "实体 id=" + std::to_string(entityId) + " 无可用贴图，将不绘制");
+        ENGINE_LOG_WARN("Vulkan", "实体 id=" + std::to_string(entityId) + " 无可用贴图，将不绘制");
     }
 
     const std::size_t boneCount = gpu.bones.size();
     entityMeshes_[entityId] = std::move(gpu);
     entityPose_[entityId] = EntityPose{};
 
-    LOG_INFO("Vulkan", "实体网格 id=" + std::to_string(entityId)
+    ENGINE_LOG_INFO("Vulkan", "实体网格 id=" + std::to_string(entityId)
         + " 骨骼=" + std::to_string(boneCount));
     return true;
 }
@@ -967,7 +971,7 @@ bool VulkanContext::createCommandObjects() {
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; // 允许每帧 reset
     poolInfo.queueFamilyIndex = graphicsQueueFamily_;
     if (vkCreateCommandPool(device_, &poolInfo, nullptr, &cmdPool_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "vkCreateCommandPool 失败");
+        ENGINE_LOG_ERROR("Vulkan", "vkCreateCommandPool 失败");
         return false;
     }
     VkCommandBufferAllocateInfo allocInfo{};
@@ -976,10 +980,10 @@ bool VulkanContext::createCommandObjects() {
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandBufferCount = kMaxFramesInFlight;
     if (vkAllocateCommandBuffers(device_, &allocInfo, cmdBuffers_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "vkAllocateCommandBuffers 失败");
+        ENGINE_LOG_ERROR("Vulkan", "vkAllocateCommandBuffers 失败");
         return false;
     }
-    LOG_INFO("Vulkan", "命令池 + 命令缓冲就绪（每帧槽一条，2 条轮转）");
+    ENGINE_LOG_INFO("Vulkan", "命令池 + 命令缓冲就绪（每帧槽一条，2 条轮转）");
     return true;
 }
 
@@ -987,7 +991,7 @@ bool VulkanContext::createCommandObjects() {
 // 图集 = 一张大纹理装所有方块小纹理（每格 16²，边长由声明条目数算出）
 bool VulkanContext::createTextureImage() {
     if (!textureAtlas_.build()) {   // 读 assets/atlases/blocks.json → 拼图集（CPU 内存 RGBA）
-        LOG_ERROR("Vulkan", "图集构建失败");
+        ENGINE_LOG_ERROR("Vulkan", "图集构建失败");
         return false;
     }
     const auto& pixels = textureAtlas_.rgba();
@@ -1034,7 +1038,7 @@ bool VulkanContext::createTextureImageView() {
     // 视图：固定样板走通用工具（2D、颜色 aspect、全 mip 全层）
     if (!util::createImageView(device_, textureImage_, VK_FORMAT_R8G8B8A8_SRGB,
             VK_IMAGE_ASPECT_COLOR_BIT, textureImageView_)) {
-        LOG_ERROR("Vulkan", "纹理视图创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "纹理视图创建失败");
         return false;
     }
     return true;
@@ -1051,7 +1055,7 @@ bool VulkanContext::createTextureSampler() {
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;   // 1 级占位
     samplerInfo.maxLod = 1.0f;
     if (vkCreateSampler(device_, &samplerInfo, nullptr, &textureSampler_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "纹理采样器创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "纹理采样器创建失败");
         return false;
     }
     return true;
@@ -1075,14 +1079,14 @@ bool VulkanContext::ensureEntityTexture(const std::string& path) {
     setAlloc.descriptorSetCount = 1;
     setAlloc.pSetLayouts = &descLayout_;
     if (vkAllocateDescriptorSets(device_, &setAlloc, &res.set) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "实体贴图描述符集分配失败：" + path);
+        ENGINE_LOG_ERROR("Vulkan", "实体贴图描述符集分配失败：" + path);
         return false;
     }
 
     int w = 0, h = 0, ch = 0;
     stbi_uc* src = stbi_load(path.c_str(), &w, &h, &ch, STBI_rgb_alpha);
     if (!src) {
-        LOG_WARN("Vulkan", "实体贴图读不到：" + path + "（引用它的实体不绘制）");
+        ENGINE_LOG_WARN("Vulkan", "实体贴图读不到：" + path + "（引用它的实体不绘制）");
         return false;
     }
 
@@ -1092,7 +1096,7 @@ bool VulkanContext::ensureEntityTexture(const std::string& path) {
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             1, VK_SAMPLE_COUNT_1_BIT, res.image, res.memory)) {
         stbi_image_free(src);
-        LOG_ERROR("Vulkan", "实体贴图图像创建失败：" + path);
+        ENGINE_LOG_ERROR("Vulkan", "实体贴图图像创建失败：" + path);
         return false;
     }
 
@@ -1122,7 +1126,7 @@ bool VulkanContext::ensureEntityTexture(const std::string& path) {
 
     if (!util::createImageView(device_, res.image, VK_FORMAT_R8G8B8A8_SRGB,
             VK_IMAGE_ASPECT_COLOR_BIT, res.view)) {
-        LOG_ERROR("Vulkan", "实体贴图视图创建失败：" + path);
+        ENGINE_LOG_ERROR("Vulkan", "实体贴图视图创建失败：" + path);
         return false;
     }
 
@@ -1137,7 +1141,7 @@ bool VulkanContext::ensureEntityTexture(const std::string& path) {
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.maxLod = 1.0f;
     if (vkCreateSampler(device_, &si, nullptr, &res.sampler) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "实体采样器创建失败：" + path);
+        ENGINE_LOG_ERROR("Vulkan", "实体采样器创建失败：" + path);
         return false;
     }
 
@@ -1160,7 +1164,7 @@ bool VulkanContext::ensureEntityTexture(const std::string& path) {
     vkUpdateDescriptorSets(device_, 2, wr, 0, nullptr);
 
     entityTextures_[path] = res;
-    LOG_INFO("Vulkan", "实体贴图就绪：" + path + "（" + std::to_string(w) + "x" + std::to_string(h) + "）");
+    ENGINE_LOG_INFO("Vulkan", "实体贴图就绪：" + path + "（" + std::to_string(w) + "x" + std::to_string(h) + "）");
     return true;
 }
 
@@ -1173,7 +1177,7 @@ bool VulkanContext::createUniformObjects() {
     bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (vkCreateBuffer(device_, &bi, nullptr, &uboBuffer_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "UBO vkCreateBuffer 失败");
+        ENGINE_LOG_ERROR("Vulkan", "UBO vkCreateBuffer 失败");
         return false;
     }
     VkMemoryRequirements req;
@@ -1181,7 +1185,7 @@ bool VulkanContext::createUniformObjects() {
     uint32_t memIdx = util::findMemoryType(physicalDevice_, req.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (memIdx == UINT32_MAX) {
-        LOG_ERROR("Vulkan", "UBO 无 host 可见内存类型");
+        ENGINE_LOG_ERROR("Vulkan", "UBO 无 host 可见内存类型");
         return false;
     }
     VkMemoryAllocateInfo ai{};
@@ -1189,7 +1193,7 @@ bool VulkanContext::createUniformObjects() {
     ai.allocationSize = req.size;
     ai.memoryTypeIndex = memIdx;
     if (vkAllocateMemory(device_, &ai, nullptr, &uboMemory_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "UBO vkAllocateMemory 失败");
+        ENGINE_LOG_ERROR("Vulkan", "UBO vkAllocateMemory 失败");
         return false;
     }
     vkBindBufferMemory(device_, uboBuffer_, uboMemory_, 0);
@@ -1210,7 +1214,7 @@ bool VulkanContext::createUniformObjects() {
     layoutInfo.bindingCount = 2;
     layoutInfo.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(device_, &layoutInfo, nullptr, &descLayout_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "vkCreateDescriptorSetLayout 失败");
+        ENGINE_LOG_ERROR("Vulkan", "vkCreateDescriptorSetLayout 失败");
         return false;
     }
 
@@ -1228,7 +1232,7 @@ bool VulkanContext::createUniformObjects() {
     poolInfo.poolSizeCount = 2;
     poolInfo.pPoolSizes = poolSizes;
     if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descPool_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "vkCreateDescriptorPool 失败");
+        ENGINE_LOG_ERROR("Vulkan", "vkCreateDescriptorPool 失败");
         return false;
     }
 
@@ -1241,7 +1245,7 @@ bool VulkanContext::createUniformObjects() {
     setAllocInfo.pSetLayouts = setLayouts;
     VkDescriptorSet sets[1]{};
     if (vkAllocateDescriptorSets(device_, &setAllocInfo, sets) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "vkAllocateDescriptorSets 失败");
+        ENGINE_LOG_ERROR("Vulkan", "vkAllocateDescriptorSets 失败");
         return false;
     }
     descSet_ = sets[0];        // 方块图集那套
@@ -1264,7 +1268,7 @@ bool VulkanContext::createUniformObjects() {
     write[1].pImageInfo = &iinfo;
     vkUpdateDescriptorSets(device_, 2, write, 0, nullptr);
 
-    LOG_INFO("Vulkan", "MVP uniform 就绪（descriptor set + UBO，相机可操作）");
+    ENGINE_LOG_INFO("Vulkan", "MVP uniform 就绪（descriptor set + UBO，相机可操作）");
     return true;
 }
 
@@ -1279,18 +1283,18 @@ bool VulkanContext::createSyncObjects() {
     for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
         if (vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &imageAvailable_[i]) != VK_SUCCESS ||
             vkCreateFence(device_, &fenceInfo, nullptr, &inFlightFences_[i]) != VK_SUCCESS) {
-            LOG_ERROR("Vulkan", "同步对象创建失败");
+            ENGINE_LOG_ERROR("Vulkan", "同步对象创建失败");
             return false;
         }
     }
     renderFinished_.resize(swapchainImages_.size(), VK_NULL_HANDLE);
     for (auto& sem : renderFinished_) {
         if (vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &sem) != VK_SUCCESS) {
-            LOG_ERROR("Vulkan", "renderFinished 信号量创建失败");
+            ENGINE_LOG_ERROR("Vulkan", "renderFinished 信号量创建失败");
             return false;
         }
     }
-    LOG_INFO("Vulkan", "同步对象就绪（acquire×2 轮转 + renderFinished×图像数 + 栅栏×2）");
+    ENGINE_LOG_INFO("Vulkan", "同步对象就绪（acquire×2 轮转 + renderFinished×图像数 + 栅栏×2）");
     return true;
 }
 
@@ -1325,9 +1329,9 @@ void VulkanContext::updateViewProj(double /*dt*/) {
     const glm::mat4 view = glm::lookAt(camPos, camPos + lookDir, glm::vec3(0.0f, 1.0f, 0.0f));
 
     UniformBufferObject ubo{};
-    ubo.model = glm::mat4(1.0f);  // 方块在原点：单位矩阵
-    ubo.view  = view;
-    ubo.proj  = proj;
+    // 预乘：proj * view（model 恒为单位阵，不再上传也不再在着色器里乘）。
+    // 具体模型变换（刚体/骨骼）仍走 push constant，逐 draw 变化。
+    ubo.viewProj = proj * view;
     void* data = nullptr;
     vkMapMemory(device_, uboMemory_, 0, sizeof(ubo), 0, &data);
     std::memcpy(data, &ubo, sizeof(ubo));
@@ -1385,7 +1389,7 @@ bool VulkanContext::drawFrame() {
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         std::ostringstream os;
         os << "vkAcquireNextImageKHR 失败 result=" << r;
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
     vkResetFences(device_, 1, &inFlightFences_[frame]); // acquire 成功后才重置
@@ -1398,7 +1402,7 @@ bool VulkanContext::drawFrame() {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     if (vkBeginCommandBuffer(cmdBuffers_[frame], &beginInfo) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "vkBeginCommandBuffer 失败");
+        ENGINE_LOG_ERROR("Vulkan", "vkBeginCommandBuffer 失败");
         return false;
     }
     VkRenderPassBeginInfo renderPassBeginInfo{};
@@ -1456,7 +1460,7 @@ bool VulkanContext::drawFrame() {
             const auto pit0 = bodyPos_.find(0);
             if (pit0 != bodyPos_.end())
                 os << " 刚体0=(" << pit0->second.x << "," << pit0->second.y << "," << pit0->second.z << ")";
-            LOG_INFO("Vulkan", os.str());
+            ENGINE_LOG_INFO("Vulkan", os.str());
         }
         for (const auto& [id, m] : bodyMeshes_) {
             if (m.vertexCount == 0) continue;
@@ -1466,7 +1470,13 @@ bool VulkanContext::drawFrame() {
                 static_cast<float>(pit->second.x),
                 static_cast<float>(pit->second.y),
                 static_cast<float>(pit->second.z)};
-            const glm::mat4 bodyModel = glm::translate(glm::mat4(1.0f), worldPos);
+            // 顶点在局部坐标（buildBodyVertices），所以旋转在 model matrix 里做：
+            // T(pos) × R(quat)。没有旋转记录时用单位四元数（等价于原来的纯平移）。
+            const auto rit = bodyRot_.find(id);
+            const glm::quat bodyRot =
+                (rit != bodyRot_.end()) ? rit->second : glm::quat{1.0f, 0.0f, 0.0f, 0.0f};
+            const glm::mat4 bodyModel =
+                glm::translate(glm::mat4(1.0f), worldPos) * glm::mat4_cast(bodyRot);
             vkCmdPushConstants(cmdBuffers_[frame], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                                0, sizeof(glm::mat4), &bodyModel);
             VkDeviceSize vbOffset = 0;
@@ -1547,7 +1557,7 @@ bool VulkanContext::drawFrame() {
 
     vkCmdEndRenderPass(cmdBuffers_[frame]);
     if (vkEndCommandBuffer(cmdBuffers_[frame]) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "vkEndCommandBuffer 失败");
+        ENGINE_LOG_ERROR("Vulkan", "vkEndCommandBuffer 失败");
         return false;
     }
 
@@ -1565,7 +1575,7 @@ bool VulkanContext::drawFrame() {
     if (r != VK_SUCCESS) {
         std::ostringstream os;
         os << "vkQueueSubmit 失败 result=" << r;
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
 
@@ -1585,7 +1595,7 @@ bool VulkanContext::drawFrame() {
     if (r != VK_SUCCESS) {
         std::ostringstream os;
         os << "vkQueuePresentKHR 失败 result=" << r;
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
     ++framesPresented_;
@@ -1599,7 +1609,7 @@ void VulkanContext::framebufferResizeCallback(GLFWwindow* w, int, int) {
         self->framebufferResized_ = true;
         std::ostringstream os;
         os << "[回调] framebufferResized_ 已置位";
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
 }
 // 释放描述符池/布局/UBO 缓冲
@@ -1642,6 +1652,7 @@ void VulkanContext::destroyRenderObjects() {
     for (auto& [id, m] : bodyMeshes_) destroyChunkMesh(device_, m);
     bodyMeshes_.clear();
     bodyPos_.clear();
+    bodyRot_.clear();
     // 实体：逐骨骼释放缓冲，再释放贴图三件套
     for (auto& [id, em] : entityMeshes_) {
         for (auto& g : em.bones) {
@@ -1708,7 +1719,7 @@ VulkanContext::~VulkanContext() { shutdown(); }
 // 不然 HUD 不显示时分不清是没切换还是绘制出问题。
 void VulkanContext::setHudVisible(bool visible) {
     hudVisible_ = visible;
-    LOG_INFO("Vulkan", visible ? "[HUD] 显示（F3）" : "[HUD] 隐藏（F3）");
+    ENGINE_LOG_INFO("Vulkan", visible ? "[HUD] 显示（F3）" : "[HUD] 隐藏（F3）");
 }
 
 // 业务统计喂入：由渲染线程按 1Hz 调用。
@@ -1740,7 +1751,7 @@ bool VulkanContext::createFontTexture() {
     int w = 0, h = 0, ch = 0;
     stbi_uc* src = stbi_load("assets/textures/font/ascii.png", &w, &h, &ch, STBI_rgb_alpha);
     if (!src) {
-        LOG_ERROR("Vulkan", "[HUD] 字体图集缺失：assets/textures/font/ascii.png"
+        ENGINE_LOG_ERROR("Vulkan", "[HUD] 字体图集缺失：assets/textures/font/ascii.png"
                   "（运行 tools/gen_font_atlas.ps1 生成）");
         return false;
     }
@@ -1750,7 +1761,7 @@ bool VulkanContext::createFontTexture() {
         os << "[HUD] 字体图集尺寸 " << w << "x" << h
            << " 与代码常量 " << hud::kAtlasW << "x" << hud::kAtlasH
            << " 不一致（重跑 tools/gen_font_atlas.ps1）";
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         stbi_image_free(src);
         return false;
     }
@@ -1791,7 +1802,7 @@ bool VulkanContext::createFontTexture() {
 
     if (!util::createImageView(device_, fontImage_, VK_FORMAT_R8G8B8A8_SRGB,
             VK_IMAGE_ASPECT_COLOR_BIT, fontImageView_)) {
-        LOG_ERROR("Vulkan", "[HUD] 字体纹理视图创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "[HUD] 字体纹理视图创建失败");
         return false;
     }
 
@@ -1810,13 +1821,13 @@ bool VulkanContext::createFontTexture() {
     samplerInfo.minLod = 0.0f;
     samplerInfo.maxLod = 0.0f;
     if (vkCreateSampler(device_, &samplerInfo, nullptr, &fontSampler_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "[HUD] 字体采样器创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "[HUD] 字体采样器创建失败");
         return false;
     }
 
     std::ostringstream os;
     os << "[HUD] 字体图集已上传 " << w << "x" << h;
-    LOG_INFO("Vulkan", os.str());
+    ENGINE_LOG_INFO("Vulkan", os.str());
     return true;
 }
 
@@ -1939,7 +1950,7 @@ bool VulkanContext::createHudPipeline() {
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &hudPipelineLayout_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "[HUD] 管线布局创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "[HUD] 管线布局创建失败");
         vkDestroyShaderModule(device_, vert, nullptr);
         vkDestroyShaderModule(device_, frag, nullptr);
         return false;
@@ -1968,10 +1979,10 @@ bool VulkanContext::createHudPipeline() {
     if (r != VK_SUCCESS) {
         std::ostringstream os;
         os << "[HUD] vkCreateGraphicsPipelines 失败 result=" << r;
-        LOG_ERROR("Vulkan", os.str());
+        ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
-    LOG_INFO("Vulkan", "[HUD] 管线创建成功（depth off / alpha blend / MSAA 匹配主场景）");
+    ENGINE_LOG_INFO("Vulkan", "[HUD] 管线创建成功（depth off / alpha blend / MSAA 匹配主场景）");
     return true;
 }
 
@@ -1991,7 +2002,7 @@ bool VulkanContext::createHudResources() {
     layoutInfo.bindingCount = 1;
     layoutInfo.pBindings = &fontBinding;
     if (vkCreateDescriptorSetLayout(device_, &layoutInfo, nullptr, &hudDescLayout_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "[HUD] 描述符布局创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "[HUD] 描述符布局创建失败");
         return false;
     }
 
@@ -2004,7 +2015,7 @@ bool VulkanContext::createHudResources() {
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
     if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &hudDescPool_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "[HUD] 描述符池创建失败");
+        ENGINE_LOG_ERROR("Vulkan", "[HUD] 描述符池创建失败");
         return false;
     }
 
@@ -2014,7 +2025,7 @@ bool VulkanContext::createHudResources() {
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts = &hudDescLayout_;
     if (vkAllocateDescriptorSets(device_, &allocInfo, &hudDescSet_) != VK_SUCCESS) {
-        LOG_ERROR("Vulkan", "[HUD] 描述符集分配失败");
+        ENGINE_LOG_ERROR("Vulkan", "[HUD] 描述符集分配失败");
         return false;
     }
 
@@ -2040,17 +2051,17 @@ bool VulkanContext::createHudResources() {
                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 hudVertexBuffer_[i], hudVertexMemory_[i])) {
-            LOG_ERROR("Vulkan", "[HUD] 顶点缓冲创建失败");
+            ENGINE_LOG_ERROR("Vulkan", "[HUD] 顶点缓冲创建失败");
             return false;
         }
         void* mapped = nullptr;
         if (vkMapMemory(device_, hudVertexMemory_[i], 0, bufSize, 0, &mapped) != VK_SUCCESS) {
-            LOG_ERROR("Vulkan", "[HUD] 顶点缓冲映射失败");
+            ENGINE_LOG_ERROR("Vulkan", "[HUD] 顶点缓冲映射失败");
             return false;
         }
         hudVertexMapped_[i] = mapped;
     }
-    LOG_INFO("Vulkan", "[HUD] 资源就绪（顶点容量 12288 = 2048 字符 × 6）");
+    ENGINE_LOG_INFO("Vulkan", "[HUD] 资源就绪（顶点容量 12288 = 2048 字符 × 6）");
     return true;
 }
 
@@ -2197,7 +2208,7 @@ std::size_t VulkanContext::buildHudVertices() {
     // 容量保护：正常约 1000 顶点；超容量说明文本异常，截断而不是越界写 GPU 缓冲
     const std::size_t count = hudText_.vertexCount();
     if (count > kHudVertexCapacity) {
-        LOG_WARN("Vulkan", "[HUD] 顶点数超容量，已截断（检查 HUD 文本长度）");
+        ENGINE_LOG_WARN("Vulkan", "[HUD] 顶点数超容量，已截断（检查 HUD 文本长度）");
         return kHudVertexCapacity;
     }
     return count;
@@ -2215,7 +2226,7 @@ void VulkanContext::drawHud(VkCommandBuffer cmd, uint32_t frameIndex) {
         hudDrawnOnce_ = true;
         std::ostringstream os;
         os << "[HUD] 首帧绘制 " << vcount << " 顶点";
-        LOG_INFO("Vulkan", os.str());
+        ENGINE_LOG_INFO("Vulkan", os.str());
     }
 
     // HOST_COHERENT 内存：memcpy 之后不需要 vkFlushMappedMemoryRanges

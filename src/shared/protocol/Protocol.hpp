@@ -1,7 +1,7 @@
 #pragma once
 
 #include "shared/chunk/ChunkPos.hpp"
-
+#include "shared/block/Block.hpp"
 #include <vector>
 
 namespace engine::shared {
@@ -52,6 +52,9 @@ struct PhysicsResult {
     int        contraptionId = 0;          // 刚体 ID（打包完成/解包完成/刚体位置）
     int        blockCount = 0;             // 打包的方块数
     double     rx = 0.0, ry = 0.0, rz = 0.0; // 刚体世界位置（RigidBodyPos 用）
+    // 刚体旋转（四元数，RigidBodyPos / ContraptionPacked 用）。默认单位四元数 = 无旋转。
+    // 渲染端的刚体顶点是局部坐标，model matrix = translate(pos) × mat4_cast(quat)。
+    float      qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
 
     // 碰撞事件字段（CollisionEvent 用）：
     int        cx = 0, cy = 0, cz = 0;     // 被撞静态方块的坐标
@@ -77,6 +80,8 @@ struct BodyStructureEvent {
 struct BodyPose {
     int    contraptionId = -1;
     double x = 0.0, y = 0.0, z = 0.0; // 刚体世界位置
+    // 刚体旋转（四元数；默认单位 = 无旋转）。与 PhysicsResult 同名字段一一对应。
+    float  qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
 };
 
 // 业务 → 渲染：变更事件流（数据层 ② 第四项，渲染快照正式化）。

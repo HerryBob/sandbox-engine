@@ -15,10 +15,10 @@ PhysicsWorld::PhysicsWorld(engine::core::TimeManager& tm)
 int PhysicsWorld::addPlayerBody(double x, double y, double z,
                                 double halfExtentX, double halfExtentY, double halfExtentZ,
                                 double jumpSpeed) {
-    // 生物体：运动学、单 AABB、位置锚在脚底中心。
-    // 形状与跳跃初速来自实体类型定义（经装配层传入），本文件不再写死某个生物的尺寸。
-    // blocks 留空——形状由 halfExtent/centerOffset 直接给，不走 recomputeAABB
-    //（后者在 blocks 为空时会把 AABB 清零）。
+    // 生物体：运动学，位置锚在脚底中心。
+    // 形状与跳跃初速来自实体类型定义（经装配层传入），本文件不写死某个生物的尺寸。
+    // 尺寸存进 halfExtent（Jolt 接入后作为 CapsuleShape 的参数）；
+    // centerOffsetY = 半高，让"基准 y = 脚底"成立。
     RigidBody b;
     b.id = static_cast<int>(nextBodyId_++);
     b.motion = MotionType::Kinematic;
@@ -63,18 +63,14 @@ void PhysicsWorld::advance(double scale, double wallDt,
         while (fromBusiness.pop(cmd)) {
             switch (cmd.type) {
             case engine::shared::PhysicsCommand::Type::MoveBlock:
-                blockX_.store(blockX_.load(std::memory_order_relaxed) + cmd.dx,
-                              std::memory_order_relaxed);
-                blockY_.store(blockY_.load(std::memory_order_relaxed) + cmd.dy,
-                              std::memory_order_relaxed);
-                blockZ_.store(blockZ_.load(std::memory_order_relaxed) + cmd.dz,
-                              std::memory_order_relaxed);
+                // [已废弃] 演示方块位移。物理侧不再维护"单个方块坐标"这种状态；
+                // 指令仍保留在协议里（追加式演进，不删枚举值），物理侧直接忽略。
                 break;
             case engine::shared::PhysicsCommand::Type::SyncBlockSet:
                 // 全量同步：重建静态碰撞体集合（初始世界 / 世界重建时用）。
-                // 世界重建：接触状态全部重置（旧的接触记录全部失效）。
+                // 注意：colliders_ 目前只是"静态世界的影子"，没有碰撞消费方（求解器已删）。
+                // Jolt 接入后这里改成"逐 chunk 建 StaticCompoundShape"，且要按脏 chunk 增量重建。
                 colliders_.clear();
-                contactPairs_.clear();
                 for (const auto& b : cmd.blocks) colliders_[b.pos] = b.type;
                 break;
             case engine::shared::PhysicsCommand::Type::PlaceBlock: {
@@ -92,7 +88,7 @@ void PhysicsWorld::advance(double scale, double wallDt,
                         it->blocks.push_back(engine::shared::Block{
                             static_cast<engine::shared::BlockType>(cmd.blockType), p});
                         it->blockCount = static_cast<int>(it->blocks.size());
-                        recomputeAABB(*it); // 增量扩张：最小包裹实时贴合
+                        // 碰撞箱不再重算：Jolt 接入时 AddShape + AdjustCenterOfMass + NotifyShapeChanged。
                     }
                 }
                 break;
@@ -111,7 +107,7 @@ void PhysicsWorld::advance(double scale, double wallDt,
                             if (bIt->pos == p) { it->blocks.erase(bIt); break; }
                         }
                         it->blockCount = static_cast<int>(it->blocks.size());
-                        recomputeAABB(*it); // 增量收缩：碰撞箱实时贴合剩余方块组
+                        // 碰撞箱不再重算：Jolt 接入时 RemoveShape + AdjustCenterOfMass + NotifyShapeChanged。
                     }
                 }
                 break;
@@ -125,9 +121,12 @@ void PhysicsWorld::advance(double scale, double wallDt,
                 body.vx = cmd.ivx;
                 body.vy = cmd.ivy;
                 body.vz = cmd.ivz;
+                // [临时验证] 固定 45° 绕 Y 轴：只用来确认"旋转数据通路"通到渲染端。
+                // 四元数 = (0, sin22.5°, 0, cos22.5°)。Jolt 接入后删掉这一行。
+                body.qx = 0.0f; body.qy = 0.38268343f; body.qz = 0.0f; body.qw = 0.92387953f;
                 body.blocks = cmd.blocks; // 局部坐标 = 世界坐标（刚体建在原点 0）
                 for (const auto& b : cmd.blocks) colliders_.erase(b.pos);
-                recomputeAABB(body); // 最小包裹碰撞箱（半宽 + 中心偏移）
+                // 碰撞箱不再手算：Jolt 接入时由 MutableCompoundShape 的 AddShape 生成。
                 bodies_.push_back(body);
                 bodyCount_.store(static_cast<long long>(bodies_.size()),
                                  std::memory_order_relaxed);
@@ -163,7 +162,6 @@ void PhysicsWorld::advance(double scale, double wallDt,
                     }
                     bodies_.erase(it);
                 }
-                contactPairs_.erase(cmd.contraptionId); // 刚体已拆：其接触记录作废
                 bodyCount_.store(static_cast<long long>(bodies_.size()),
                                  std::memory_order_relaxed);
                 engine::shared::PhysicsResult r;
@@ -177,121 +175,45 @@ void PhysicsWorld::advance(double scale, double wallDt,
             processedCommands_.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // ---- 刚体位置积分 ----
-        // 推力模拟已删除（飞船推力输入移除）；刚体按当前速度匀速运动
-        //（v 无变化，只有 x += v×dt）。dt=0.04 固定步长（原型无重力/阻尼）。
-        for (auto& b : bodies_) {
-            if (b.motion != MotionType::Dynamic) continue; // 运动学体走下方分轴路径
-            b.x += b.vx * 0.04;
-            b.y += b.vy * 0.04;
-            b.z += b.vz * 0.04;
-        }
-
-        // ---- 单 AABB 碰撞检测与响应（架构 4.3，原型只处理 x 方向运动）----
-        // 先移动后响应：刚体 AABB 与静态方块碰撞体（每格 1×1×1）相交检测。
-        // 粗相思想：只查询刚体 AABB 覆盖的整格坐标（空间查询），不遍历全部碰撞体。
-        // 世界 AABB = 基准 + 中心偏移 ± 半宽（增量重算的最小包裹碰撞箱）。
-        // 接触语义（Rapier Started/Stopped 的 Started 部分）：碰撞响应（回退+清速）
-        // 每帧可重复（顶着方块持续重叠），但事件只在"接触开始"（新加入接触集合）时发
-        // 一次——同一对 (刚体, 方块) 不重复上报，业务按真实碰撞次数裁决。
-        for (auto& b : bodies_) {
-            if (b.motion != MotionType::Dynamic) continue; // 运动学体由下方独立分支处理
-            const double leftX  = b.x + b.centerOffsetX - b.halfExtentX;
-            const double rightX = b.x + b.centerOffsetX + b.halfExtentX;
-            const double leftY  = b.y + b.centerOffsetY - b.halfExtentY;
-            const double rightY = b.y + b.centerOffsetY + b.halfExtentY;
-            const double leftZ  = b.z + b.centerOffsetZ - b.halfExtentZ;
-            const double rightZ = b.z + b.centerOffsetZ + b.halfExtentZ;
-            const int x0 = static_cast<int>(std::floor(leftX));
-            const int x1 = static_cast<int>(std::floor(rightX));
-            const int y0 = static_cast<int>(std::floor(leftY));
-            const int y1 = static_cast<int>(std::floor(rightY));
-            const int z0 = static_cast<int>(std::floor(leftZ));
-            const int z1 = static_cast<int>(std::floor(rightZ));
-            // 本帧接触中的方块（收集全部接触，不再 break 只取第一个）。
-            std::unordered_set<engine::shared::BlockPos> currentContacts;
-            double vxBefore = 0.0;
-            int    nx       = 0;
-            bool   responded = false;
-            for (int ix = x0; ix <= x1; ++ix)
-                for (int iy = y0; iy <= y1; ++iy)
-                    for (int iz = z0; iz <= z1; ++iz) {
-                        if (colliders_.find(engine::shared::BlockPos{ix, iy, iz}) ==
-                            colliders_.end())
-                            continue;
-                        // 区间重叠测试（严格版：贴边不算碰撞）。
-                        if (rightX > ix && leftX < ix + 1.0 &&
-                            rightY > iy && leftY < iy + 1.0 &&
-                            rightZ > iz && leftZ < iz + 1.0) {
-                            currentContacts.insert(engine::shared::BlockPos{ix, iy, iz});
-                            if (!responded) {
-                                // 碰撞响应：原型只回退 x 轴（飞船沿 x 运动），速度清零。
-                                // 本帧只响应第一个接触（原型行为保持，断言依赖此回退）。
-                                responded = true;
-                                vxBefore  = b.vx;
-                                nx        = (vxBefore >= 0.0) ? -1 : 1;
-                                if (b.vx >= 0.0)
-                                    b.x = static_cast<double>(ix) - b.centerOffsetX -
-                                          b.halfExtentX; // AABB 右边界贴方块左边界
-                                else
-                                    b.x = static_cast<double>(ix + 1) - b.centerOffsetX +
-                                          b.halfExtentX; // AABB 左边界贴方块右边界
-                                b.vx = 0.0;
-                            }
-                        }
-                    }
-            // ---- 接触集合更新（Started / Stay / 结束）----
-            // 新接触（不在集合）→ 加入 + 发 CollisionEvent（业务裁决）；
-            // 持续接触（已在集合）→ Stay，不发；接触结束（本帧未接触）→ 移除，不发。
-            auto& set = contactPairs_[b.id];
-            for (const auto& cp : currentContacts) {
-                if (set.insert(cp).second) {
-                    collisions_.fetch_add(1, std::memory_order_relaxed);
-                    engine::shared::PhysicsResult colEv;
-                    colEv.type = engine::shared::PhysicsResult::Type::CollisionEvent;
-                    colEv.contraptionId = b.id;
-                    colEv.cx = cp.x; colEv.cy = cp.y; colEv.cz = cp.z;
-                    colEv.nx = nx;                 // 刚体被推回的方向
-                    colEv.impact = std::abs(vxBefore);
-                    colEv.simTime = simTime_.load(std::memory_order_relaxed);
-                    pendingCollisions_.push_back(colEv);
-                }
-            }
-            for (auto it = set.begin(); it != set.end();) {
-                if (currentContacts.count(*it) == 0) it = set.erase(it);
-                else ++it;
-            }
-        }
-
-        // ---- 生物（运动学）推进：重力 + 分轴移动 + 碰撞回退 ----
-        // 与方块组路径完全分离：Dynamic 走"三轴一次积分 + 只回退 x"，
-        // 运动学体需要"逐轴移动逐轴回退"，否则"站立"与"水平阻挡"无法同时成立。
+        // ---- 刚体积分：已删除 ----
         for (auto& b : bodies_) {
             if (b.motion != MotionType::Kinematic) continue;
-            // 外部驱动：读操控意图灌水平速度。
-            // 跳跃必须在清 onGround 之前判——它要用的是"上一个 tick 落地回退的结果"，
-            // 而下面这行 b.onGround = false 会把它抹掉。
-            if (b.id == playerBodyId_ && playerControl_ != nullptr) {
-                b.vx = playerControl_->vx.load(std::memory_order_relaxed);
-                b.vz = playerControl_->vz.load(std::memory_order_relaxed);
-                // 请求位先消费再判落地：空中按跳跃直接丢弃，不做预输入（不会落地瞬间自动弹起）。
-                const bool wantJump =
-                    playerControl_->jumpRequested.exchange(false, std::memory_order_relaxed);
-                if (wantJump && b.onGround) {
-                    b.vy = jumpSpeed_;
+            // 插值快照：先记下本 tick 起点的位置（= 上一 tick 的终点）。
+            const bool   isPlayerBody = (b.id == playerBodyId_ && playerState_ != nullptr);
+            const double tickStartX = b.x;
+            const double tickStartY = b.y;
+            const double tickStartZ = b.z;
+            // 玩家位置回传（相机跟随 + 实体位姿）：只写共享槽，不占业务结果队列。
+            // 一次成组写入 prev（本 tick 起点）/ curr（本 tick 终点）/ tick 起点时刻，
+            // 整组用 seqlock 包住：读侧要么拿到同一 tick 的一对值，要么重试。
+            // tickStartNs 取此刻：写完之后 alpha 从 0 涨到 1，正好滑到下一 tick 覆盖前，
+            // 即标准的"画面比物理慢一个 tick"。
+            if (isPlayerBody) {
+                auto& st = *playerState_;
+                const long long nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                // tickDurationNs：用上次写入到这次的墙钟差，自适应 time_scale 和调度抖动。
+                // 物理是累加器驱动，墙钟间隔 = 0.04 / scale 秒；scale≠1 时写死 40ms 会让
+                // 渲染端 alpha 的分母错误（scale=2 滞后半帧、scale=0.5 卡终点再跳）。
+                // 首次写入（lastPlayerStateWriteNs_ == 0）用当前帧墙钟兜底。
+                long long durNs = static_cast<long long>(wallDt * 1e9);
+                if (lastPlayerStateWriteNs_ > 0 && nowNs > lastPlayerStateWriteNs_) {
+                    durNs = nowNs - lastPlayerStateWriteNs_;
                 }
-            }
-            b.onGround = false;
-            b.vy -= 9.8 * 0.04;      // 重力（原型固定 9.8，无阻尼）
-            moveKinematicAxis(b, 1); // 先竖轴：落地 / 顶头
-            moveKinematicAxis(b, 0); // 再横轴
-            moveKinematicAxis(b, 2);
-            // 玩家位置回传（相机跟随用）：只写共享槽，不占业务结果队列。
-            if (b.id == playerBodyId_ && playerState_ != nullptr) {
-                playerState_->x.store(b.x, std::memory_order_relaxed);
-                playerState_->y.store(b.y, std::memory_order_relaxed);
-                playerState_->z.store(b.z, std::memory_order_relaxed);
-                playerState_->valid.store(true, std::memory_order_relaxed);
+
+                st.seq.fetch_add(1, std::memory_order_acq_rel); // 奇数 = 写入中
+                st.prevX.store(tickStartX, std::memory_order_relaxed);
+                st.prevY.store(tickStartY, std::memory_order_relaxed);
+                st.prevZ.store(tickStartZ, std::memory_order_relaxed);
+                st.x.store(b.x, std::memory_order_relaxed);
+                st.y.store(b.y, std::memory_order_relaxed);
+                st.z.store(b.z, std::memory_order_relaxed);
+                st.tickStartNs.store(nowNs, std::memory_order_relaxed);
+                st.tickDurationNs.store(durNs, std::memory_order_relaxed);
+                st.seq.fetch_add(1, std::memory_order_release); // 偶数 = 稳定
+                st.valid.store(true, std::memory_order_relaxed);
+                lastPlayerStateWriteNs_ = nowNs;
             }
         }
 
@@ -336,6 +258,7 @@ void PhysicsWorld::syncToBusiness(
                 pos.rx = b.x;
                 pos.ry = b.y;
                 pos.rz = b.z;
+                pos.qx = b.qx; pos.qy = b.qy; pos.qz = b.qz; pos.qw = b.qw;
                 pos.simTime = st;
                 q.push(pos); // 满则丢：业务消化不过来时丢弃旧快照可接受
             }
@@ -386,109 +309,11 @@ long long PhysicsWorld::collisions() const {
     return collisions_.load(std::memory_order_relaxed);
 }
 
-void PhysicsWorld::moveKinematicAxis(RigidBody& b, int axis) {
-    // 分轴测试（axis 0=x / 1=y / 2=z）：先沿该轴移动一步，再把 AABB 与静态方块的重叠
-    // 按"该轴最紧的那一格"回退，并清零该轴速度。竖轴向下命中即踩地（onGround）。
-    const double dt = 0.04;
-    const double delta = (axis == 0) ? b.vx * dt : (axis == 1) ? b.vy * dt : b.vz * dt;
-    if (delta == 0.0) return;
+// moveKinematicAxis：已删除（原 65 行，分轴移动 + 分轴回退 + onGround）。
+// 由 Jolt CharacterVirtual 的 ExtendedUpdate 取代（斜坡 / 台阶 / 贴地吸附内置）。
 
-    if (axis == 0) b.x += delta;
-    else if (axis == 1) b.y += delta;
-    else b.z += delta;
-
-    const double leftX  = b.x + b.centerOffsetX - b.halfExtentX;
-    const double rightX = b.x + b.centerOffsetX + b.halfExtentX;
-    const double leftY  = b.y + b.centerOffsetY - b.halfExtentY;
-    const double rightY = b.y + b.centerOffsetY + b.halfExtentY;
-    const double leftZ  = b.z + b.centerOffsetZ - b.halfExtentZ;
-    const double rightZ = b.z + b.centerOffsetZ + b.halfExtentZ;
-
-    const int x0 = static_cast<int>(std::floor(leftX));
-    const int x1 = static_cast<int>(std::floor(rightX));
-    const int y0 = static_cast<int>(std::floor(leftY));
-    const int y1 = static_cast<int>(std::floor(rightY));
-    const int z0 = static_cast<int>(std::floor(leftZ));
-    const int z1 = static_cast<int>(std::floor(rightZ));
-
-    bool hit  = false;
-    int  best = 0; // 该轴最紧的一格：正方向取最大、负方向取最小
-    for (int iy = y0; iy <= y1; ++iy) {
-        for (int iz = z0; iz <= z1; ++iz) {
-            for (int ix = x0; ix <= x1; ++ix) {
-                if (colliders_.find(engine::shared::BlockPos{ix, iy, iz}) ==
-                    colliders_.end())
-                    continue;
-                // 严格区间重叠（贴边不算），与方块组路径用同一判据。
-                if (!(rightX > ix && leftX < ix + 1.0 &&
-                      rightY > iy && leftY < iy + 1.0 &&
-                      rightZ > iz && leftZ < iz + 1.0))
-                    continue;
-                const int cur = (axis == 0) ? ix : (axis == 1) ? iy : iz;
-                if (!hit) { best = cur; hit = true; }
-                else if (delta > 0.0 ? cur > best : cur < best) best = cur;
-            }
-        }
-    }
-    if (!hit) return;
-
-    if (axis == 0) {
-        b.x = (delta > 0.0)
-            ? static_cast<double>(best) - b.centerOffsetX - b.halfExtentX
-            : static_cast<double>(best + 1) - b.centerOffsetX + b.halfExtentX;
-        b.vx = 0.0;
-    } else if (axis == 1) {
-        b.y = (delta > 0.0)
-            ? static_cast<double>(best) - b.centerOffsetY - b.halfExtentY
-            : static_cast<double>(best + 1) - b.centerOffsetY + b.halfExtentY;
-        b.vy = 0.0;
-        if (delta < 0.0) b.onGround = true; // 向下被挡 = 踩地
-    } else {
-        b.z = (delta > 0.0)
-            ? static_cast<double>(best) - b.centerOffsetZ - b.halfExtentZ
-            : static_cast<double>(best + 1) - b.centerOffsetZ + b.halfExtentZ;
-        b.vz = 0.0;
-    }
-}
-
-void PhysicsWorld::recomputeAABB(RigidBody& b) {
-    // 增量重算刚体 AABB（最小包裹）：半宽 = (max-min)/2 + 0.5，中心偏移 = (min+max)/2。
-    // 刚体内方块增删后调用，碰撞箱实时贴合方块组（Sable handleBlockChange 对应物）。
-    // 同时更新原子投影，main 线程运行中可安全采样。
-    if (b.blocks.empty()) {
-        b.halfExtentX = b.halfExtentY = b.halfExtentZ = 0.0;
-        b.centerOffsetX = b.centerOffsetY = b.centerOffsetZ = 0.0;
-    } else {
-        // 用第一个方块初始化极值：全部坐标为正时，从 0 起会算出错误的 min（AABB 撑到 0）。
-        int minX = b.blocks.front().pos.x, maxX = minX;
-        int minY = b.blocks.front().pos.y, maxY = minY;
-        int minZ = b.blocks.front().pos.z, maxZ = minZ;
-        for (const auto& blk : b.blocks) {
-            minX = std::min(minX, blk.pos.x); maxX = std::max(maxX, blk.pos.x);
-            minY = std::min(minY, blk.pos.y); maxY = std::max(maxY, blk.pos.y);
-            minZ = std::min(minZ, blk.pos.z); maxZ = std::max(maxZ, blk.pos.z);
-        }
-        b.centerOffsetX = (minX + maxX) / 2.0;
-        b.centerOffsetY = (minY + maxY) / 2.0;
-        b.centerOffsetZ = (minZ + maxZ) / 2.0;
-        b.halfExtentX = (maxX - minX) / 2.0 + 0.5;
-        b.halfExtentY = (maxY - minY) / 2.0 + 0.5;
-        b.halfExtentZ = (maxZ - minZ) / 2.0 + 0.5;
-    }
-    bodyBlockCountProj_.store(static_cast<long long>(b.blocks.size()),
-                              std::memory_order_relaxed);
-    bodyHalfExtentXProj_.store(b.halfExtentX, std::memory_order_relaxed);
-    bodyCenterOffsetXProj_.store(b.centerOffsetX, std::memory_order_relaxed);
-}
-long long PhysicsWorld::bodyBlockCount() const {
-    return bodyBlockCountProj_.load(std::memory_order_relaxed);
-}
-double PhysicsWorld::bodyHalfExtentX() const {
-    return bodyHalfExtentXProj_.load(std::memory_order_relaxed);
-}
-double PhysicsWorld::bodyCenterOffsetX() const {
-    return bodyCenterOffsetXProj_.load(std::memory_order_relaxed);
-}
+// recomputeAABB：已删除（原 29 行，最小包裹 AABB + 三个原子投影）。
+// 碰撞箱由 Jolt 的 compound shape 自带（GetLocalBounds），不需要手工重算。
 int PhysicsWorld::blockX() const { return blockX_.load(std::memory_order_relaxed); }
 int PhysicsWorld::blockY() const { return blockY_.load(std::memory_order_relaxed); }
 int PhysicsWorld::blockZ() const { return blockZ_.load(std::memory_order_relaxed); }
@@ -523,7 +348,7 @@ void PhysicsWorld::maybeLog() {
                    << ") 在地面=" << (b.onGround ? 1 : 0);
             }
         }
-        LOG_INFO("Physics", os.str());
+        ENGINE_LOG_INFO("Physics", os.str());
     }
 }
 

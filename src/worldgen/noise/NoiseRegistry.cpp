@@ -49,7 +49,7 @@ std::size_t NoiseRegistry::eraseByOwner(const char* owner) {
     }
     // 一致性检查：两张表的 key 必须一一对应（漏删会留下悬垂函数指针）。
     if (tbl.size() != owners().size()) {
-        LOG_WARN("Noise", "噪声注册表与来源表数量不一致（" + std::to_string(tbl.size()) +
+        ENGINE_LOG_WARN("Noise", "噪声注册表与来源表数量不一致（" + std::to_string(tbl.size()) +
                               " vs " + std::to_string(owners().size()) + "）");
     }
     return removed;
@@ -68,13 +68,13 @@ bool NoiseRegistry::make(const char* type, const modapi::NoiseParamC* params,
                          std::int32_t count, NoiseHandle& out) {
     out.reset();
     if (type == nullptr) {
-        LOG_ERROR("Noise", "make 收到空的 type");
+        ENGINE_LOG_ERROR("Noise", "make 收到空的 type");
         return false;
     }
     const auto& entries = table();
     const auto it = entries.find(type);
     if (it == entries.end()) {
-        LOG_ERROR("Noise", std::string("未注册的噪声类型：") + type +
+        ENGINE_LOG_ERROR("Noise", std::string("未注册的噪声类型：") + type +
                                "（引擎不认识任何 type 字符串，一律查注册表）");
         return false;
     }
@@ -83,9 +83,9 @@ bool NoiseRegistry::make(const char* type, const modapi::NoiseParamC* params,
     void* self = it->second.create(params, count, &err);
     if (self == nullptr) {
         if (err != nullptr) {
-            LOG_ERROR("Noise", std::string(type) + " 创建失败：" + err);
+            ENGINE_LOG_ERROR("Noise", std::string(type) + " 创建失败：" + err);
         } else {
-            LOG_ERROR("Noise", std::string(type) + " 创建失败（provider 未给出原因）");
+            ENGINE_LOG_ERROR("Noise", std::string(type) + " 创建失败（provider 未给出原因）");
         }
         return false;
     }

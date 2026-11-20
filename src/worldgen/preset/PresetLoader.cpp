@@ -39,14 +39,14 @@ bool PresetLoader::load(const std::string& name, WorldPreset& out) {
     const std::string presetRel = "worldgen/presets/" + name + ".json";
     fs::path presetPath;
     if (!resource::g_resourceIndex.find(resource::ResourceKind::Data, presetRel, presetPath)) {
-        LOG_ERROR("Preset", "预设未找到：" + presetRel);
+        ENGINE_LOG_ERROR("Preset", "预设未找到：" + presetRel);
         return false;
     }
 
     std::string presetText;
     rapidjson::Document doc;
     if (!readJsonFile(presetPath, presetText, doc)) {
-        LOG_ERROR("Preset", "预设解析失败：" + presetPath.string());
+        ENGINE_LOG_ERROR("Preset", "预设解析失败：" + presetPath.string());
         return false;
     }
 
@@ -65,18 +65,18 @@ bool PresetLoader::load(const std::string& name, WorldPreset& out) {
         const std::string noiseName = noiseField.GetString();
         const NoiseDef* reg = g_noiseDefs.find(noiseName);
         if (reg == nullptr) {
-            LOG_ERROR("Preset", "噪声定义未注册：" + noiseName + "（预设 " + name +
+            ENGINE_LOG_ERROR("Preset", "噪声定义未注册：" + noiseName + "（预设 " + name +
                                  " 引用 data/worldgen/noise/" + noiseName + ".json）");
             return false;
         }
         noiseDef = *reg;
     } else if (noiseField.IsObject()) {
         if (!decodeNoiseDef(noiseField, noiseDef, "(内联) " + name)) {
-            LOG_ERROR("Preset", "内联噪声定义缺 type：" + name);
+            ENGINE_LOG_ERROR("Preset", "内联噪声定义缺 type：" + name);
             return false;
         }
     } else {
-        LOG_ERROR("Preset", "heightmap.noise 须为字符串（名字）或对象：" + name);
+        ENGINE_LOG_ERROR("Preset", "heightmap.noise 须为字符串（名字）或对象：" + name);
         return false;
     }
     tmp.heightType = noiseDef.type;

@@ -45,11 +45,11 @@ void ResourceIndex::addRoot(ResourceKind kind, std::string owner, const fs::path
             ++added;
             continue;
         }
-        LOG_WARN("Resource", "冲突：" + rel + "（已由 " + pos->second.owner +
+        ENGINE_LOG_WARN("Resource", "冲突：" + rel + "（已由 " + pos->second.owner +
                              " 提供，忽略 " + ownerName + "）");
     }
 
-    LOG_INFO("Resource",
+    ENGINE_LOG_INFO("Resource",
              std::string(kind == ResourceKind::Assets ? "assets" : "data") + " 根 " +
              ownerName + "：" + base.string() + "（新增 " + std::to_string(added) + " 个文件）");
 }

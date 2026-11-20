@@ -12,6 +12,7 @@
 #include <unordered_set>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include "shared/chunk/ChunkPos.hpp"
 #include "render/assets/TextureAtlas.hpp"
 #include "render/hud/HudInfo.hpp"
@@ -39,11 +40,13 @@ struct Vertex {
 
 // 顶点着色器 uniform：三个矩阵分开传（MVP 拆解）。
 // model=方块世界变换（目前单位矩阵），view=相机视角，proj=投影。
-// 着色器侧 gl_Position = proj * view * model * pos。
+// 每帧相机矩阵：CPU 预乘成 viewProj 一个矩阵再上传。
+// 着色器侧 gl_Position = viewProj * bodyModel * pos（bodyModel 走 push constant）。
+// 为什么合并：原来传 model/view/proj 三个 mat4（192 字节），而 model 恒为单位阵、
+// 每次绘制都要在 GPU 侧乘一遍；现在 CPU 一次乘法搞定，UBO 缩到 64 字节，
+// 顶点着色器的 uniform 读取从 3 个矩阵降到 1 个。
 struct UniformBufferObject {
-    glm::mat4 model;
-    glm::mat4 view;
-    glm::mat4 proj;
+    glm::mat4 viewProj;   // = proj * view  （model 恒为单位阵，已折进来）
 };
 
 // 一个 chunk 的网格（GPU 资源 + 计数）。key = ChunkPos（ChunkPos.hpp 已提供 hash）。
@@ -163,11 +166,14 @@ public:
     bool rebuildChunkMeshes(const std::vector<engine::shared::Block>& blocks, const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks); // 增量重建：只重建 dirtyChunks 里的 chunk
 
     // ---- 刚体网格（可动方块组）----
-    // 结构变化时上传/替换（打包、方块变动）；位姿每帧只改 bodyPos_，不碰缓冲。
+    // 结构变化时上传/替换（打包、方块变动）；位姿每帧只改 bodyPos_/bodyRot_，不碰缓冲。
     // blocks：刚体局部坐标方块列表（网格由图集 + 方块注册表现场生成）。
     // 只能在渲染线程（或初始化期尚未启线程时）调用：VkBuffer 创建非线程安全。
     bool uploadBodyMesh(int contraptionId, const std::vector<engine::shared::Block>& blocks);
-    void setBodyPose(int contraptionId, double x, double y, double z);
+    // 位姿 = 位置 + 旋转（四元数，glm 顺序 w,x,y,z 由调用方按 {qw,qx,qy,qz} 传入）。
+    // 刚体顶点是局部坐标，model matrix = translate(pos) × mat4_cast(rot)。
+    void setBodyPose(int contraptionId, double x, double y, double z,
+                     float qx, float qy, float qz, float qw);
     void destroyBodyMesh(int contraptionId);
 
     // ---- 实体模型（带骨骼，逐骨骼 draw）----
@@ -268,6 +274,8 @@ private:
     std::unordered_map<int, ChunkMesh>  bodyMeshes_;
     // 刚体世界原点（double：远离原点时 float 精度不足）。位姿更新只动这里。
     std::unordered_map<int, glm::dvec3> bodyPos_;
+    // 刚体姿态（四元数）。与 bodyPos_ 同生命周期（位姿更新只动这里，不碰缓冲）。
+    std::unordered_map<int, glm::quat>  bodyRot_;
     VkCommandPool        cmdPool_ = VK_NULL_HANDLE;
     VkCommandBuffer      cmdBuffers_[kMaxFramesInFlight]{}; // 每帧槽一条（2 组轮转）
     VkSemaphore          imageAvailable_[kMaxFramesInFlight]{}; // acquire 信号量：2 组轮转

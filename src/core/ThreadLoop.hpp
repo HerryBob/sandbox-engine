@@ -23,7 +23,7 @@ public:
         // 线程入口登记日志用名字，日志行才能区分 business / physics / render 等。
         // lambda 捕获 this：name_ 的生命周期覆盖整个线程（stop() 先 join 再析构）。
         thread_ = std::thread([this, body = std::move(body)] {
-            engine::core::setLogThreadName(name_.c_str());
+            engine::core::logSetThreadName(name_.c_str());
             body();
         });
     }

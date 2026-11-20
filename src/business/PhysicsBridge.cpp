@@ -89,7 +89,8 @@ void PhysicsBridge::receiveFromPhysics(
             }
             if (bodyPose)
                 *bodyPose = engine::shared::BodyPose{
-                    res.contraptionId, res.rx, res.ry, res.rz};
+                    res.contraptionId, res.rx, res.ry, res.rz,
+                    res.qx, res.qy, res.qz, res.qw};
             break;
         }
         case engine::shared::PhysicsResult::Type::ContraptionUnpacked: {
@@ -106,7 +107,8 @@ void PhysicsBridge::receiveFromPhysics(
             // 位姿快照（状态语义：后到的覆盖先到的）。
             if (bodyPose)
                 *bodyPose = engine::shared::BodyPose{
-                    res.contraptionId, res.rx, res.ry, res.rz};
+                    res.contraptionId, res.rx, res.ry, res.rz,
+                    res.qx, res.qy, res.qz, res.qw};
             break;
         }
         case engine::shared::PhysicsResult::Type::CollisionEvent:

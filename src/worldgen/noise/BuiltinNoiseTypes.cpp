@@ -36,7 +36,7 @@ void initBuiltinNoiseTypes() {
         "flat", &createFlat, &sampleFlat, &destroyFlat,
     };
     if (!NoiseRegistry::registerType(kFlat)) {
-        LOG_ERROR("Noise", "内置 flat 注册失败（重复注册或注册表已冻结）");
+        ENGINE_LOG_ERROR("Noise", "内置 flat 注册失败（重复注册或注册表已冻结）");
     }
 }
 
@@ -47,10 +47,10 @@ bool selfTestNoiseTypes() {
     {
         NoiseHandle handle;
         if (!NoiseRegistry::make("flat", nullptr, 0, handle)) {
-            LOG_ERROR("Noise", "自检：flat 创建失败");
+            ENGINE_LOG_ERROR("Noise", "自检：flat 创建失败");
             ok = false;
         } else if (handle.sample(0.0, 0.0, 0) != 0.0) {
-            LOG_ERROR("Noise", "自检：flat 的输出应为 0");
+            ENGINE_LOG_ERROR("Noise", "自检：flat 的输出应为 0");
             ok = false;
         }
     }
@@ -59,7 +59,7 @@ bool selfTestNoiseTypes() {
     {
         NoiseHandle handle;
         if (NoiseRegistry::make("不存在的类型", nullptr, 0, handle)) {
-            LOG_ERROR("Noise", "自检：未注册类型应被拒绝");
+            ENGINE_LOG_ERROR("Noise", "自检：未注册类型应被拒绝");
             ok = false;
         }
     }

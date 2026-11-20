@@ -11,7 +11,7 @@ namespace engine::business::base {
 // 无状态、无锁、纯函数——操作谁的数据由调用方传 chunks 引用。
 // 线程安全由调用方负责（业务线程经 World 加锁；其他上下文自行约定）。
 
-// 脏原因常量（ChunkData.dirty 位掩码；替换 magic number）。
+// 脏原因常量（ChunkData::dirty() 位掩码；替换 magic number）。
 inline constexpr std::uint32_t DIRTY_GENERATED = 0x01; // 生成装载标记脏
 inline constexpr std::uint32_t DIRTY_PLACED    = 0x08; // 放置标记脏（持久留档）
 inline constexpr std::uint32_t DIRTY_REMOVED   = 0x10; // 破坏标记脏（持久留档）

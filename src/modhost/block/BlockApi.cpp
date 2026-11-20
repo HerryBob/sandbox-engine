@@ -13,20 +13,20 @@ namespace engine::modhost {
 std::int32_t registerBlockImpl(void* host, const modapi::ModBlockDef* def) {
     if (host == nullptr || def == nullptr) return -1;
     if (def->name == nullptr || def->texture == nullptr) {
-        LOG_ERROR("Mod", "registerBlock 被拒绝：name / texture 为空");
+        ENGINE_LOG_ERROR("Mod", "registerBlock 被拒绝：name / texture 为空");
         return -1;
     }
 
     HostContext* ctx = static_cast<HostContext*>(host);
 
     if (engine::registry::g_blockRegistry.frozen()) {
-        LOG_ERROR("Mod", std::string("registerBlock 被拒绝：方块注册表已冻结，加载顺序错误（")
+        ENGINE_LOG_ERROR("Mod", std::string("registerBlock 被拒绝：方块注册表已冻结，加载顺序错误（")
                   + def->name + "）");
         return -1;
     }
     // 上限 65534：id 0 保留给空气，0xFFFF 保留给"未注册"哨兵，中间全部可用。
     if (ctx->nextBlockId > 65534U) {
-        LOG_ERROR("Mod", "registerBlock 被拒绝：方块 id 已用尽（上限 65534 个）");
+        ENGINE_LOG_ERROR("Mod", "registerBlock 被拒绝：方块 id 已用尽（上限 65534 个）");
         return -1;
     }
 
@@ -46,7 +46,7 @@ std::int32_t registerBlockImpl(void* host, const modapi::ModBlockDef* def) {
     const std::uint16_t id = ctx->nextBlockId;
 
     if (!engine::registry::g_blockRegistry.add(id, info, ctx->currentMod.c_str())) {
-        LOG_ERROR("Mod", std::string("registerBlock 失败：id=") +
+        ENGINE_LOG_ERROR("Mod", std::string("registerBlock 失败：id=") +
                   std::to_string(static_cast<int>(id)) + " 已被占用（" + def->name + "）");
         return -1;
     }
@@ -58,7 +58,7 @@ std::int32_t registerBlockImpl(void* host, const modapi::ModBlockDef* def) {
         << "，质量 " << info.mass
         << "，碰撞 " << (info.solid ? "是" : "否")
         << "，摩擦 " << info.friction << "）";
-    LOG_INFO("Mod", oss.str());
+    ENGINE_LOG_INFO("Mod", oss.str());
     return static_cast<std::int32_t>(id);
 }
 

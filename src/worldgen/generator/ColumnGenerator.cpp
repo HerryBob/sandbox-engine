@@ -17,7 +17,7 @@ namespace {
 
 // 生成失败统一出口（与 1a 同格式，便于对比日志）
 bool fail(const char* msg) {
-    LOG_ERROR("ColumnGen", msg);
+    ENGINE_LOG_ERROR("ColumnGen", msg);
     return false;
 }
 
@@ -38,11 +38,11 @@ bool ColumnGenerator::prepare() {
     for (const Stratum& s : preset_.strata) {
         const std::uint16_t id = engine::registry::findBlockIdByName(s.block);
         if (id == 0xFFFF) {
-            LOG_ERROR("ColumnGen", "地层引用未注册方块：" + s.block);
+            ENGINE_LOG_ERROR("ColumnGen", "地层引用未注册方块：" + s.block);
             return false;
         }
         if (s.depthMin < 0 || s.depthMin > s.depthMax) {
-            LOG_ERROR("ColumnGen", "地层深度区间非法：" + s.block + " [" +
+            ENGINE_LOG_ERROR("ColumnGen", "地层深度区间非法：" + s.block + " [" +
                                    std::to_string(s.depthMin) + "," + std::to_string(s.depthMax) + "]");
             return false;
         }
@@ -55,7 +55,7 @@ bool ColumnGenerator::prepare() {
     if (layers_.front().depthMin != 0) return fail("地层表未覆盖地表深度 0");
     for (std::size_t i = 1; i < layers_.size(); ++i) {
         if (layers_[i].depthMin != layers_[i - 1].depthMax + 1) {
-            LOG_ERROR("ColumnGen", "地层深度断档/重叠：第 " + std::to_string(i) + " 层与上一层不衔接");
+            ENGINE_LOG_ERROR("ColumnGen", "地层深度断档/重叠：第 " + std::to_string(i) + " 层与上一层不衔接");
             return false;
         }
     }
@@ -86,7 +86,7 @@ bool ColumnGenerator::prepare() {
                              params.empty() ? nullptr : params.data(),
                              static_cast<std::int32_t>(params.size()),
                              created)) {
-        LOG_ERROR("ColumnGen", "高度场 provider 创建失败：" + preset_.heightType);
+        ENGINE_LOG_ERROR("ColumnGen", "高度场 provider 创建失败：" + preset_.heightType);
         return false;
     }
     height_ = std::move(created);
@@ -135,8 +135,8 @@ void ColumnGenerator::generateColumn(const ColPos& col, ColumnBlocks& out) const
                 if (!found) continue;   // 连续性已校验，理论上不可达；兜底跳过
 
                 // y ∈ [0,63] → 层号 0..3；写入按块内坐标 &15 定位
-                out.chunks[y >> 4].set(worldX, y, worldZ,
-                                       static_cast<engine::shared::PaletteEntry>(type));
+                out.chunks[y >> 4].paletteSet(worldX, y, worldZ,
+                                              static_cast<engine::shared::PaletteEntry>(type));
                 ++out.blockCount;
             }
         }

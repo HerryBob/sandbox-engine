@@ -42,14 +42,14 @@ bool pivotAtTop(const std::string& name) {
 bool loadBbModel(const std::string& path, EntityModel& out) {
     std::string text;
     if (!readTextFile(path, text)) {
-        LOG_WARN("BbModel", "读不到文件：" + path);
+        ENGINE_LOG_WARN("BbModel", "读不到文件：" + path);
         return false;
     }
 
     rapidjson::Document doc;
     doc.Parse(text.c_str());
     if (doc.HasParseError() || !doc.IsObject()) {
-        LOG_WARN("BbModel", path + " JSON 解析失败");
+        ENGINE_LOG_WARN("BbModel", path + " JSON 解析失败");
         return false;
     }
 
@@ -72,7 +72,7 @@ bool loadBbModel(const std::string& path, EntityModel& out) {
     }
 
     if (!doc.HasMember("elements") || !doc["elements"].IsArray()) {
-        LOG_WARN("BbModel", path + " 缺 elements");
+        ENGINE_LOG_WARN("BbModel", path + " 缺 elements");
         return false;
     }
 
@@ -118,7 +118,7 @@ bool loadBbModel(const std::string& path, EntityModel& out) {
     }
 
     if (out.bones.empty()) {
-        LOG_WARN("BbModel", path + " 没有可用元素");
+        ENGINE_LOG_WARN("BbModel", path + " 没有可用元素");
         return false;
     }
 
@@ -147,7 +147,7 @@ bool loadBbModel(const std::string& path, EntityModel& out) {
         }
     }
 
-    LOG_INFO("BbModel", "加载 " + path
+    ENGINE_LOG_INFO("BbModel", "加载 " + path
              + " 骨骼=" + std::to_string(out.bones.size())
              + " 贴图=" + std::to_string(out.texturePaths.size())
              + " 分辨率=" + std::to_string(out.texWidth) + "x" + std::to_string(out.texHeight));

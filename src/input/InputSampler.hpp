@@ -94,16 +94,6 @@ private:
     std::atomic<double> lastCursorX_{0.0}; // 光标上次位置（增量计算基准）
     std::atomic<double> lastCursorY_{0.0};
 
-    // F3 调试浮层开关的按住状态（只在回调里读写，主线程独占 → 不需要原子）。
-    // 作用：把 auto-repeat 和 GLFW 偶发的 REPEAT 误报都归并成"按一下切一次"。
-    bool f3Held_ = false;
-
-    // F4 相机模式切换的按住状态（同上：只归并边沿，不承担状态）。
-    bool f4Held_ = false;
-
-    // F5 第一/第三人称切换的按住状态（同上）。
-    bool f5Held_ = false;
-
     // ---- 相机状态（输入线程独占写）----
     // 出生点：装配期由 main 按生成地形实际高度设定（不写死世界高度）；R 键回到这里。
     double spawnX_ = 0.0, spawnY_ = 1.5, spawnZ_ = 3.5;

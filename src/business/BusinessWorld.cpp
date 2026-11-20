@@ -247,7 +247,7 @@ void BusinessWorld::maybeLog() {
            << " 放置/破坏=" << blocksPlaced() << "/" << blocksRemoved()
            << "(拒" << placementsRejected() << "/" << removalsRejected() << ")"
            << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Business);
-        LOG_INFO("Business", os.str());
+        ENGINE_LOG_INFO("Business", os.str());
     }
 }
 

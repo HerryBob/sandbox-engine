@@ -33,18 +33,22 @@ public:
     std::optional<engine::shared::Block> findBlock(const engine::shared::BlockPos& p) const;
 
     // 单格查询的三种结果。
-    enum class BlockState : std::uint8_t {
+    enum class LookupResult : std::uint8_t {
         NotLoaded = 0,  // 所在 chunk 未加载
         Air       = 1,  // 已加载，该格是空气
         Occupied  = 2,  // 已加载，该格有方块
     };
     // p：世界坐标；outType：仅返回 Occupied 时写入。
-    BlockState lookupBlock(const engine::shared::BlockPos& p,
+    LookupResult lookupBlock(const engine::shared::BlockPos& p,
                            engine::shared::BlockType& outType) const;
     // 已加载的非空 chunk 数量。
     std::size_t chunkCount() const;
 
     // 调色板统计（验收用）：索引位宽分布、字典项数、实际占用字节。
+    // 验收/诊断专用：不属于 World 的核心职责。
+    // 统计各 chunk 的调色板位宽分布和内存占用，用于验证调色板压缩效果。
+    // 重构时应移到独立的诊断模块（如 PaletteDiagnostics），World 只提供
+    // "遍历所有 chunk" 的能力，统计逻辑由诊断模块自己做。
     struct PaletteStats {
         std::size_t chunks = 0;
         std::size_t bits4 = 0;

@@ -27,3 +27,10 @@ Model/
 *.o
 *.ilk
 *.pdb
+
+# 第三方物理库源码（34.7MB / 1250 文件；当前未被 CMake 引用。
+# 接入 Jolt 时再决定 vendor（直接入库）还是 submodule，避免现在把大目录塞进历史）
+third_party/JoltPhysics/
+
+# 个人通读笔记（逐单元走查记录 + STATE_OF_CODE + 文件分析），本地保留、不入库
+docs/通读记录/

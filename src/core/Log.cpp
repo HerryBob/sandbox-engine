@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <atomic>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -22,7 +23,7 @@ namespace {
 
 // 初始化/关闭互斥：只在启动与退出各一次，不参与日志热路径。
 std::mutex g_initMutex;
-std::shared_ptr<spdlog::logger> g_logger;
+std::atomic<std::shared_ptr<spdlog::logger>> g_logger{ nullptr };
 
 // 每个线程独立一份线程名（thread_local），由 ThreadLoop::start 或 main 登记。
 // 存 std::string 而非裸指针，调用方传临时字符串也不会悬垂。
@@ -42,18 +43,17 @@ spdlog::level::level_enum toSpdLevel(LogLevel level) {
 
 } // namespace
 
-void initLog(LogLevel level) {
+void logInit(LogLevel level) {
     std::lock_guard<std::mutex> lock(g_initMutex);
-    if (g_logger != nullptr) return;
+    if (g_logger.load(std::memory_order_acquire) != nullptr) return;
 
 #ifdef _WIN32
     // 日志文本按 UTF-8 输出；控制台代码页不切到 65001 中文会乱码。
     SetConsoleOutputCP(CP_UTF8);
 #endif
-
-    // 日志目录：工作目录已由 chdirToExeDir 固定到 exe 目录。
     std::error_code ec;
     std::filesystem::create_directories("logs", ec);
+    if (ec) std::cerr << "[log] cannot create log directory: " << ec.message() << "\n";
 
     auto consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     consoleSink->set_level(spdlog::level::trace);
@@ -64,7 +64,9 @@ void initLog(LogLevel level) {
         fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
             "logs/engine.log", 10 * 1024 * 1024, 5);
         fileSink->set_level(spdlog::level::trace);
-    } catch (const spdlog::spdlog_ex&) {
+    }
+    catch (const spdlog::spdlog_ex& e) {
+        std::cerr << "[log] file sink disabled: " << e.what() << "\n";
         fileSink = nullptr;
     }
 
@@ -74,31 +76,47 @@ void initLog(LogLevel level) {
 
     // 异步写：队列 8192，满时阻塞（宁可慢一点也不丢日志）。
     // 后台线程只有 1 个，日志量低（启动/事件级），不会成为瓶颈。
-    spdlog::init_thread_pool(8192, 1);
-    auto logger = std::make_shared<spdlog::async_logger>(
-        "engine", sinks.begin(), sinks.end(), spdlog::thread_pool(),
-        spdlog::async_overflow_policy::block);
+    try {
+        spdlog::init_thread_pool(8192, 1);
+        auto logger = std::make_shared<spdlog::async_logger>(
+            "engine", sinks.begin(), sinks.end(), spdlog::thread_pool(),
+            spdlog::async_overflow_policy::block);
 
-    // 每行：[时间][等级][线程ID][线程名][tag] 消息（线程名与 tag 由 log() 拼进消息体）。
-    logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e][%l][%t]%v");
-    logger->set_level(toSpdLevel(level));
-    logger->flush_on(spdlog::level::warn);
+        logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e][%l][%t]%v");
+        logger->set_level(toSpdLevel(level));
+        logger->flush_on(spdlog::level::warn);
 
-    g_logger = logger;
-    spdlog::set_default_logger(logger);
+        g_logger.store(logger, std::memory_order_release);
+        spdlog::set_default_logger(logger);
+    }
+    catch (const std::exception& e) {
+        // 回滚：不能留下"线程池已建、g_logger 却非空/半初始化"的状态
+        g_logger.store(nullptr, std::memory_order_release);
+        spdlog::shutdown();          // 若线程池已建，关掉它；没建则无害
+        std::cerr << "[log] init failed, fallback to stderr: " << e.what() << "\n";
+    }
 }
 
-void shutdownLog() {
+void logShutdown() {
     std::lock_guard<std::mutex> lock(g_initMutex);
-    if (g_logger == nullptr) return;
-    spdlog::shutdown();   // 停止线程池并 flush 剩余队列
-    g_logger.reset();
+    auto old = g_logger.exchange(nullptr, std::memory_order_acq_rel);
+    if (!old) return;
+    spdlog::shutdown();
 }
-
-LogLevel parseLogLevel(const std::string& text, LogLevel fallback) {
+//大小写处理：debug/info/warn/error，无法识别时返回 fallback。
+LogLevel logParseLevel(const std::string& text, LogLevel fallback) {
+	//去除前后空白字符
+    size_t b = 0, e = text.size();
+    auto isWs = [](char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+        };
+    while (b < e && isWs(text[b])) ++b;
+    while (e > b && isWs(text[e - 1])) --e;
+	// 转小写
     std::string lower;
-    lower.reserve(text.size());
-    for (char c : text) {
+    lower.reserve(e - b);
+    for (size_t i = b; i < e; ++i) {             // ← 遍历 [b, e)
+        char c = text[i];
         lower.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c);
     }
     if (lower == "debug") return LogLevel::Debug;
@@ -107,8 +125,8 @@ LogLevel parseLogLevel(const std::string& text, LogLevel fallback) {
     if (lower == "error") return LogLevel::Error;
     return fallback;
 }
-
-void setLogThreadName(const char* name) {
+//确定日志发生线程名
+void logSetThreadName(const char* name) {
     if (name == nullptr || name[0] == '\0') {
         g_threadName = "?";
         return;
@@ -117,16 +135,15 @@ void setLogThreadName(const char* name) {
 }
 
 void log(LogLevel level, const char* tag, const std::string& msg) {
+
     const char* shownTag = (tag != nullptr && tag[0] != '\0') ? tag : "?";
-    // 在调用线程内拼好整行文本：异步 sink 在后台线程格式化，
-    // 若把 thread_local 当格式化参数传过去，后台线程读到的是日志线程自己的名字。
     const std::string line = "[" + g_threadName + "][" + shownTag + "] " + msg;
-    if (g_logger == nullptr) {
-        // 未初始化（理论上 main 已 initLog）：退回控制台，保持可用。
-        std::cout << line << "\n";
+    auto lg = g_logger.load(std::memory_order_acquire);
+    if (!lg) {
+        std::cerr << "[uninit] " << line << std::endl;
         return;
     }
-    g_logger->log(toSpdLevel(level), line);   // 该重载按纯文本处理，不做 {} 格式化
+    lg->log(toSpdLevel(level), line);
 }
 
 } // namespace engine::core

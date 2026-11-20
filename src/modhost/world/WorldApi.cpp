@@ -18,11 +18,11 @@ std::int32_t getBlockImpl(void* host, const modapi::ModBlockPos* pos, std::uint1
     const engine::shared::BlockPos p{pos->x, pos->y, pos->z};
     engine::shared::BlockType type = engine::shared::BlockType::Air;
     switch (world->lookupBlock(p, type)) {
-        case engine::business::World::BlockState::NotLoaded:
+        case engine::business::World::LookupResult::NotLoaded:
             return modapi::kBlockNotLoaded;
-        case engine::business::World::BlockState::Air:
+        case engine::business::World::LookupResult::Air:
             return modapi::kBlockAir;
-        case engine::business::World::BlockState::Occupied:
+        case engine::business::World::LookupResult::Occupied:
             *outId = static_cast<std::uint16_t>(type);
             return modapi::kBlockOccupied;
     }

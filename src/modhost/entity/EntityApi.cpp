@@ -24,13 +24,13 @@ static std::string resolveModResourcePath(const std::string& modName, const char
 std::int32_t registerEntityImpl(void* host, const modapi::ModEntityDef* def) {
     if (host == nullptr || def == nullptr) return -1;
     if (def->name == nullptr || def->model == nullptr) {
-        LOG_ERROR("Mod", "registerEntity 被拒绝：name / model 为空");
+        ENGINE_LOG_ERROR("Mod", "registerEntity 被拒绝：name / model 为空");
         return -1;
     }
     // 尺寸与速度必须是正常值：负数会让物理与相机算出无意义结果。
     if (def->width <= 0.0f || def->height <= 0.0f || def->depth <= 0.0f ||
         def->eyeHeight < 0.0f || def->moveSpeed < 0.0f || def->jumpSpeed < 0.0f) {
-        LOG_ERROR("Mod", std::string("registerEntity 被拒绝：尺寸/速度为非法值（")
+        ENGINE_LOG_ERROR("Mod", std::string("registerEntity 被拒绝：尺寸/速度为非法值（")
                   + def->name + "）");
         return -1;
     }
@@ -38,13 +38,13 @@ std::int32_t registerEntityImpl(void* host, const modapi::ModEntityDef* def) {
     HostContext* ctx = static_cast<HostContext*>(host);
 
     if (g_entityTypeRegistry.frozen()) {
-        LOG_ERROR("Mod", std::string("registerEntity 被拒绝：实体类型表已冻结，加载顺序错误（")
+        ENGINE_LOG_ERROR("Mod", std::string("registerEntity 被拒绝：实体类型表已冻结，加载顺序错误（")
                   + def->name + "）");
         return -1;
     }
     // 类型 id 上限 65534：给实例分配与调试留出可读范围。
     if (ctx->nextEntityTypeId > 65534) {
-        LOG_ERROR("Mod", "registerEntity 被拒绝：实体类型 id 已用尽（上限 65535 个）");
+        ENGINE_LOG_ERROR("Mod", "registerEntity 被拒绝：实体类型 id 已用尽（上限 65535 个）");
         return -1;
     }
 
@@ -65,7 +65,7 @@ std::int32_t registerEntityImpl(void* host, const modapi::ModEntityDef* def) {
     const std::int32_t id = ctx->nextEntityTypeId;
 
     if (!g_entityTypeRegistry.add(id, info, ctx->currentMod.c_str())) {
-        LOG_ERROR("Mod", std::string("registerEntity 失败：id=") + std::to_string(id) +
+        ENGINE_LOG_ERROR("Mod", std::string("registerEntity 失败：id=") + std::to_string(id) +
                   " 已被占用（" + def->name + "）");
         return -1;
     }
@@ -80,7 +80,7 @@ std::int32_t registerEntityImpl(void* host, const modapi::ModEntityDef* def) {
         << "，步速 " << info.moveSpeed
         << "，跳速 " << info.jumpSpeed
         << "，动画回调 " << (info.onAnimate != nullptr ? "有" : "无") << "）";
-    LOG_INFO("Mod", oss.str());
+    ENGINE_LOG_INFO("Mod", oss.str());
     return id;
 }
 

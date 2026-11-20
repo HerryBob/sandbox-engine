@@ -57,7 +57,7 @@ namespace engine::registry {
 
         if (g_builtinBlockIds.stone == 0xFFFF || g_builtinBlockIds.dirt == 0xFFFF ||
             g_builtinBlockIds.grass == 0xFFFF) {
-            LOG_WARN("Block", "内置方块缺失（mods/blocks.dll 未加载？）——世界生成将没有地表");
+            ENGINE_LOG_WARN("Block", "内置方块缺失（mods/blocks.dll 未加载？）——世界生成将没有地表");
         }
     }
 }

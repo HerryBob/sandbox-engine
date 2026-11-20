@@ -41,13 +41,13 @@ fs::path findSingleDll(const fs::path& modDir, const std::string& shown) {
         if (!entry.is_regular_file()) continue;
         if (entry.path().extension() != ".dll") continue;
         if (!found.empty()) {
-            LOG_ERROR("Mod", "拒绝加载 " + shown + "：目录内存在多个 DLL");
+            ENGINE_LOG_ERROR("Mod", "拒绝加载 " + shown + "：目录内存在多个 DLL");
             return fs::path{};
         }
         found = entry.path();
     }
     if (found.empty()) {
-        LOG_WARN("Mod", "跳过 " + shown + "：目录内没有 DLL");
+        ENGINE_LOG_WARN("Mod", "跳过 " + shown + "：目录内没有 DLL");
     }
     return found;
 }
@@ -58,7 +58,7 @@ std::vector<ModLoader::LoadedMod> ModLoader::s_mods_;
 
 std::size_t ModLoader::loadAll(const std::string& dir) {
     if (!fs::exists(dir) || !fs::is_directory(dir)) {
-        LOG_INFO("Mod", "模组目录不存在，按 0 个模组继续（" + dir + "）");
+        ENGINE_LOG_INFO("Mod", "模组目录不存在，按 0 个模组继续（" + dir + "）");
         return 0;
     }
 
@@ -97,7 +97,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
     std::vector<Candidate> candidates;
     for (const auto& entry : fs::directory_iterator(dir)) {
         if (!entry.is_directory()) {
-            LOG_WARN("Mod", "忽略 mods/ 下的散装文件（模组须放进子目录）：" +
+            ENGINE_LOG_WARN("Mod", "忽略 mods/ 下的散装文件（模组须放进子目录）：" +
                              entry.path().filename().string());
             continue;
         }
@@ -109,14 +109,14 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
 
         const fs::path manifestPath = entry.path() / "mod.json";
         if (!fs::exists(manifestPath)) {
-            LOG_WARN("Mod", "跳过 " + c.dirName + "：缺少 mod.json（模组必须有清单）");
+            ENGINE_LOG_WARN("Mod", "跳过 " + c.dirName + "：缺少 mod.json（模组必须有清单）");
             continue;
         }
         if (!ManifestReader::load(manifestPath.string(), c.manifest)) {
-            LOG_ERROR("Mod", "拒绝加载 " + c.dirName + "：mod.json 非法");
+            ENGINE_LOG_ERROR("Mod", "拒绝加载 " + c.dirName + "：mod.json 非法");
             continue;
         }
-        LOG_INFO("Mod", "清单：" + c.manifest.id + "（phase=" +
+        ENGINE_LOG_INFO("Mod", "清单：" + c.manifest.id + "（phase=" +
                        phaseName(c.manifest.phase) + "，依赖 " +
                        std::to_string(c.manifest.dependencies.size()) + " 个）");
         candidates.push_back(c);
@@ -142,7 +142,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
 
     const SortResult sorted = ModSorter::sort(items);
     for (const RejectedMod& r : sorted.rejected) {
-        LOG_ERROR("Mod", "拒绝加载 " + candidates[r.index].dirName + "：" + r.reason);
+        ENGINE_LOG_ERROR("Mod", "拒绝加载 " + candidates[r.index].dirName + "：" + r.reason);
     }
 
     // 加载失败的模组 id 集合：被依赖方失败时，依赖方一并跳过（运行期级联）
@@ -158,7 +158,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
         bool missingDep = false;
         for (const std::string& dep : items[idx].dependencies) {
             if (failedIds.count(dep) == 0) continue;
-            LOG_ERROR("Mod", "跳过 " + shown + "：依赖的模组未加载（" + dep + "）");
+            ENGINE_LOG_ERROR("Mod", "跳过 " + shown + "：依赖的模组未加载（" + dep + "）");
             missingDep = true;
             break;
         }
@@ -169,7 +169,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
 
         HMODULE h = ::LoadLibraryW(c.dll.wstring().c_str());
         if (h == nullptr) {
-            LOG_ERROR("Mod", "LoadLibrary 失败（GetLastError=" +
+            ENGINE_LOG_ERROR("Mod", "LoadLibrary 失败（GetLastError=" +
                       std::to_string(static_cast<long>(::GetLastError())) + "）：" + shown);
             failedIds.insert(modId);
             continue;
@@ -183,7 +183,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
             reinterpret_cast<void*>(::GetProcAddress(h, modapi::kDestroyModSymbol)));
 
         if (create == nullptr || destroy == nullptr) {
-            LOG_ERROR("Mod", "拒绝加载 " + shown + "：缺少 CreateMod / DestroyMod 导出符号");
+            ENGINE_LOG_ERROR("Mod", "拒绝加载 " + shown + "：缺少 CreateMod / DestroyMod 导出符号");
             failedIds.insert(modId);
             ::FreeLibrary(h);
             continue;
@@ -192,7 +192,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
         // 阶段③：实例化。构造函数里不做注册（注册一律放 onLoad，方便失败回滚）
         modapi::IMod* mod = create(&g_api);
         if (mod == nullptr) {
-            LOG_ERROR("Mod", "CreateMod 返回空指针：" + shown);
+            ENGINE_LOG_ERROR("Mod", "CreateMod 返回空指针：" + shown);
             failedIds.insert(modId);
             ::FreeLibrary(h);
             continue;
@@ -204,19 +204,19 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
 
         // 清单 id 与 DLL 自报名字不一致：只警告，不拒绝（排序与拒绝以清单为准）
         if (c.manifest.id != mod->name()) {
-            LOG_WARN("Mod", "清单 id 与 IMod::name() 不一致：" + c.manifest.id +
+            ENGINE_LOG_WARN("Mod", "清单 id 与 IMod::name() 不一致：" + c.manifest.id +
                              " vs " + mod->name() + "（" + shown + "）");
         }
 
         // 阶段④：初始化。模组在这里校验 api->version 并注册内容。
         if (!mod->onLoad(&g_api)) {
-            LOG_ERROR("Mod", "onLoad 返回 false，放弃该模组：" + shown);
+            ENGINE_LOG_ERROR("Mod", "onLoad 返回 false，放弃该模组：" + shown);
             // 失败回滚：把这个模组已经注册进去的内容按来源清掉，避免残留
             // （噪声表里存的是它的函数指针，随后的 FreeLibrary 会让它们悬垂）。
             const std::size_t rolledBack = engine::worldgen::NoiseRegistry::eraseByOwner(
                 g_host.currentMod.c_str());
             if (rolledBack > 0) {
-                LOG_INFO("Mod", "回滚噪声注册 " + std::to_string(rolledBack) + " 个（" + shown + "）");
+                ENGINE_LOG_INFO("Mod", "回滚噪声注册 " + std::to_string(rolledBack) + " 个（" + shown + "）");
             }
             destroy(mod);
             g_host.currentMod.clear();
@@ -228,7 +228,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
         std::ostringstream oss;
         oss << "加载成功：" << mod->name() << " v" << mod->version()
             << "（" << shown << "）";
-        LOG_INFO("Mod", oss.str());
+        ENGINE_LOG_INFO("Mod", oss.str());
 
         // 模组资源：目录下的 assets/ 与 data/ 并入全局索引（不存在则跳过）。
         // 失败模组不登记 —— 代码没加载，其资源也不该占用名字。
@@ -244,9 +244,9 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
     }
 
     if (okCount == 0) {
-        LOG_INFO("Mod", "本次未加载任何模组");
+        ENGINE_LOG_INFO("Mod", "本次未加载任何模组");
     } else {
-        LOG_INFO("Mod", "加载 " + std::to_string(okCount) + " 个模组");
+        ENGINE_LOG_INFO("Mod", "加载 " + std::to_string(okCount) + " 个模组");
     }
     return okCount;
 }
@@ -269,13 +269,13 @@ void ModLoader::unloadAll() {
         const std::size_t removedNoise =
             engine::worldgen::NoiseRegistry::eraseByOwner(m.name.c_str());
         if (removedNoise > 0) {
-            LOG_INFO("Mod", "已清理噪声注册 " + std::to_string(removedNoise) +
+            ENGINE_LOG_INFO("Mod", "已清理噪声注册 " + std::to_string(removedNoise) +
                                 " 个（" + m.name + "）");
         }
         const std::size_t keptBlocks =
             engine::registry::g_blockRegistry.countByOwner(m.name.c_str());
         if (keptBlocks > 0) {
-            LOG_INFO("Mod", "保留方块定义 " + std::to_string(keptBlocks) +
+            ENGINE_LOG_INFO("Mod", "保留方块定义 " + std::to_string(keptBlocks) +
                                 " 个（" + m.name + "，纯数据副本，卸载后仍可用）");
         }
         // 实体类型必须清除（与方块相反）：EntityTypeInfo 里存着 onAnimate 函数指针，
@@ -295,7 +295,7 @@ void ModLoader::unloadAll() {
                 engine::modhost::g_entityTypeRegistry.erase(typeId);
             }
             if (!owned.empty()) {
-                LOG_INFO("Mod", "已清理实体类型 " + std::to_string(owned.size())
+                ENGINE_LOG_INFO("Mod", "已清理实体类型 " + std::to_string(owned.size())
                                     + " 个、实例 " + std::to_string(removedInstances)
                                     + " 个（" + m.name + "）");
             }
@@ -304,13 +304,13 @@ void ModLoader::unloadAll() {
             ::FreeLibrary(static_cast<HMODULE>(m.handle));
             m.handle = nullptr;
         }
-        LOG_INFO("Mod", "已卸载：" + m.path + "（" + m.name + "）");
+        ENGINE_LOG_INFO("Mod", "已卸载：" + m.path + "（" + m.name + "）");
     }
     s_mods_.clear();
 
     // 卸载闭环自检：噪声表与实体类型表应只剩引擎自身注册的（owner 为空），
     // 方块表按策略保留（id 已进 chunk 数据）。这是"按来源清除没有误删引擎内置内容"的直接证据。
-    LOG_INFO("Mod", "卸载后注册表：方块 " +
+    ENGINE_LOG_INFO("Mod", "卸载后注册表：方块 " +
                         std::to_string(engine::registry::g_blockRegistry.size()) +
                         " 个（按策略保留），噪声 " +
                         std::to_string(engine::worldgen::NoiseRegistry::size()) +

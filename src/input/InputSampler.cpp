@@ -31,7 +31,7 @@ void InputSampler::attach(GLFWwindow* window,
     glfwGetCursorPos(window, &x, &y);
     lastCursorX_.store(x, std::memory_order_relaxed);
     lastCursorY_.store(y, std::memory_order_relaxed);
-    LOG_INFO("Input", "键盘/鼠标回调已注册（真实输入）");
+    ENGINE_LOG_INFO("Input", "键盘/鼠标回调已注册（真实输入）");
 }
 
 void InputSampler::sample() {
@@ -67,9 +67,10 @@ void InputSampler::sample() {
     if (playerMode_) {
         if (playerOut_ != nullptr &&
             playerOut_->valid.load(std::memory_order_relaxed)) {
-            const double px = playerOut_->x.load(std::memory_order_relaxed);
-            const double py = playerOut_->y.load(std::memory_order_relaxed);
-            const double pz = playerOut_->z.load(std::memory_order_relaxed);
+            // 插值读：本线程 125Hz 高于物理 25Hz，直接读 x/y/z 会把 40ms 阶梯原样
+            // 采进相机位置，渲染线程再怎么高频采样也只是在采同一段阶梯。
+            double px = 0.0, py = 0.0, pz = 0.0;
+            playerOut_->readInterpolated(px, py, pz);
             if (thirdPerson_) {
                 // 第三人称：相机 = 瞄准点沿视线反方向后退固定距离。
                 // 因为相机位置是从瞄准点沿 lookDir 反向推出来的，视线正好穿过瞄准点，
@@ -107,6 +108,12 @@ void InputSampler::sample() {
             }
         }
 
+        // 朝向同步给玩家体：物理线程不写这个字段（朝向由鼠标驱动，不是物理量），
+        // 渲染线程读它让模型整体转向。弧度、累加不清零，与相机 yaw 同一约定（yaw = 0 朝 -Z）。
+        if (playerOut_ != nullptr) {
+            playerOut_->yaw.store(yaw_, std::memory_order_relaxed);
+        }
+
         writeCameraState();
         spaceHeldPrev_ = spaceDown;
         if (modeChanged) {
@@ -114,7 +121,7 @@ void InputSampler::sample() {
             os << "相机模式：玩家跟随 " << (thirdPerson_ ? "第三人称" : "第一人称")
                << " 眼高=" << eyeHeight_ << " 距离=" << (thirdPerson_ ? kThirdPersonDist_ : 0.0)
                << " 相机=(" << camX_ << "," << camY_ << "," << camZ_ << ")";
-            LOG_INFO("Input", os.str());
+            ENGINE_LOG_INFO("Input", os.str());
         }
         return;
     }
@@ -154,7 +161,7 @@ void InputSampler::sample() {
     if (modeChanged) {
         std::ostringstream os;
         os << "相机模式：自由相机 相机=(" << camX_ << "," << camY_ << "," << camZ_ << ")";
-        LOG_INFO("Input", os.str());
+        ENGINE_LOG_INFO("Input", os.str());
     }
 }
 
@@ -169,7 +176,7 @@ void InputSampler::setSpawn(double x, double y, double z, double yawRad, double 
 void InputSampler::setBodyMetrics(double eyeHeight, double walkSpeed) {
     if (eyeHeight > 0.0) eyeHeight_ = eyeHeight;
     if (walkSpeed > 0.0) walkSpeed_ = walkSpeed;
-    LOG_INFO("Input", "体型数值注入：眼高=" + std::to_string(eyeHeight_)
+    ENGINE_LOG_INFO("Input", "体型数值注入：眼高=" + std::to_string(eyeHeight_)
         + " 步速=" + std::to_string(walkSpeed_));
 }
 
@@ -191,33 +198,22 @@ void InputSampler::keyboardCb(GLFWwindow* w, int key, int scancode, int action, 
     if (!self || !w) return;
     (void)scancode; (void)mods;   // 未使用（签名保留 GLFW 回调形参）
 
-    // F3 单独处理：用"按住状态位"做边沿判定，而不是只认 GLFW_PRESS。两个原因：
-    //  ① GLFW 在 Windows 上偶尔把一次独立按键报成 GLFW_REPEAT（系统 key state 未复位）；
-    //     只认 PRESS 会漏按，按一下没反应。
-    //  ② 按住不放时系统 auto-repeat 会持续送来按键事件，必须挡住，
-    //     否则 HUD 会以几十次/秒的速率反复显隐。
-    // 状态位语义：f3Held_ = true 表示"上一次事件说明 F3 仍被按住"。
+    // F3 单独处理：只认 GLFW_PRESS。
+    //  ① auto-repeat（按住不放 / 系统按键状态未复位时的持续重发）一律是 GLFW_REPEAT，
+    //     只认 PRESS 就不会被它反复触发；用"按住状态位"反而会在 RELEASE 丢失时失去保护。
+    //  ② GLFW 在 Windows 上只有 lParam 的重复位被置上才报 REPEAT，真实按下仍是 PRESS，
+    //     所以不会漏按。
     if (key == GLFW_KEY_F3) {
-        if (action == GLFW_RELEASE) {
-            self->f3Held_ = false;   // 松开：允许下一次按下再触发
-            return;
-        }
-        if (self->f3Held_) return;   // 仍按住（含 auto-repeat）→ 忽略
-        self->f3Held_ = true;
+        if (action != GLFW_PRESS) return;   // RELEASE / REPEAT 都不触发
         if (self->clickOut_) {
             self->clickOut_->toggleHud.store(true, std::memory_order_relaxed);
         }
         return;
     }
 
-    // F4 同上：边沿判定后置请求位，模式状态由输入线程翻转。
+    // F4 同上：只认按下边沿，模式状态由输入线程翻转。
     if (key == GLFW_KEY_F4) {
-        if (action == GLFW_RELEASE) {
-            self->f4Held_ = false;
-            return;
-        }
-        if (self->f4Held_) return;
-        self->f4Held_ = true;
+        if (action != GLFW_PRESS) return;
         if (self->clickOut_) {
             self->clickOut_->togglePlayerMode.store(true, std::memory_order_relaxed);
         }
@@ -227,12 +223,7 @@ void InputSampler::keyboardCb(GLFWwindow* w, int key, int scancode, int action, 
     // F5：玩家模式下切换第一/第三人称（自由相机模式下按了无效，直接忽略）。
     // 状态只在输入线程改，这里只置请求位。
     if (key == GLFW_KEY_F5) {
-        if (action == GLFW_RELEASE) {
-            self->f5Held_ = false;
-            return;
-        }
-        if (self->f5Held_) return;
-        self->f5Held_ = true;
+        if (action != GLFW_PRESS) return;
         if (self->clickOut_) {
             self->clickOut_->toggleThirdPerson.store(true, std::memory_order_relaxed);
         }

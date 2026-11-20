@@ -25,7 +25,7 @@ bool TextureAtlas::build() {
                                            "atlases/blocks.json", declPath)) {
             std::ifstream in(declPath);
             if (!in) {
-                LOG_WARN("Atlas", "图集声明打开失败：atlases/blocks.json");
+                ENGINE_LOG_WARN("Atlas", "图集声明打开失败：atlases/blocks.json");
             } else {
                 const std::string text{std::istreambuf_iterator<char>(in),
                                        std::istreambuf_iterator<char>()};
@@ -33,7 +33,7 @@ bool TextureAtlas::build() {
                 doc.Parse(text.c_str());
                 if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("textures") ||
                     !doc["textures"].IsArray()) {
-                    LOG_WARN("Atlas", "图集声明解析失败或缺 textures 数组：atlases/blocks.json");
+                    ENGINE_LOG_WARN("Atlas", "图集声明解析失败或缺 textures 数组：atlases/blocks.json");
                 } else {
                     std::set<std::string> uniq;
                     for (const auto& v : doc["textures"].GetArray()) {
@@ -45,7 +45,7 @@ bool TextureAtlas::build() {
                 }
             }
         } else {
-            LOG_WARN("Atlas", "图集声明 atlases/blocks.json 缺失 → 回退按注册表收集");
+            ENGINE_LOG_WARN("Atlas", "图集声明 atlases/blocks.json 缺失 → 回退按注册表收集");
         }
     }
 
@@ -57,7 +57,7 @@ bool TextureAtlas::build() {
             resource::g_resourceIndex.ownerOf(resource::ResourceKind::Assets,
                                               "textures/block/" + std::string(texName) + ".png");
         if (texOwner.empty() || texOwner == "engine" || texOwner == blockOwner) return;
-        LOG_WARN("Atlas", "贴图跨模组引用：" + std::string(texName) + " 由 " + texOwner +
+        ENGINE_LOG_WARN("Atlas", "贴图跨模组引用：" + std::string(texName) + " 由 " + texOwner +
                           " 提供，方块（" + blockOwner + "）正在使用");
     };
 
@@ -95,7 +95,7 @@ bool TextureAtlas::build() {
 
     // ⑤ 第 0 格 = default.png（缺失纹理兜底，内容来自文件而非程序生成）
     if (!addFromFile("default", AtlasSlot{0, 0}))
-        LOG_WARN("Atlas", "兜底纹理 default.png 缺失 → 第 0 格透明黑");
+        ENGINE_LOG_WARN("Atlas", "兜底纹理 default.png 缺失 → 第 0 格透明黑");
 
     // ⑥ 按声明顺序铺格（第 0 格已被 default 占用，从第 1 格起）
     std::uint32_t slotIndex = 1;
@@ -125,10 +125,10 @@ bool TextureAtlas::build() {
             missing += name;
         }
         if (!missing.empty())
-            LOG_WARN("Atlas", "以下纹理被引用但不在图集声明中，显示兜底格：" + missing);
+            ENGINE_LOG_WARN("Atlas", "以下纹理被引用但不在图集声明中，显示兜底格：" + missing);
     }
 
-    LOG_INFO("Atlas", "图集 " + std::to_string(size_) + "²（" + std::to_string(grid_) + "×" +
+    ENGINE_LOG_INFO("Atlas", "图集 " + std::to_string(size_) + "²（" + std::to_string(grid_) + "×" +
                       std::to_string(grid_) + " 格）：声明 " + std::to_string(declared.size()) +
                       " 张，成功 " + std::to_string(loaded) + " 张，失败 " +
                       std::to_string(failed) + " 张，占用 " + std::to_string(slotIndex) + "/" +
@@ -141,7 +141,7 @@ bool TextureAtlas::addFromFile(std::string_view name, AtlasSlot slot) {
     const std::string rel = "textures/block/" + std::string(name) + ".png";
     std::filesystem::path path;
     if (!resource::g_resourceIndex.find(resource::ResourceKind::Assets, rel, path)) {
-        LOG_WARN("Atlas", "纹理未找到：" + rel + "（没有任何资源根提供）→ 该格透明黑");
+        ENGINE_LOG_WARN("Atlas", "纹理未找到：" + rel + "（没有任何资源根提供）→ 该格透明黑");
         return false;
     }
     const std::string owner =
@@ -151,14 +151,14 @@ bool TextureAtlas::addFromFile(std::string_view name, AtlasSlot slot) {
     const std::string pathStr = path.string();
     stbi_uc* src = stbi_load(pathStr.c_str(), &w, &h, &ch, STBI_rgb_alpha);
     if (!src) {
-        LOG_WARN("Atlas", "纹理解码失败：" + rel + "（由 " + owner + " 提供）→ 该格透明黑");
+        ENGINE_LOG_WARN("Atlas", "纹理解码失败：" + rel + "（由 " + owner + " 提供）→ 该格透明黑");
         return false;
     }
 
     // 直拷模式：引擎不做任何缩放——源图尺寸必须等于格子尺寸（16²），原样进格。
     // 未来升像素：只需改 kAtlasTile（如 32）且源图同步 32²，此处零改动。
     if (w != static_cast<int>(kAtlasTile) || h != static_cast<int>(kAtlasTile)) {
-        LOG_WARN("Atlas", "纹理尺寸不符：" + rel + "（由 " + owner + " 提供）为 " +
+        ENGINE_LOG_WARN("Atlas", "纹理尺寸不符：" + rel + "（由 " + owner + " 提供）为 " +
                           std::to_string(w) + "x" + std::to_string(h) + "（应为 " +
                           std::to_string(kAtlasTile) + "x" + std::to_string(kAtlasTile) +
                           "）→ 该格透明黑");

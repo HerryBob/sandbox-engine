@@ -8,12 +8,11 @@
 #include <atomic>
 #include <chrono>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace engine::physics {
 
-// 物理体运动类型（对应 Rapier 的 RigidBodyType）。
+// 物理体运动类型（对应 Jolt 的 RigidBodyType）。
 // Static 永不移动（地形，当前不进 bodies_）；Dynamic 按速度积分并做碰撞回退（方块组）；
 // Kinematic 速度由外部设定、受重力、位置由碰撞修正（生物/玩家）。
 enum class MotionType { Static, Dynamic, Kinematic };
@@ -25,24 +24,30 @@ struct RigidBody {
     MotionType motion = MotionType::Dynamic; // 运动类型：方块组=Dynamic，生物=Kinematic
     double x = 0.0, y = 0.0, z = 0.0; // 世界位置（基准；生物为脚底中心）
     double vx = 0.0, vy = 0.0, vz = 0.0; // 速度（2.3 积分用）
+    // 姿态（四元数）。当前只在打包时设一个固定值，用于验证"旋转数据通路"；
+    // Jolt 接入后由刚体的真实角速度积分得到（届时删掉打包处那行临时赋值）。
+    float  qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
     int    blockCount = 0;      // 打包的方块数
     // 内部方块（局部坐标 + 类型）：世界坐标 = 基准 + 局部坐标（架构 2.8）。
     // 解包时按基准偏移回写静态碰撞体集合。
     std::vector<engine::shared::Block> blocks;
-    // 单 AABB 碰撞箱（架构 4.3 + Sable 增量思想）：
-    // 最小包裹——半宽 = (max-min)/2 + 0.5；中心偏移 = (min+max)/2（包围盒中心相对基准）。
-    // 刚体内方块增删（飞船改造）时增量重算，碰撞箱实时贴合方块组。
-    // 世界 AABB = [基准+偏移−半宽, 基准+偏移+半宽]。
+    // 碰撞体半宽 / 中心偏移（相对基准）。
+    // 求解器删除后这两组字段不再是"手工 AABB"：
+    //   - 生物：作为 CapsuleShape 的尺寸（装配期由 addPlayerBody 传入）
+    //   - 刚体：Jolt 的 compound shape 自己算，这两组字段届时可删
     double halfExtentX = 0.0, halfExtentY = 0.0, halfExtentZ = 0.0;
     double centerOffsetX = 0.0, centerOffsetY = 0.0, centerOffsetZ = 0.0;
-    // 踩地标志（仅 Kinematic 有意义）：本 tick 竖轴向下回退发生过 = 站在实体方块上。
+    // 踩地标志（求解器删除后恒为 false；Jolt 接入后由 CharacterVirtual::GetGroundState 取代）。
     bool   onGround = false;
 };
 
 // 物理世界（25TPS，dt=0.04s）。
 // 用累积待处理模拟时间(accumulator)驱动，不硬绑定业务 tick 次数。
-// 原型阶段：积分 + 处理业务指令
-//（MoveBlock / SyncBlockSet 全量同步 / Place/RemoveBlock 放置破坏 / Contraption 打包解包）。
+//
+// ⚠️ 当前状态（2026-11-19）：求解器已删除，只保留「时间推进 + 指令消费 + 回执组装」。
+// 积分 / 碰撞检测 / 碰撞响应 / 运动学推进 / 接触集合 全部移除，等待 Jolt 接入
+// （见 docs/DOCS自制版/未来方向-物理内核替换为Jolt.md）。
+// 因此：玩家不会移动、刚体不会运动、没有碰撞 —— 这是有意的过渡状态，不是 bug。
 class PhysicsWorld {
 public:
     explicit PhysicsWorld(engine::core::TimeManager& tm);
@@ -63,12 +68,10 @@ public:
     int        blockZ() const;
     long long  bodyCount() const;          // 当前刚体数（打包/解包后变化）
     long long  colliderCount() const;      // 当前静态碰撞体数量（放置/破坏/打包转移后变化）
-    long long  collisions() const;         // 累计碰撞次数（刚体撞上静态方块）
+    long long  collisions() const;         // 累计碰撞次数（求解器删除后恒为 0，待 ContactListener 接上）
 
-    // 增量碰撞箱验证（原型单刚体演示用）：首个刚体的方块数与 AABB 参数。
-    long long  bodyBlockCount() const;     // 首个刚体内方块数（0=无刚体）
-    double     bodyHalfExtentX() const;    // 首个刚体 x 半宽（增量重算后）
-    double     bodyCenterOffsetX() const;  // 首个刚体 x 中心偏移（相对基准）
+    // 注意：bodyBlockCount / bodyHalfExtentX / bodyCenterOffsetX 三个验证 getter 已删除
+    // （数据源 recomputeAABB 已删；Jolt 接入后可改用 compound shape 的 GetLocalBounds）。
 
     // 创建一个生物体：运动学、单 AABB、位置锚在脚底中心。
     // 碰撞箱半宽与跳跃初速由调用方按实体类型定义传入（引擎不再写死某个生物的数值）。
@@ -87,14 +90,8 @@ public:
 
 private:
     void maybeLog();
-    // 增量重算刚体 AABB：最小包裹（半宽 = (max-min)/2+0.5，偏移 = (min+max)/2）。
-    // 打包时与刚体内方块增删时调用（Sable handleBlockChange 的对应物）；
-    // 同时更新原子投影供 main 线程运行中采样。
-    void recomputeAABB(RigidBody& b);
-
-    // 运动学单轴移动 + 碰撞回退（分轴测试）：axis 0=x / 1=y / 2=z。
-    // 命中时清空该轴速度；竖轴向下命中时置 onGround（踩地）。
-    void moveKinematicAxis(RigidBody& b, int axis);
+    // 注意：原 recomputeAABB / moveKinematicAxis 已删除（求解器迁 Jolt 时整段替换）。
+    // 二者的职责分别由 compound shape 的 GetLocalBounds() 和 CharacterVirtual 承担。
 
     // tick 银行上限：单帧最多补跑 5 个物理 tick（=200ms 模拟时间）。
     // 超过说明本帧严重落后（卡顿/掉帧），剩余累积时间直接丢弃，
@@ -116,6 +113,9 @@ private:
     long long                  lastSentProcessed_{0}; // 纯物理线程：上次回传时的处理数
     std::chrono::steady_clock::time_point startWall_; // 墙钟起点（tps 墙钟口径用）
     std::chrono::steady_clock::time_point lastLog_;
+    // 上次写入 PlayerBodyState 的墙钟时刻（纳秒）。用于计算 tickDurationNs：
+    // 两次写入的墙钟差 = 本次物理 tick 的实际墙钟间隔，自适应时间缩放和调度抖动。
+    long long                  lastPlayerStateWriteNs_ = 0;
     // 刚体表（纯物理线程独占读写；bodyCount_ 是它的原子投影供 main 读）。
     std::vector<RigidBody>     bodies_;
     long long                  nextBodyId_{1};    // 刚体 ID 分配器
@@ -123,10 +123,6 @@ private:
     engine::shared::PlayerBodyState* playerState_{nullptr}; // 玩家位置输出槽（装配期注入）
     engine::shared::PlayerControlState* playerControl_{nullptr}; // 玩家操控输入槽（装配期注入）
     std::atomic<long long>     bodyCount_{0};
-    // 主刚体增量碰撞箱的原子投影（main 运行中采样，避免读 bodies_ 数据竞争）。
-    std::atomic<long long>     bodyBlockCountProj_{0};
-    std::atomic<double>        bodyHalfExtentXProj_{0.0};
-    std::atomic<double>        bodyCenterOffsetXProj_{0.0};
     std::vector<engine::shared::PhysicsResult> pendingReceipts_; // 待发回执（纯物理线程）
     std::vector<engine::shared::PhysicsResult> pendingCollisions_; // 待发碰撞事件（纯物理线程）
     std::atomic<long long> collisions_{0};  // 累计碰撞次数（main 读）
@@ -135,15 +131,11 @@ private:
                                     // 25Hz——同一模拟时刻的位置被重复发 ~15 次（旧行为）。
                                     // 位置快照语义：只发"新模拟时刻"的位置（数据层②修正）。
 
-    // 静态方块碰撞体集合（纯物理线程独占；架构 2.7 物理层）。
-    // 放置/破坏增量维护；打包时方块转移进刚体（物理形态转移），解包时回写。
+    // 静态方块碰撞体集合（纯物理线程独占）。
+    // 求解器删除后它只是"静态世界的影子"（没有碰撞消费方），保留是为了让
+    // SyncBlockSet / Place / Remove 的指令语义完整；Jolt 接入后由"每 chunk 一个
+    // StaticCompoundShape"取代。
     std::unordered_map<engine::shared::BlockPos, engine::shared::BlockType>  colliders_;
-
-    // 接触集合（纯物理线程独占；Rapier Started/Stopped 语义的 Started 部分）：
-    // 刚体 id → 接触中的静态方块坐标。碰撞事件只在"接触开始"（新加入集合）时发，
-    // 持续重叠（Stay）不发；方块被删/离开后下一帧重叠检测自然移除（不发 Stopped，
-    // 业务暂无接触结束需求）。全量同步/解包时整体清空对应记录。
-    std::unordered_map<int, std::unordered_set<engine::shared::BlockPos>> contactPairs_;
 };
 
 } // namespace engine::physics

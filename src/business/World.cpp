@@ -6,32 +6,33 @@
 namespace engine::business {
 
 namespace {
+
+// 六邻接偏移：chunk 到达/消失都会改变相邻 chunk 边界面的剔除结果。
+// 标脏与快照扩邻居共用这一份。
+    constexpr int kNeighborOffsets[6][3] = {
+        { 1, 0, 0}, {-1, 0, 0},
+        { 0, 1, 0}, { 0,-1, 0},
+        { 0, 0, 1}, { 0, 0,-1} };
+} // namespace
+
 // 把一个 chunk 的非空气方块按世界坐标追加到 out。
 // renderSnapshot（全量快照）与 chunkSnapshot（增量快照）共用这一份实现：
-// 索引 → 块内偏移的解码只在 ChunkData::localOf 定义，两处快照不再各写一遍位运算
+// 索引 → 块内偏移的解码只在 ChunkData::chunkLocalOf 定义，两处快照不再各写一遍位运算
 // （那种重复改一处忘一处就是体素引擎里极难查的坐标错位）。
 void appendChunkBlocks(const engine::shared::ChunkPos& cp,
                        const engine::shared::ChunkData& data,
                        std::vector<engine::shared::Block>& out) {
-    const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4; // chunk 起点世界坐标
+    const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4; // chunk 起点的世界坐标
     for (std::int32_t i = 0; i < engine::shared::CHUNK_VOLUME; ++i) {
-        const engine::shared::PaletteEntry t = data.getAt(i);
+        const engine::shared::PaletteEntry t = data.paletteGetByIndex(i);
         if (t == engine::shared::kAirEntry) continue;
-        const engine::shared::BlockPos off = engine::shared::ChunkData::localOf(i);
+        const engine::shared::BlockPos off = engine::shared::ChunkData::chunkLocalOf(i);
         out.push_back(engine::shared::Block{
             static_cast<engine::shared::BlockType>(t),
             engine::shared::BlockPos{bx + off.x, by + off.y, bz + off.z},
             -1}); // 主世界方块 contraptionId 恒 -1（chunk 不存该字段）
     }
 }
-
-// 六邻接偏移：chunk 到达/消失都会改变相邻 chunk 边界面的剔除结果。
-// 标脏与快照扩邻居共用这一份。
-constexpr int kNeighborOffsets[6][3] = {
-    { 1, 0, 0}, {-1, 0, 0},
-    { 0, 1, 0}, { 0,-1, 0},
-    { 0, 0, 1}, { 0, 0,-1}};
-} // namespace
 
 World::World() {
     // 初始世界由装配层（main）用 ColumnGenerator + ChunkStreamer 从数据预设生成。
@@ -43,7 +44,7 @@ std::size_t World::blockCount() const {
     // 区块化后 = chunk 非空气方块数。
     std::lock_guard<std::mutex> lock(blocksMutex_);
     std::size_t n = 0;
-    for (const auto& kv : chunks_) n += kv.second.nonAirCount();
+    for (const auto& kv : chunks_) n += kv.second.chunkNonAirCount();
     return n;
 }
 
@@ -102,48 +103,71 @@ std::optional<engine::shared::Block> World::findBlock(const engine::shared::Bloc
     //       forEachBlockInAABB 均未在锁内调用它。
     // 主世界 → chunk 定位 O(1)（chunk 存储只存类型，返回现场构造的 Block）。
     std::lock_guard<std::mutex> lock(blocksMutex_);
-    const auto it = chunks_.find(engine::shared::chunkOf(p));
+    const auto it = chunks_.find(engine::shared::toChunkOf(p));
     if (it == chunks_.end()) return std::nullopt;
-    const engine::shared::PaletteEntry t = it->second.get(p);
+    const engine::shared::PaletteEntry t = it->second.paletteGet(p);
     if (t == engine::shared::kAirEntry) return std::nullopt;
     return engine::shared::Block{static_cast<engine::shared::BlockType>(t), p, -1};
 }
 
-World::BlockState World::lookupBlock(const engine::shared::BlockPos& p,
+World::LookupResult World::lookupBlock(const engine::shared::BlockPos& p,
                                      engine::shared::BlockType& outType) const {
     // 三态判定与取值必须在同一次锁内完成：分两次调用可能夹着一次 chunk 卸载，
     // 给出互相矛盾的结论。
     std::lock_guard<std::mutex> lock(blocksMutex_);
-    const auto it = chunks_.find(engine::shared::chunkOf(p));
-    if (it == chunks_.end()) return BlockState::NotLoaded;
-    const engine::shared::PaletteEntry t = it->second.get(p);
-    if (t == engine::shared::kAirEntry) return BlockState::Air;
+    const auto it = chunks_.find(engine::shared::toChunkOf(p));
+    if (it == chunks_.end()) return LookupResult::NotLoaded;
+    const engine::shared::PaletteEntry t = it->second.paletteGet(p);
+    if (t == engine::shared::kAirEntry) return LookupResult::Air;
     outType = static_cast<engine::shared::BlockType>(t);
-    return BlockState::Occupied;
+    return LookupResult::Occupied;
 }
 
 std::size_t World::chunkCount() const {
     std::lock_guard<std::mutex> lock(blocksMutex_);
     return chunks_.size();
 }
-
+// ---- 验收/诊断专用（重构时应移出 World）----
+// 不属于 World 的核心职责（存储/查询/修改/生成卸载）。
+// 统计各 chunk 的调色板位宽分布和内存占用，用于验证调色板压缩效果。
+// 重构方向：ChunkData 提供 stats() 返回自己的 {bits, paletteSize, bytes}，
+//           World 只做遍历累加；或移到独立的 PaletteDiagnostics 模块。
 World::PaletteStats World::paletteStats() const {
     std::lock_guard<std::mutex> lock(blocksMutex_);
     PaletteStats s;
     s.chunks = chunks_.size();
     for (const auto& kv : chunks_) {
         const engine::shared::ChunkData& d = kv.second;
-        if (d.bits() == 4)      ++s.bits4;
-        else if (d.bits() == 8) ++s.bits8;
+        if (d.chunkIndexBits() == 4)      ++s.bits4;
+        else if (d.chunkIndexBits() == 8) ++s.bits8;
         else                    ++s.bits16;
         s.paletteEntries += d.paletteSize();
-        s.totalBytes     += d.byteSize();
+        s.totalBytes     += d.chunkByteSize();
     }
     if (s.chunks != 0)
         s.avgPalette = static_cast<double>(s.paletteEntries) / static_cast<double>(s.chunks);
     return s;
 }
-
+// 遍历 AABB 闭区间 [min, max] 内的所有非空气方块，逐块调 fn(世界坐标, 类型)。
+// 空气跳过；未加载的 chunk 跳过。
+//
+// ⚠️ 约束（重要）：
+//   · 回调在 blocksMutex_ 内执行——不可重入。
+//     回调里禁止调用 World 的任何加锁方法（findBlock / lookupBlock /
+//     placeBlock / removeBlock / chunkSnapshot 等），否则 std::mutex 非递归 → 自死锁。
+//   · 锁持有时间 = 遍历时间 + 所有回调执行时间。
+//     回调里做重活（I/O、复杂计算）会拖慢业务线程（placeBlock/advanceTick 全程阻塞）。
+//     回调应只做轻量收集或纯计算。
+//   · min/max 是世界坐标（非 chunk 坐标），闭区间——max 包含在内。
+//     调用方必须保证 min <= max（逐轴），否则该轴循环不执行。
+//
+// 实现说明：每个坐标都做一次 toChunkOf + chunks_.find（跨 chunk 时重复查找，
+// 原型可接受）。回调经 std::function 类型擦除，每块一次间接调用。
+//
+// 重构方向（对外 WorldAPI）：改为返回 vector<Block> 的 queryAABB(min, max)，
+// 与 renderSnapshot/chunkSnapshot 风格一致——无回调、无锁内执行、无死锁风险。
+// 当前 forEachBlockInAABB 的"回调在锁内"对模组作者是隐性陷阱：签名看不出约束，
+// 模组作者最可能写的"回调里查/改别的方块"都会死锁且无错误信息。
 void World::forEachBlockInAABB(
     const engine::shared::BlockPos& min, const engine::shared::BlockPos& max,
     const std::function<void(const engine::shared::BlockPos&,
@@ -156,9 +180,9 @@ void World::forEachBlockInAABB(
         for (int y = min.y; y <= max.y; ++y)
             for (int z = min.z; z <= max.z; ++z) {
                 const engine::shared::BlockPos p{x, y, z};
-                const auto it = chunks_.find(engine::shared::chunkOf(p));
+                const auto it = chunks_.find(engine::shared::toChunkOf(p));
                 if (it == chunks_.end()) continue;
-                const engine::shared::PaletteEntry t = it->second.get(p);
+                const engine::shared::PaletteEntry t = it->second.paletteGet(p);
                 if (t == engine::shared::kAirEntry) continue;
                 fn(p, static_cast<engine::shared::BlockType>(t));
             }
@@ -183,7 +207,7 @@ void World::applyGeneratedChunk(const engine::shared::ChunkPos& cp,
     std::lock_guard<std::mutex> lock(blocksMutex_);
 
     // 全空气 chunk 不创建（保持"空 chunk 不占内存"；地表以上常见）
-    if (data.isAllAir() && chunks_.find(cp) == chunks_.end()) return;
+    if (data.chunkIsAllAir() && chunks_.find(cp) == chunks_.end()) return;
 
     auto& slot = chunks_[cp];   // 已有则取用、没有则缺省构造
     slot = data;                // 整体覆盖：生成是权威写入，不做旧值合并
