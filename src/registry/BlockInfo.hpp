@@ -16,7 +16,12 @@ namespace engine::registry {
 	// DLL 卸载后定义仍自洽可读，这是"注册内容跨 DLL 生命周期"的底线。
 	struct BlockInfo{
 		std::string name;
-		bool opaque = true;
+		// B59：原有一个 bool opaque，与 renderType 表达同一件事（是否遮挡剔除），
+		// 两者矛盾时行为不可预期，已删除。**面剔除一律按 renderType 判定**：
+		//   Solid       → 剔除与邻块共享的面
+		//   Cutout/Translucent → 不剔除（要看到内部）
+		// 模组 ABI 里的 ModBlockDef::opaque 仍保留（规则7：接口本轮不动），
+		// 但引擎已不读它，登记时只做一致性提示。
 		float hardness = 1.0f;
 		RenderType renderType = RenderType::Solid;
 		std::string texture;   // 纹理名（无模型时 6 面兜底；模型化后仍用于缺失回退）

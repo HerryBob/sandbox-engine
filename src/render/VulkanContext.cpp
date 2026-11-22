@@ -688,10 +688,11 @@ bool VulkanContext::rebuildChunkMeshes(
     solid.reserve(blocks.size());
     for (const auto& b : blocks) {
         if (b.contraptionId == -1) {
-            //查询注册表: 注册过且 opaque = true 
+            //查询注册表: 注册过且 renderType == Solid（B59：改用 renderType 判定，
+            // BlockInfo 的 opaque 与它语义重叠，已删除）
             const auto* info = engine::registry::g_blockRegistry.find(
                 static_cast<std::uint16_t>(b.type));
-            if (info && info->opaque) {
+            if (info && info->renderType == engine::registry::RenderType::Solid) {
                 solid.insert(b.pos);
             }
         }

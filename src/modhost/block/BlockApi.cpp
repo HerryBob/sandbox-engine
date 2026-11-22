@@ -32,7 +32,8 @@ std::int32_t registerBlockImpl(void* host, const ModBlockDef* def) {
 
     engine::registry::BlockInfo info{};
     info.name       = def->name;
-    info.opaque     = (def->opaque != 0U);
+    // B59：不再写 opaque —— 面剔除改由 renderType 决定（BlockInfo 里已删除该字段）。
+    // def->opaque 仍是 ABI 字段（规则7 接口不动），但引擎不读它。
     info.hardness   = def->hardness;
     info.renderType = static_cast<engine::registry::RenderType>(def->renderType);
     info.texture    = def->texture;
