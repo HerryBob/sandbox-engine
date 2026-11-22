@@ -46,6 +46,20 @@ public:
     glm::vec4 fallbackUV() const { return slotUV(AtlasSlot{0, 0}); }
 
 private:
+    // ---- build() 的六段（规则1 拆分）----
+    std::vector<std::string> readDeclaredTextures() const;   // ① 读 atlases/blocks.json
+    std::vector<std::string> collectUsedTextures() const;    // ② 注册表 + 模型表实际引用
+    void layoutGrid(std::size_t declaredCount);              // ④ 每边格数 + 像素缓冲
+    bool placeDefaultSlot();                                 // ⑤ 第 0 格 = default.png
+    // ⑥ 按声明顺序铺格的结果（供汇总日志）
+    struct Placement {
+        std::size_t loaded = 0;     // 成功进格的张数
+        std::size_t failed = 0;     // 读取/尺寸失败的张数
+        std::size_t occupied = 1;   // 已占用格数（含第 0 格）
+    };
+    Placement placeDeclaredSlots(const std::vector<std::string>& declared);
+    void warnMissingTextures(const std::vector<std::string>& used) const;   // ⑦ 被引用但未声明
+
     // 按索引查 textures/block/<name>.png → 直拷入格（失败则格留空，不崩引擎）
     bool addFromFile(std::string_view name, AtlasSlot slot);
     std::vector<std::uint8_t> pixels_;                         // size² × 4 通道
