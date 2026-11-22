@@ -1,5 +1,7 @@
 #include "business/PhysicsBridge.hpp"
 
+#include "core/Log.hpp"   // B103：待发指令被覆盖时的告警
+
 #include <utility>
 
 namespace engine::business {
@@ -15,12 +17,22 @@ bool PhysicsBridge::pushSyncCommand() {
 }
 
 void PhysicsBridge::pushPlaceCommand(const engine::shared::BlockPos& p, int type) {
+    // B103（诊断）：待发槽是**单槽位**，同一 tick 内的第二条指令会覆盖第一条。
+    // 这里不改结构（改队列属于协议变更），只把"丢弃"这件事暴露出来 ——
+    // 以前是静默覆盖，表现为"方块看得见但穿得过去"。
+    if (wantPlace_ || wantRemove_ || wantSync_) {
+        ENGINE_LOG_WARN("Physics", "待发放置被覆盖（上一条尚未发出）：本次丢弃，世界与物理会短暂不一致");
+    }
     wantPlace_ = true;
     placePos_ = p;
     placeType_ = type;
 }
 
 void PhysicsBridge::pushRemoveCommand(const engine::shared::BlockPos& p) {
+    // B103（诊断）：同上，单槽位的覆盖在此暴露。
+    if (wantPlace_ || wantRemove_ || wantSync_) {
+        ENGINE_LOG_WARN("Physics", "待发破坏被覆盖（上一条尚未发出）：本次丢弃，世界与物理会短暂不一致");
+    }
     wantRemove_ = true;
     removePos_ = p;
 }

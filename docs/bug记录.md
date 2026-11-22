@@ -111,7 +111,7 @@
 | B71 | 静默失败 | `BlockRegistry.hpp` `freezeBlockRegistry` | 提前调用只静默少方块 | 无线索可查 | 🟢 | ✅ |
 | B72 | 重名不检测 | `BlockRegistry.hpp` | 不检查方块名唯一（与 B4 同源） | `findBlockIdByName` 结果不定 | 🟢 | ✅ |
 | B73 | 约束未写 | `BlockRegistry.hpp` `g_builtinBlockIds` | 未写"启动时 resolve 一次，之后只读" | 运行期改写即竞争 | 🟢 | ✅ |
-| B74 | 线程契约缺失 | `Registry.hpp` `erase`/`eraseByOwner` | 非线程安全，注释未写明 | 其它线程清表即数据竞争 | 🔴 | ✅ |
+| B74 | 线程契约缺失 | `Registry.hpp` `erase`/`eraseByOwner` | 非线程安全，注释未写明 | 其它线程清表即数据竞争 | 🔴 | ✅已修（结构修改加锁 + 写清读写契约） |
 | B75 | 异常安全 | `Registry.hpp` `add` | `owners_.emplace` 抛异常时 `items_` 已插入 | 两表不一致（owner 丢失） | 🟡 | ✅ |
 | B76 | 能力缺失 | `Registry.hpp` | `const_iterator` 拿不到 owner | 只能另调 `ownerOf(key)` | 🟢 | ✅ |
 | B77 | 断言缺失 | `Registry.hpp` `erase` | 忽略 `owners_.erase` 返回值 | 两表可能长度不一致 | 🟢 | ✅ |
@@ -145,7 +145,7 @@
 | B100 | 脆弱约定 | `BusinessWorld` / `InputSampler` | 方向向量需与渲染端逐位一致（各写一份） | 任一侧改公式即错位 | 🟡 | ✅ |
 | B101 | 判定遗漏 | `BusinessWorld` DDA | 起点格不参与判定（先推进再检查） | 站在方块里打不到它 | 🟡 | ✅ |
 | B102 | 非原子标志 | `BusinessWorld.hpp` | `resyncPending_` / `firstTick_` 靠"业务线程独占" | 跨线程调 `requestPhysicsResync` 即竞争 | 🟢 | ✅ |
-| B103 | 覆盖丢事件 | `PhysicsBridge.hpp:63-68` | `wantPlace_`/`wantRemove_` 是**单槽位** | 同 tick 第二条覆盖第一条 → 世界与物理不同步（看得见、穿得过） | 🔴 | ✅ |
+| B103 | 覆盖丢事件 | `PhysicsBridge.hpp:63-68` | `wantPlace_`/`wantRemove_` 是**单槽位** | 同 tick 第二条覆盖第一条 → 世界与物理不同步（看得见、穿得过） | 🔴 | 🟡已加诊断（覆盖时告警；改队列属协议变更，按决定不做） |
 | B104 | 死生产 | `PhysicsBridge.cpp` | 碰撞事件仍生产，无消费方 | 每次碰撞白进队列 | 🟡 | ✅ |
 | B105 | 封装泄漏 | `PhysicsBridge.hpp:46-47` | 队列访问器公开可变引用 | 可绕过桥的统计与待发状态机 | 🟢 | ✅ |
 | B106 | 死代码 | `BusinessWorld.hpp` `syncAll` | 从未被调用（grep 确认仅声明+定义） | 与 B92 叠加更难判断 | 🟢 | ✅ |

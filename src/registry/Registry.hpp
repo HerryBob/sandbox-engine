@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -9,15 +10,22 @@
 namespace engine::registry {
 
     // 通用注册表：key → value，附"来源"标记（哪个模组注册的）。
-    // 设计要点：
-    //   ① add 只在封表前允许；erase / eraseByOwner 封表后仍允许
-    //      （卸载发生在启动封表之后，"禁止新增"和"允许移除"是两件事）。
-    //   ② 来源只存字符串副本，绝不留 DLL 里的指针 —— 卸载后 owner 名字仍可安全比对。
+    //
+    // 线程模型（B74 起明确）：
+    //   · **结构修改**（add / erase / eraseByOwner / freeze）互斥保护 —— 见 mutex_。
+    //   · **读取**（find / countByOwner / ownerOf / size / begin / end）**不加锁**：
+    //     find 返回的是内部节点指针，加锁也保不住它的生命周期，所以读侧的正确性
+    //     依赖"没有并发结构修改"这个前提 —— 实际用法是：
+    //       装配期（单线程）：只有 add；
+    //       freeze 之后：只剩 erase/eraseByOwner（卸载路径），且与读取错峰。
+    //     若将来要支持"运行期边改边读"，必须改成快照式接口（拷贝一份再读），
+    //     而不是在这里加锁。
     template <typename T, typename Key = std::uint16_t>
     class Registry {
     public:
         // owner：注册来源（模组名；nullptr/空串 = 引擎自身注册）。
         bool add(Key key, const T& value, const char* owner = nullptr) {
+            std::lock_guard<std::mutex> lock(mutex_);
             if (frozen_) return false;
             const auto result = items_.emplace(key, value);
             if (!result.second) return false;
@@ -34,12 +42,14 @@ namespace engine::registry {
         // Release 下 assert 被编译掉，未注册 key 直接空指针解引用，崩溃且无信息。
         // 全工程调用方一律用 find() + 判空，语义更明确，故直接删除该接口。
         bool erase(Key key) {
+            std::lock_guard<std::mutex> lock(mutex_);
             owners_.erase(key);
             return items_.erase(key) > 0U;
         }
 
         // 按来源批量移除，返回移除条数（卸载闭环用）。
         std::size_t eraseByOwner(const char* owner) {
+            std::lock_guard<std::mutex> lock(mutex_);
             const std::string name = (owner != nullptr) ? std::string(owner) : std::string();
             std::size_t removed = 0;
             for (auto it = owners_.begin(); it != owners_.end();) {
@@ -71,7 +81,10 @@ namespace engine::registry {
         }
 
         // 封表：之后只允许读与移除，禁止新增（免锁读的前提）。
-        void freeze() { frozen_ = true; }
+        void freeze() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            frozen_ = true;
+        }
         bool frozen() const { return frozen_; }
         std::size_t size() const { return items_.size(); }
 
@@ -80,6 +93,10 @@ namespace engine::registry {
         const_iterator end() const { return items_.end(); }
 
     private:
+        // 只保护结构修改（add / erase / eraseByOwner / freeze）；读取不加锁，
+        // 契约见类头注释。加 mutex 后 Registry 不可拷贝/移动 —— 实例都是
+        // 进程级 inline 全局变量，本来也不该被拷贝。
+        mutable std::mutex mutex_;
         std::unordered_map<Key, T> items_;
         std::unordered_map<Key, std::string> owners_;   // 与 items_ 同 key，保证一一对应
         bool frozen_ = false;
