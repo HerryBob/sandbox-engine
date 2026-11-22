@@ -54,7 +54,7 @@ public:
 
     // 每墙钟帧调用一次：accumulator += wall_dt * time_scale，
     // 然后 while(accumulator>=0.04) 执行物理 tick（处理业务指令）。
-    void advance(double scale, double wallDt,
+    void tick(double scale, double wallDt,
                  engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness);
 
     // 物理 → 业务：先发打包回执（逐条，不合并），再发位置快照（合并语义）。
@@ -91,7 +91,7 @@ public:
 private:
     void maybeLog();
 
-    // ---- advance 的三段（规则1 拆分）----
+    // ---- tick 的三段（规则1 拆分）----
     // 消费业务指令队列：放置/破坏/全量同步 → 静态碰撞体集合；
     // Pack/UnpackContraption → 刚体建/拆 + 碰撞体形态转移。
     void applyCommands(engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness);

@@ -76,7 +76,7 @@ void ChunkStreamer::workerLoop() {
     }
 }
 
-void ChunkStreamer::tickUpdate(double playerX, double playerZ) {
+void ChunkStreamer::tick(double playerX, double playerZ) {
     // 世界坐标 → 列坐标：先 floor 再 >>4（对负数也正确：-0.5 属列 -1）
     const int cx = static_cast<int>(std::floor(playerX)) >> 4;
     const int cz = static_cast<int>(std::floor(playerZ)) >> 4 ;

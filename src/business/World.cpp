@@ -156,7 +156,7 @@ World::PaletteStats World::paletteStats() const {
 //     回调里禁止调用 World 的任何加锁方法（findBlock / lookupBlock /
 //     placeBlock / removeBlock / chunkSnapshot 等），否则 std::mutex 非递归 → 自死锁。
 //   · 锁持有时间 = 遍历时间 + 所有回调执行时间。
-//     回调里做重活（I/O、复杂计算）会拖慢业务线程（placeBlock/advanceTick 全程阻塞）。
+//     回调里做重活（I/O、复杂计算）会拖慢业务线程（placeBlock/tick 全程阻塞）。
 //     回调应只做轻量收集或纯计算。
 //   · min/max 是世界坐标（非 chunk 坐标），闭区间——max 包含在内。
 //     调用方必须保证 min <= max（逐轴），否则该轴循环不执行。

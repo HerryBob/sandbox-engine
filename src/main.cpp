@@ -180,7 +180,7 @@ static void initNoiseAndRunSelfTests() {
 }
 
 // 同步预热：阻塞到窗口内 warmupColumns 列全部写入（装配期没有 25TPS 约束）。
-// 刻意走和运行期完全同一条路径（tickUpdate → 后台生成 → drainResults → World）。
+// 刻意走和运行期完全同一条路径（tick → 后台生成 → drainResults → World）。
 static void warmupWindow(engine::worldgen::ChunkStreamer& streamer,
                          engine::business::World& world,
                          std::size_t warmupColumns) {
@@ -189,7 +189,7 @@ static void warmupWindow(engine::worldgen::ChunkStreamer& streamer,
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (streamer.stats().applied < warmupColumns &&
            std::chrono::steady_clock::now() < deadline) {
-        streamer.tickUpdate(spawnX, spawnZ);
+        streamer.tick(spawnX, spawnZ);
         streamer.drainResults(world, engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
@@ -397,13 +397,13 @@ static int run(const std::string& presetName) {
     businessLoop.start([&] {
         auto next = std::chrono::steady_clock::now();
         while (!businessLoop.shouldStop()) {
-            businessWorld.advanceTick(tm.effectiveScale(core::Domain::Business));
+            businessWorld.tick(tm.effectiveScale(core::Domain::Business));
             businessWorld.processPlayerInput(cameraState, playerInput);  // 玩家点击 → DDA → 放置/破坏
             // 1b 流式：请求窗口内未加载的列 + 应用后台已算好的结果。
             // 必须在 flushChanges 之前——新到货 chunk 的脏标记要进本 tick 的变更事件，
             // 否则渲染端要等下一个 tick 才看到它。
             if (streamer) {
-                streamer->tickUpdate(cameraState.camX.load(), cameraState.camZ.load());
+                streamer->tick(cameraState.camX.load(), cameraState.camZ.load());
                 const auto drained = streamer->drainResults(
                     businessWorld.world(),
                     engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
@@ -461,7 +461,7 @@ static int run(const std::string& presetName) {
             const double wallDt =
                 std::chrono::duration<double>(now - prev).count();
             prev = now;
-            physicsWorld.advance(tm.effectiveScale(core::Domain::Physics), wallDt,
+            physicsWorld.tick(tm.effectiveScale(core::Domain::Physics), wallDt,
                                  physicsBridge.businessToPhysicsCommands());
             physicsWorld.syncToBusiness(physicsBridge.physicsToBusinessResults());
             std::this_thread::sleep_for(std::chrono::milliseconds(1)); // 避免忙等
@@ -471,7 +471,7 @@ static int run(const std::string& presetName) {
     // ---- 输入线程：消费回调增量 → 更新相机 → 写 PlayerInput（~125Hz，墙钟原生）----
     inputLoop.start([&] {
         while (!inputLoop.shouldStop()) {
-            inputSampler.sample();
+            inputSampler.tick();
             std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~125Hz
         }
     });

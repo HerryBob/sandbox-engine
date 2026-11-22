@@ -62,7 +62,7 @@ public:
 
     // 业务线程每 tick 调用：按玩家位置把窗口内"尚未请求过"的列入队（近的优先）。
     // playerX/playerZ 为世界坐标（可为负）：内部 floor 后 >>4 转 chunk 坐标。
-    void tickUpdate(double playerX, double playerZ);
+    void tick(double playerX, double playerZ);
 
     // 业务线程每 tick 调用：最多 maxApply 列写进 world，并先结算上一 tick 积攒的淘汰列。
     // 必须由"唯一 World 写者"线程调用（内部会写 dirtyChunksThisTick_）。
@@ -76,7 +76,7 @@ public:
 private:
     void workerLoop();
 
-    // ---- tickUpdate 的四段（规则1 拆分）----
+    // ---- tick 的四段（规则1 拆分）----
     // ① 淘汰：走出 radius_ + kEvictMargin 的列进 pendingEvict_，并从 known_ 摘掉
     void collectEvictions(int cx, int cz);
     // ② 收集窗口内尚未请求的列（known_ 挡住已请求的）
@@ -100,7 +100,7 @@ private:
     // 已请求过的列（业务线程独占）。1b 起支持卸载：走出窗口的列从 known_ 移除，
     // 这样玩家走回来时会重新请求生成（否则这些列"永不加载"）。
     std::unordered_set<ColPos> known_;
-    // 待卸载的列（tickUpdate 收集，drainResults 结算；业务线程独占）
+    // 待卸载的列（tick 收集，drainResults 结算；业务线程独占）
     std::unordered_set<ColPos> pendingEvict_;
 
     std::atomic<std::size_t> requestedColumnCount_{0};

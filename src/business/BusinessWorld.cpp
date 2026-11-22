@@ -20,7 +20,7 @@ BusinessWorld::BusinessWorld(engine::core::TimeManager& tm,
     // （World 构造函数不再预置方块）。
 }
 
-void BusinessWorld::advanceTick(double scale) {
+void BusinessWorld::tick(double scale) {
     // 首个业务 tick 强制一次全量同步：地形预热在装配期（主线程）完成，
     // 业务线程起来后没有新列可触发 requestPhysicsResync，物理侧会一直空集合。
     if (firstTick_) {

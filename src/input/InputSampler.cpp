@@ -168,7 +168,7 @@ void InputSampler::logModeChange(bool modeChanged) {
     ENGINE_LOG_INFO("Input", os.str());
 }
 
-void InputSampler::sample() {
+void InputSampler::tick() {
     const bool modeChanged = consumeModeToggles();   // ① F4/F5
     updateLook();                                    // ② 视角增量 + clamp
 

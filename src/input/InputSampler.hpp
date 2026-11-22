@@ -15,7 +15,7 @@ namespace engine::input {
 // 职责划分：
 //   ① attach() 注册 GLFW 回调（键盘/鼠标）——回调在主线程 pollEvents 时触发，
 //      只写原子状态（按键状态/视角增量/点击序号），不做相机运算；
-//   ② 输入线程每 tick 调 sample()：消费回调增量 → 更新相机 → 写 CameraState；
+//   ② 输入线程每 tick 调 tick()：消费回调增量 → 更新相机 → 写 CameraState；
 //   ③ 鼠标点击回调直接写 PlayerInput（clickSeq/clickButton，业务线程消费）。
 // 输出槽按职责拆分：
 //   · CameraState：相机位置/视角（输入线程写；渲染算 MVP、业务做射线，只读）；
@@ -35,7 +35,7 @@ public:
                 engine::shared::PlayerControlState* control);
 
     // 输入线程每 tick 调用：消费视角增量 + 键盘状态 → 更新相机 → 写 CameraState。
-    void sample();
+    void tick();
 
     // 装配期设置出生点（生成地形后由 main 按实际地表高度设定；R 键回到这里）。
     // 同时覆盖当前位置，立即生效（渲染首帧前调用）。
@@ -53,7 +53,7 @@ public:
 private:
     void writeCameraState(); // 相机状态 → CameraState 原子槽
 
-    // ---- sample() 的六段（规则1 拆分）----
+    // ---- tick() 的六段（规则1 拆分）----
     // 朝向基向量（yaw = 0 时朝 -Z），两种模式共用
     struct LookBasis { double fwdX, fwdZ, rgtX, rgtZ; };
 

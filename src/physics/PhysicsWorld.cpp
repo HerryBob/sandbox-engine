@@ -46,7 +46,7 @@ void PhysicsWorld::attachPlayerControl(engine::shared::PlayerControlState* in) {
     playerControl_ = in;
 }
 
-void PhysicsWorld::advance(double scale, double wallDt,
+void PhysicsWorld::tick(double scale, double wallDt,
                            engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness) {
     // 累积待处理模拟时间（文档 2.2）：残差持续保留，自动处理非整数配比。
     accumulator_ += wallDt * scale;
