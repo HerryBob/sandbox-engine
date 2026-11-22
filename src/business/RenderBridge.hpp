@@ -40,8 +40,10 @@ public:
 private:
     // B3 业务→渲染（变更事件）。容量对齐原装配（256）。
     engine::core::SPSCQueue<engine::shared::BlockChangeEvent> businessToRenderChanges_{256};
-    // B6 业务→渲染（刚体结构事件 / 位姿）。刚体数量少，容量给 16 足够。
-    engine::core::SPSCQueue<engine::shared::BodyStructureEvent> businessToRenderStructure_{16};
+    // B6 业务→渲染（刚体结构事件 / 位姿）。
+    // B111：结构事件"不能丢"，原来容量 16 —— 同一 tick 打包/解包 17 个以上就会 push 失败，
+    // 而调用方此前忽略返回值（B95 已加检查）。容量提到 64，覆盖"一 tick 大批刚体变化"。
+    engine::core::SPSCQueue<engine::shared::BodyStructureEvent> businessToRenderStructure_{64};
     engine::core::SPSCQueue<engine::shared::BodyPose>           businessToRenderPoses_{16};
 
     std::atomic<long long> sentChangeEventCount_{0}; // 已发变更事件数

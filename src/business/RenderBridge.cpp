@@ -11,13 +11,21 @@ void RenderBridge::flushChangesToRender(World& world, long long tick) {
     if (dirty.empty()) return;
     engine::shared::BlockChangeEvent ev;
     ev.tick = tick;
-    ev.dirtyChunks.assign(dirty.begin(), dirty.end());
+    // B107：move 而不是 assign 拷贝 —— peekDirtyChunks 已经返回一份拷贝，
+    // 再 assign 就是第二次全量拷贝（脏 300 个 chunk 时每 tick 白拷两次）。
+    ev.dirtyChunks.assign(std::make_move_iterator(dirty.begin()),
+                          std::make_move_iterator(dirty.end()));
     if (businessToRenderChanges_.push(ev)) {
         world.clearDirtyChunks();
         sentChangeEventCount_.fetch_add(1, std::memory_order_relaxed);
     }
     // push 失败（队列满）不清空：下 tick 重试。变更事件可延迟送达，
     // 渲染端最终一致（与位置快照"满则丢"不同：丢变更 = 渲染端漏重建）。
+    //
+    // B108/B109（已评估，本轮不改）：脏集合的规模**有上界** —— 最多是窗口内
+    // 已加载 chunk 数（81 列 × 4 层 = 324），不会无限增长；单条事件最多 324 个
+    // chunk，渲染端会一次重建 324 个（大范围改动时），但这是"改多少重建多少"的
+    // 正确代价。真要限流，应该由渲染端按帧预算分片重建，而不是在这里丢事件。
 }
 
 bool RenderBridge::pushBodyStructure(const engine::shared::BodyStructureEvent& ev) {
