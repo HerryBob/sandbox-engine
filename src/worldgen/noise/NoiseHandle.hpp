@@ -48,12 +48,12 @@ public:
         return *this;
     }
 
-    // 采样：句柄为空时返回 0（调用方应先检查 valid()）。
+    // 采样：句柄为空时返回 0（调用方应先检查 isLinked()）。
     double sample(double x, double z, std::uint64_t seed) const {
         return sample_ ? sample_(self_, x, z, seed) : 0.0;
     }
 
-    bool valid() const { return self_ != nullptr && sample_ != nullptr; }
+    bool isLinked() const { return self_ != nullptr && sample_ != nullptr; }
 
     // 手动释放：调 DLL 的 destroy 并清空三件套。
     void reset() {

@@ -42,7 +42,7 @@ World::World() {
 std::size_t World::blockCount() const {
     // main 线程只读（日志/断言）与业务线程结构性修改可能并发——加锁读。
     // 区块化后 = chunk 非空气方块数。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     std::size_t n = 0;
     for (const auto& kv : chunks_) n += kv.second.chunkNonAirCount();
     return n;
@@ -51,7 +51,7 @@ std::size_t World::blockCount() const {
 std::vector<engine::shared::Block> World::renderSnapshot() const {
     // 第 4 轨只读：与业务线程结构性修改并发，锁内生成一份安全快照。
     // 数据层 ② 区块化：遍历所有已加载 chunk 的非空气方块。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     std::vector<engine::shared::Block> out;
     out.reserve(chunks_.size() * 64); // 粗略预留，减少扩容
     for (const auto& [cp, data] : chunks_) {
@@ -84,7 +84,7 @@ std::vector<engine::shared::Block> World::chunkSnapshot(
         }
     }
 
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     std::vector<engine::shared::Block> out;
     out.reserve(targets.size() * 512); // 实测约 3156 非空气/chunk，512 起步留扩容余量
     for (const auto& cp : targets) {
@@ -98,11 +98,11 @@ std::vector<engine::shared::Block> World::chunkSnapshot(
 std::optional<engine::shared::Block> World::findBlock(const engine::shared::BlockPos& p) const {
     // 与其它读函数一致：锁内访问 chunks_（全引擎唯一数据真源，读不加锁会与写路径竞争）。
     // 调用频率：射线检测 25 TPS × 约 25 步 ≈ 625 次/秒，加锁成本可忽略。
-    // 约束：blocksMutex_ 是不可重入的 std::mutex，持有本锁的函数内部不得再调用本函数，
+    // 约束：chunksLock_ 是不可重入的 std::mutex，持有本锁的函数内部不得再调用本函数，
     //       否则自死锁。当前 placeBlock / removeBlock / applyGeneratedChunk /
     //       forEachBlockInAABB 均未在锁内调用它。
     // 主世界 → chunk 定位 O(1)（chunk 存储只存类型，返回现场构造的 Block）。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     const auto it = chunks_.find(engine::shared::toChunkOf(p));
     if (it == chunks_.end()) return std::nullopt;
     const engine::shared::PaletteEntry t = it->second.paletteGet(p);
@@ -114,7 +114,7 @@ World::LookupResult World::lookupBlock(const engine::shared::BlockPos& p,
                                      engine::shared::BlockType& outType) const {
     // 三态判定与取值必须在同一次锁内完成：分两次调用可能夹着一次 chunk 卸载，
     // 给出互相矛盾的结论。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     const auto it = chunks_.find(engine::shared::toChunkOf(p));
     if (it == chunks_.end()) return LookupResult::NotLoaded;
     const engine::shared::PaletteEntry t = it->second.paletteGet(p);
@@ -124,7 +124,7 @@ World::LookupResult World::lookupBlock(const engine::shared::BlockPos& p,
 }
 
 std::size_t World::chunkCount() const {
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     return chunks_.size();
 }
 // ---- 验收/诊断专用（重构时应移出 World）----
@@ -133,7 +133,7 @@ std::size_t World::chunkCount() const {
 // 重构方向：ChunkData 提供 stats() 返回自己的 {bits, paletteSize, bytes}，
 //           World 只做遍历累加；或移到独立的 PaletteDiagnostics 模块。
 World::PaletteStats World::paletteStats() const {
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     PaletteStats s;
     s.chunks = chunks_.size();
     for (const auto& kv : chunks_) {
@@ -152,7 +152,7 @@ World::PaletteStats World::paletteStats() const {
 // 空气跳过；未加载的 chunk 跳过。
 //
 // ⚠️ 约束（重要）：
-//   · 回调在 blocksMutex_ 内执行——不可重入。
+//   · 回调在 chunksLock_ 内执行——不可重入。
 //     回调里禁止调用 World 的任何加锁方法（findBlock / lookupBlock /
 //     placeBlock / removeBlock / chunkSnapshot 等），否则 std::mutex 非递归 → 自死锁。
 //   · 锁持有时间 = 遍历时间 + 所有回调执行时间。
@@ -175,7 +175,7 @@ void World::forEachBlockInAABB(
     // 区域查询（跨 chunk；同步/LOD 生成/变更广播共用）：遍历区域内每个坐标，
     // chunk 定位 O(1)。原型按坐标遍历（区域通常 = chunk 级 16³=4096 次查询，可接受；
     // 渲染端想烘焙 mesh 时扩展 1 格拉邻居即可，Minetest retrieveBlocks 同思想）。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     for (int x = min.x; x <= max.x; ++x)
         for (int y = min.y; y <= max.y; ++y)
             for (int z = min.z; z <= max.z; ++z) {
@@ -190,13 +190,13 @@ void World::forEachBlockInAABB(
 
 bool World::placeBlock(const engine::shared::BlockPos& p,
                        engine::shared::BlockType type) {
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     // 裁决 + 写入 + 标脏在 base（占用拒绝）；锁在此处（数据修改的唯一合法入口）。
     return base::tryPlace(chunks_, dirtyChunksThisTick_, p, type);
 }
 
 bool World::removeBlock(const engine::shared::BlockPos& p) {
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     // 裁决 + 写入 + 标脏在 base（不存在拒绝）；锁在此处。
     return base::tryRemove(chunks_, dirtyChunksThisTick_, p);
 }
@@ -204,10 +204,10 @@ bool World::removeBlock(const engine::shared::BlockPos& p) {
 void World::applyGeneratedChunk(const engine::shared::ChunkPos& cp,
                                 const engine::shared::ChunkData& data) {
     // 运行期生成写入（1b）：一次锁 → 整体覆盖 → 标脏自身与邻居。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
 
     // 全空气 chunk 不创建（保持"空 chunk 不占内存"；地表以上常见）
-    if (data.chunkIsAllAir() && chunks_.find(cp) == chunks_.end()) return;
+    if (data.isAllAir() && chunks_.find(cp) == chunks_.end()) return;
 
     auto& slot = chunks_[cp];   // 已有则取用、没有则缺省构造
     slot = data;                // 整体覆盖：生成是权威写入，不做旧值合并
@@ -227,7 +227,7 @@ std::size_t World::unloadChunks(const std::unordered_set<engine::shared::ChunkPo
     // 区块卸载（流式加载的回收端）：删除数据 + 标脏"自身与还在的邻居"。
     // 渲染端不需要新接口：重建一个已不存在的 chunk 时取不到方块 → 无顶点 →
     // VulkanContext 自动 destroyChunkMesh 并 erase，内存随之释放。
-    std::lock_guard<std::mutex> lock(blocksMutex_);
+    std::lock_guard<std::mutex> lock(chunksLock_);
     std::size_t removed = 0;
     for (const auto& cp : cps) {
         if (chunks_.erase(cp) == 0) continue;   // 本来就没加载：不标脏、不计数

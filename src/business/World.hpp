@@ -91,7 +91,7 @@ public:
 private:
     // chunk 数据表：key = chunk 坐标，value = 16³ 方块数据（调色板 + 索引）；空 chunk 不入表。
     std::unordered_map<engine::shared::ChunkPos, engine::shared::ChunkData> chunks_;
-    mutable std::mutex blocksMutex_; // 保护 chunks_；const 成员函数也要加锁
+    mutable std::mutex chunksLock_; // 保护 chunks_；const 成员函数也要加锁
 
     // 本 tick 变脏的 chunk 集合（写操作插入，自动去重）；flushChanges 消费后清空。
     std::unordered_set<engine::shared::ChunkPos> dirtyChunksThisTick_;

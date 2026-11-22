@@ -27,7 +27,7 @@ bool palette() {
 
     // ① 新 chunk 全空
     shared::ChunkData blank;
-    if (!blank.chunkIsAllAir() || blank.chunkNonAirCount() != 0) return false;
+    if (!blank.isAllAir() || blank.chunkNonAirCount() != 0) return false;
     if (blank.chunkIndexBits() != 4 || blank.paletteSize() != 1) return false;
 
     // ② 4→8 扩宽（第 17 个条目触发）
@@ -59,7 +59,7 @@ bool palette() {
     c.paletteSet(1, 1, 1, five);
     if (c.paletteGet(1, 1, 1) != five) return false;
     c.paletteSet(1, 1, 1, shared::kAirEntry);
-    if (!c.chunkIsAllAir() || c.chunkNonAirCount() != 0) return false;
+    if (!c.isAllAir() || c.chunkNonAirCount() != 0) return false;
 
     // ⑤ 压缩：16 位档区块删掉大半方块后，字典与位宽一起降回 4 位，且逐格数据不变
     shared::ChunkData d;

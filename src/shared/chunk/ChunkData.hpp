@@ -37,7 +37,7 @@ public:
     PaletteEntry paletteGetByIndex(std::int32_t i) const { return palette_[paletteIndexAt(i)]; }
 
     // 本 chunk 是否全空气（生成装载时判空用；全空气 chunk 不入表）。
-    bool chunkIsAllAir() const;
+    bool isAllAir() const;
     // 非空气方块数。
     std::size_t chunkNonAirCount() const;
     // 索引数组 + 字典的实际占用字节（内存账用）。
@@ -130,7 +130,7 @@ inline void ChunkData::paletteSet(int x, int y, int z, PaletteEntry e) {
     paletteIndexSet(chunkIndexOf(x, y, z), paletteFindOrAdd(e));
 }
 
-inline bool ChunkData::chunkIsAllAir() const {
+inline bool ChunkData::isAllAir() const {
     if (palette_.size() == 1) return palette_[0] == kAirEntry;
     // 字典里混有非空气条目（生成后又删过方块等）：逐格确认确实都指向 Air
     for (std::int32_t i = 0; i < CHUNK_VOLUME; ++i)
