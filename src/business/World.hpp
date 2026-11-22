@@ -20,6 +20,10 @@ namespace engine::business {
 //   · applyGeneratedChunk / unloadChunks —— **仅业务线程**（唯一 World 写者）。
 class World {
 public:
+    // B80：显式禁止拷贝 —— 内含 mutex 与两个大表，拷贝既无意义也不安全
+    // （原来只是隐式删除，读者要自己推）。
+    World(const World&) = delete;
+    World& operator=(const World&) = delete;
     // 构造空世界：不预置任何方块。方块内容全部来自模组注册 + 流式生成的写入
     // （B79：此处原注释写"48×48 石头平台"，那是引擎内置方块时代的行为，早已删除，
     //   按旧注释推理会完全错判初始世界为空这件事）。

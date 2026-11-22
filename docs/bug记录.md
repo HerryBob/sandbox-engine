@@ -11,7 +11,7 @@
 |---|---|---|---|---|---|---|
 | B1 | 生命周期顺序 | `ModLoader.cpp` `unloadAll` | `destroy` 早于 `eraseByOwner` | 窗口期内注册表留指向已销毁对象的指针（`animUser` 悬垂） | 🟡 | ✅已修（顺序改为 onUnload→清注册→destroy） |
 | B2 | 逻辑漏判 | `ModSorter.cpp` `sort` | 跨批依赖"环上模组"不被拒（级联早于环检测） | 进 order 却缺依赖，`failedIds` 兜不住 | 🟡 | ✅ |
-| B3 | 缺校验 | `BlockApi.cpp` `registerBlockImpl` | `mass/hardness/friction` 无 isfinite/范围校验 | 接 Jolt 后污染质量与摩擦 | 🟡 | ✅ |
+| B3 | 缺校验 | `BlockApi.cpp` `registerBlockImpl` | `mass/hardness/friction` 无 isfinite/范围校验 | 接 Jolt 后污染质量与摩擦 | 🟡 | ✅已修 |
 | B4 | 缺校验 | `BlockApi.cpp` `registerBlockImpl` | 同名方块不检测 | `findBlockIdByName` 结果依赖哈希桶 | 🟢 | ✅ |
 | B5 | 隐式依赖 | `ModLoader.cpp` `loadAll` | builtin 组内按 id 字典序 | 新增 `aaa_*` 会让方块 id 整体位移（存档错位） | 🟡 | ✅ |
 | B6 | 诊断缺失 | `LogImpl.cpp` `logImpl` | 模组日志 tag 固定 `"Mod"` | 多模组日志无法归属 | 🟢 | ✅ |
@@ -72,7 +72,7 @@
 | — | ~~写侧 seqlock 规则没说明~~ | `PlayerBodyState.hpp:20` | — | — | — | ❌ **不实**：第 20 行已写明"奇数表示写者正在写，偶数且读前后一致才采信" |
 | B47 | 原子前提 | `CameraState.hpp:12-16` | `atomic<double>` 未断言 lock-free（`TimeManager` 有，这里没有） | 非 lock-free 平台无保证 | 🔴 | ✅已修（加 static_assert） |
 | B48 | 非一致快照 | `CameraState.hpp` | 5 个字段各自读，无 seqlock | 可能读到"新位置 + 旧朝向"（一帧错位） | 🟡 | ⏸ 已评估不改：错位肉眼不可见，改 seqlock 要让渲染端每帧多两次原子读 + 重试分支（理由已写进注释） |
-| B49 | 裸 int 枚举 | `CameraState.hpp:21` `viewMode` | `atomic<int>` 而非 `enum class ViewMode` | 非法值无约束 | 🟡 | ✅ |
+| B49 | 裸 int 枚举 | `CameraState.hpp:21` `viewMode` | `atomic<int>` 而非 `enum class ViewMode` | 非法值无约束 | 🟡 | ⏸ 延后：改 enum class 要同步改渲染端读取（渲染层仍在增量开发，暂不动） |
 | B50 | 内存序 | `CameraState.hpp` | 全默认 `seq_cst` | 可放宽（可选优化） | 🟢 | ✅ |
 | B51 | 伪共享 | `CameraState.hpp` | 5-6 个原子同缓存行 | 写频率低，不改 | 🟢 | ✅ |
 | — | ~~Vulkan: double→float / UBO 双缓冲 / 投影约定~~ | `CameraState` → 渲染端 | — | — | — | ⏳ **不属于本表**：渲染端使用注意项（规则 2/5 豁免渲染），归 U16 文档 |
@@ -97,22 +97,22 @@
 | # | 类型 | 位置 | 现象 | 影响 | 严重度 | 核实 |
 |---|---|---|---|---|---|---|
 | B59 | 语义重叠 | `BlockInfo.hpp` `opaque` vs `renderType` | 两字段都可表达"是否遮挡剔除" | 矛盾时行为不可预期 | 🔴 | ✅已修（删 opaque，改按 renderType） |
-| B60 | 注释缺失 | `BlockInfo.hpp` `hardness` | 无单位/无含义 | 模组值写错无人发现 | 🟡 | ✅ |
-| B61 | 描述绕 | `BlockInfo.hpp` `texture`/`model` | 关系与"两者都空"的边界没写清 | 模组作者困惑 | 🟡 | ✅ |
+| B60 | 注释缺失 | `BlockInfo.hpp` `hardness` | 无单位/无含义 | 模组值写错无人发现 | 🟡 | ✅已修 |
+| B61 | 描述绕 | `BlockInfo.hpp` `texture`/`model` | 关系与"两者都空"的边界没写清 | 模组作者困惑 | 🟡 | ✅已修 |
 | B62 | 缺比较 | `BlockInfo.hpp` | 无 `operator==` | 需要时再加 | 🟢 | ✅ |
 | B63 | 缺顺序说明 | `BlockInfo.hpp` `RenderType` | 未写渲染顺序 Solid→Cutout→Translucent | 分桶优先级不明 | 🟢 | ✅ |
 | B64 | 定位不清 | `BlockInfo.hpp` | 未说明"它是注册表值类型" | 读者以为是通用方块定义 | 🟢 | ✅ |
 | B65 | 跨 DLL 实例 | `BlockRegistry.hpp` `inline g_blockRegistry` | `inline` 变量在每 DLL 各有一份 | 模组直接访问会拿到空表（必须走回调） | 🔴 | ⏸ 按决定暂不动 |
-| B66 | 复杂度 | `BlockRegistry.hpp` `findBlockIdByName` | O(N) 线性遍历 | 方块多时加载变慢 | 🟡 | ✅ |
-| B67 | 魔法数 | `BlockRegistry.hpp` | `0xFFFF` 出现 4 次 | 改一处漏一处 | 🟡 | ✅ |
-| B68 | 缺校验 | `BlockRegistry.hpp` `resolveBuiltinBlockIds` | 未检查 `frozen()` | freeze 前调用会解析到空表 | 🟡 | ✅ |
-| B69 | 警告语义 | `BlockRegistry.hpp` | 只 warn stone/dirt/grass，未说明为何只这三个 | 读者以为漏检 | 🟡 | ✅ |
+| B66 | 复杂度 | `BlockRegistry.hpp` `findBlockIdByName` | O(N) 线性遍历 | 方块多时加载变慢 | 🟡 | ⏸ 已评估不改：调用点仅启动期少数几次，方块总数 < 100 |
+| B67 | 魔法数 | `BlockRegistry.hpp` | `0xFFFF` 出现 4 次 | 改一处漏一处 | 🟡 | ✅已修 |
+| B68 | 缺校验 | `BlockRegistry.hpp` `resolveBuiltinBlockIds` | 未检查 `frozen()` | freeze 前调用会解析到空表 | 🟡 | ✅已修 |
+| B69 | 警告语义 | `BlockRegistry.hpp` | 只 warn stone/dirt/grass，未说明为何只这三个 | 读者以为漏检 | 🟡 | ✅已修 |
 | B70 | 缺断言 | `BlockRegistry.hpp` | 无 `static_assert` 保证 key 能表示 `0xFFFF` 哨兵 | 改 key 类型即静默错 | 🟢 | ✅ |
 | B71 | 静默失败 | `BlockRegistry.hpp` `freezeBlockRegistry` | 提前调用只静默少方块 | 无线索可查 | 🟢 | ✅ |
 | B72 | 重名不检测 | `BlockRegistry.hpp` | 不检查方块名唯一（与 B4 同源） | `findBlockIdByName` 结果不定 | 🟢 | ✅ |
 | B73 | 约束未写 | `BlockRegistry.hpp` `g_builtinBlockIds` | 未写"启动时 resolve 一次，之后只读" | 运行期改写即竞争 | 🟢 | ✅ |
 | B74 | 线程契约缺失 | `Registry.hpp` `erase`/`eraseByOwner` | 非线程安全，注释未写明 | 其它线程清表即数据竞争 | 🔴 | ✅已修（结构修改加锁 + 写清读写契约） |
-| B75 | 异常安全 | `Registry.hpp` `add` | `owners_.emplace` 抛异常时 `items_` 已插入 | 两表不一致（owner 丢失） | 🟡 | ✅ |
+| B75 | 异常安全 | `Registry.hpp` `add` | `owners_.emplace` 抛异常时 `items_` 已插入 | 两表不一致（owner 丢失） | 🟡 | ✅已修 |
 | B76 | 能力缺失 | `Registry.hpp` | `const_iterator` 拿不到 owner | 只能另调 `ownerOf(key)` | 🟢 | ✅ |
 | B77 | 断言缺失 | `Registry.hpp` `erase` | 忽略 `owners_.erase` 返回值 | 两表可能长度不一致 | 🟢 | ✅ |
 | B78 | 缺 clear | `Registry.hpp` | 没有 `clear()` | 需要时再加 | 🟢 | ✅ |
@@ -122,10 +122,10 @@
 | # | 类型 | 位置 | 现象 | 影响 | 严重度 | 核实 |
 |---|---|---|---|---|---|---|
 | B79 | 注释矛盾 | `World.hpp:18` 构造函数 | 注释"48×48 石头平台"，实现已不预置（改由模组+流式生成） | 按注释推理必错 | 🔴 | ✅已修（改注释） |
-| B80 | 未显式禁拷贝 | `World.hpp` | 靠 mutex/map 隐式不可拷贝 | 意图不明 | 🟡 | ✅ |
+| B80 | 未显式禁拷贝 | `World.hpp` | 靠 mutex/map 隐式不可拷贝 | 意图不明 | 🟡 | ✅已修 |
 | B81 | 线程模型分散 | `World.hpp` / `World.cpp` | 两处各写一半 | 易漏读 | 🟡 | ✅已修（注释/契约写明） |
 | B82 | 功能重叠 | `World.hpp` `findBlock`/`lookupBlock` | 二态 vs 三态，关系未写清 | 调用方选错（见 B101） | 🟡 | ✅已修（注释/契约写明） |
-| B83 | 容量偏小 | `World.cpp` `renderSnapshot`/`chunkSnapshot` | `reserve(×64 / ×512)`，实测约 3156 非空气/列 | 多次扩容（性能+峰值） | 🟡 | ✅ |
+| B83 | 容量偏小 | `World.cpp` `renderSnapshot`/`chunkSnapshot` | `reserve(×64 / ×512)`，实测约 3156 非空气/列 | 多次扩容（性能+峰值） | 🟡 | ⏸ 已评估不改：属性能问题，已记入性能记录 P9 |
 | B84 | 锁不对称 | `World.hpp` `dirtyChunksThisTick_` | 写在锁内、读（peek/clear）不加锁 | 靠约定维持，易误读为受锁保护 | 🟡 | ✅已修（注释/契约写明） |
 | B85 | 无存盘前置检查 | `World.hpp` `unloadChunks` | 脏 chunk 直接删 | 接存档后会丢数据 | 🟡 | ✅已修（注释/契约写明） |
 | B86 | 回调在锁内 | `World.hpp:62` `forEachBlockInAABB` | 回调在锁内执行、不可重入 | 回调里调 `getBlock` 会自死锁 | 🟢 | ✅（已注明） |
@@ -136,17 +136,17 @@
 | B91 | 约束未写 | `BusinessWorld.hpp` `placeBlock`/`removeBlock` | 内部写 SPSC 队列（单生产者），未注明"仅业务线程" | 其它线程调用破坏约定 | 🟡 | ✅已修 |
 | B92 | 语义易混 | `BusinessWorld.hpp` `syncAll` vs `requestPhysicsResync` | 一次性 vs 置标志自动重试 | 调用方选错 | 🟡 | ✅已修 |
 | B93 | 能力缺失 | `BusinessWorld.hpp` | 只转发 `findBlock`，未转发 `lookupBlock` | 想区分"未加载/空气"只能绕过封装 | 🟡 | ✅已修（随 B97 转发） |
-| B94 | 覆盖丢状态 | `BusinessWorld.cpp` `receiveResultsFromPhysics` | 位姿单 `optional<BodyPose>` | 多刚体后到覆盖先到（玩家体与演示刚体一直互相覆盖） | 🟡 | ✅ |
+| B94 | 覆盖丢状态 | `BusinessWorld.cpp` `receiveResultsFromPhysics` | 位姿单 `optional<BodyPose>` | 多刚体后到覆盖先到（玩家体与演示刚体一直互相覆盖） | 🟡 | ⏸ 延后：改为多槽需要动 PhysicsBridge 出参与协议语义，本轮不做 |
 | B95 | 返回值忽略 | `BusinessWorld.cpp` `pushBodyStructure` | 结构事件"不能丢"但返回值没人看 | 队列满静默丢 → 渲染缺网格 | 🟡 | ✅已修 |
 | B96 | 每 tick 构造 | `BusinessWorld.cpp` | `bodyEvents` 局部 vector 每 tick 构造 | 可复用成员（收益有限） | 🟡 | ✅已修 |
 | B97 | 语义缺失 | `BusinessWorld` DDA | `findBlock` 把"未加载"当"空气" | 射线穿过未加载区域（结果看起来随机） | 🔴 | ✅已修（DDA 改三态，遇未加载即止） |
 | B98 | 已知缺口 | `BusinessWorld` 点击处理 | 右键永远放 Stone | 无法放置其它方块 | 🔴 | ⏸ 不修（= 新功能：方块选择器） |
 | B99 | 返回值忽略 | `BusinessWorld` 点击处理 | `placeBlock`/`removeBlock` 失败无反馈 | 玩家操作失败无感知 | 🟡 | ✅已修 |
-| B100 | 脆弱约定 | `BusinessWorld` / `InputSampler` | 方向向量需与渲染端逐位一致（各写一份） | 任一侧改公式即错位 | 🟡 | ✅ |
+| B100 | 脆弱约定 | `BusinessWorld` / `InputSampler` | 方向向量需与渲染端逐位一致（各写一份） | 任一侧改公式即错位 | 🟡 | ⏸ 延后：方向向量共享需要抽出公共实现，属重构（规则1 已冻结） |
 | B101 | 判定遗漏 | `BusinessWorld` DDA | 起点格不参与判定（先推进再检查） | 站在方块里打不到它 | 🟡 | ✅已修 |
 | B102 | 非原子标志 | `BusinessWorld.hpp` | `resyncPending_` / `firstTick_` 靠"业务线程独占" | 跨线程调 `requestPhysicsResync` 即竞争 | 🟢 | ✅ |
 | B103 | 覆盖丢事件 | `PhysicsBridge.hpp:63-68` | `wantPlace_`/`wantRemove_` 是**单槽位** | 同 tick 第二条覆盖第一条 → 世界与物理不同步（看得见、穿得过） | 🔴 | 🟡已加诊断（覆盖时告警；改队列属协议变更，按决定不做） |
-| B104 | 死生产 | `PhysicsBridge.cpp` | 碰撞事件仍生产，无消费方 | 每次碰撞白进队列 | 🟡 | ✅ |
+| B104 | 死生产 | `PhysicsBridge.cpp` | 碰撞事件仍生产，无消费方 | 每次碰撞白进队列 | 🟡 | ⏸ 已评估不改：碰撞事件当前无消费方，但保留生产是为了接通 ContactListener 时不用改物理侧 |
 | B105 | 封装泄漏 | `PhysicsBridge.hpp:46-47` | 队列访问器公开可变引用 | 可绕过桥的统计与待发状态机 | 🟢 | ✅ |
 | B106 | 死代码 | `BusinessWorld.hpp` `syncAll` | 从未被调用（grep 确认仅声明+定义） | 与 B92 叠加更难判断 | 🟢 | ✅ |
 | — | ~~"queue" 名字骗人~~ | `PhysicsBridge` | — | — | — | 🔧 **已修复**：批次 6 改名 `push*Command` |
@@ -161,7 +161,7 @@
 | B115 | 措辞错误 | `BlockActions.hpp:11` | 写"无状态、无锁、纯函数"，但 `tryPlace/tryRemove` 有副作用 | 误以为可无锁并发调用 | 🟡 | ✅已修（改措辞） |
 | B116 | 标脏不全 | `BlockActions.cpp` `markDirtyWithBoundary` | 只标 6 个面邻居，不标对角 | 接 AO/平滑光照时边缘漏更新 | 🟡 | ⏸ 已评估不改（现在标 26 邻域会每次多重建 5~20 chunk；等 AO 落地再改，已写进注释） |
 | B117 | 缺前置检查 | `BlockActions.cpp` `tryPlace` | 不拒绝 `type == Air` | 标脏但数据没变，且**凭空建空 chunk** | 🟡 | ✅已修（前置拒绝 Air） |
-| B118 | 异常留残留 | `BlockActions.cpp` `tryPlace` | `chunks[cp]` 先建 chunk，后续抛异常则留空 chunk | 多占内存 | 🟡 | ✅ |
+| B118 | 异常留残留 | `BlockActions.cpp` `tryPlace` | `chunks[cp]` 先建 chunk，后续抛异常则留空 chunk | 多占内存 | 🟡 | ⏸ 已评估不改：只在 OOM 时会留一个空 chunk，此时进程已不可用 |
 | B119 | 归属不当 | `BlockActions.hpp` | 脏原因常量定义在此，而 `ChunkData` 才是使用者 | 概念错位 | 🟡 | ⏸ 保留（注释说明将来随 dirty 一起搬，避免现在动调用面） |
 | B120 | 命名不一致 | `BlockActions.cpp` | `tryPlace` 用 `cp`、`tryRemove` 用 `it` | 风格 | 🟢 | ✅ |
 | B121 | 无检查 | `BlockActions.cpp` `markDirtyWithBoundary` | 邻居 chunk 不存在也插进 dirty | 渲染端需自行忽略 | 🟢 | ✅ |

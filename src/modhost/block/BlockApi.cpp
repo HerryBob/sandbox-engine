@@ -4,6 +4,7 @@
 #include "modhost/shared/HostContext.hpp"
 #include "registry/BlockRegistry.hpp"
 
+#include <cmath>   // B3：std::isfinite 校验 mass/hardness/friction
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -27,6 +28,24 @@ std::int32_t registerBlockImpl(void* host, const ModBlockDef* def) {
     // 上限 65534：id 0 保留给空气，0xFFFF 保留给"未注册"哨兵，中间全部可用。
     if (ctx->nextBlockId > 65534U) {
         ENGINE_LOG_ERROR("Mod", "registerBlock 被拒绝：方块 id 已用尽（上限 65534 个）");
+        return -1;
+    }
+
+    // B3：数值字段必须有限且在合理范围 —— 模组可以传任意 float，
+    // NaN/负数一旦进 Jolt 会污染质量与摩擦（表现为刚体瞬移或不滑）。
+    if (!std::isfinite(def->mass) || def->mass <= 0.0f) {
+        ENGINE_LOG_ERROR("Mod", std::string("registerBlock 被拒绝：mass 非法（需 > 0 的有限值，")
+                  + def->name + "）");
+        return -1;
+    }
+    if (!std::isfinite(def->hardness) || def->hardness < 0.0f) {
+        ENGINE_LOG_ERROR("Mod", std::string("registerBlock 被拒绝：hardness 非法（需 >= 0，")
+                  + def->name + "）");
+        return -1;
+    }
+    if (!std::isfinite(def->friction) || def->friction < 0.0f || def->friction > 1.0f) {
+        ENGINE_LOG_ERROR("Mod", std::string("registerBlock 被拒绝：friction 非法（需 0..1，")
+                  + def->name + "）");
         return -1;
     }
 

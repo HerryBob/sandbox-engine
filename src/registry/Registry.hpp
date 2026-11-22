@@ -27,9 +27,20 @@ namespace engine::registry {
         bool add(Key key, const T& value, const char* owner = nullptr) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (frozen_) return false;
-            const auto result = items_.emplace(key, value);
-            if (!result.second) return false;
+            // B75：两表必须同进同退。原来先 items_ 后 owners_ —— 若 owners_.emplace
+            // 抛 bad_alloc，items_ 里就留了一个没有 owner 的条目（卸载时清不掉）。
+            // 现在先插 owners_，items_ 失败/抛异常时回滚 owners_。
             owners_.emplace(key, (owner != nullptr) ? std::string(owner) : std::string());
+            try {
+                const auto result = items_.emplace(key, value);
+                if (!result.second) {
+                    owners_.erase(key);   // key 已被占用：回滚
+                    return false;
+                }
+            } catch (...) {
+                owners_.erase(key);
+                throw;
+            }
             return true;
         }
 
