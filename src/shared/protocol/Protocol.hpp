@@ -6,6 +6,14 @@
 
 namespace engine::shared {
 
+// B55：本文件承载**五套**跨线程消息类型，按方向与语义分组（改动时注意别混）：
+//   ① PhysicsCommand        业务 → 物理（指令）
+//   ② PhysicsResult         物理 → 业务（回执/快照/碰撞事件）
+//   ③ BodyStructureEvent    业务 → 渲染（刚体结构：事件流，不能丢）
+//   ④ BodyPose              业务 → 渲染（刚体位姿：状态，中间帧可丢）
+//   ⑤ BlockChangeEvent      业务 → 渲染（区块变更：事件流，增量）
+// 共同约束：只用定宽类型、无 STL 容器以外的隐式结构（将来若要跨 DLL 传，需再收窄）。
+
 // 业务 → 物理：业务 Tick 边界下发的指令。
 // 原型指令：MoveBlock（移动演示）+ SyncBlockSet（全量同步方块→碰撞体）
 //          + PlaceBlock/RemoveBlock（放置/破坏，业务裁决通过后下发）
@@ -43,7 +51,10 @@ struct PhysicsResult {
         BlockSetSize, CollisionEvent
     };
     Type       type = Type::BlockMoved;
-    int        x = 0, y = 0, z = 0;        // 移动后坐标
+    int        x = 0, y = 0, z = 0;        // BlockMoved：移动后坐标
+    // B54：下面两个是**跨消息的同步校验信息**，目前只在 BlockMoved / BlockSetSize 上
+    // 被读取（PhysicsBridge 用来比对"物理处理到第几条指令"，以及 sim 时间是否落后）。
+    // 其它 type 也会带着它们发（结构体是共用的），但没人读 —— 不要据此推断语义。
     long long  processedCommands = 0;      // 物理侧累计已处理指令数
     double     simTime = 0.0;              // 物理侧当前 sim_time，供业务比对
     long long  blockSetSize = 0;           // BlockSetSize：物理侧静态碰撞体数量快照
@@ -66,7 +77,7 @@ struct PhysicsResult {
     // 解包/打包回执（ContraptionUnpacked / ContraptionPacked 用）：
     // Unpacked = 世界坐标方块列表（业务据此重建 blocks_）；
     // Packed   = 刚体局部坐标方块列表（业务据此交给渲染端建网格，不必自己留副本）。
-    std::vector<engine::shared::Block> blocks;
+    std::vector<Block> blocks;   // B53：与文件内其它声明统一定宽
 };
 
 // 业务 → 渲染：刚体结构事件（打包/解包）。

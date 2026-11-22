@@ -47,10 +47,10 @@
 | B24 | 哈希质量 | `Block.hpp:53-59` `hash<BlockPos>` | 乘 31 混合，可构造碰撞（如 `(1,0,0)` 与 `(0,31,0)` 同为 31） | 哈希表退化 | 🔴 | ❌ **不修（实测更优）**：稠密键 147456 个/1009 桶，×31 最大桶 148（理想 146），素数异或 210 → 原实现对本项目负载更好 |
 | B25 | 哈希质量 | `ChunkPos.hpp:37-43` `hash<ChunkPos>` | 与 BlockPos 同款弱混合 | 同上 | 🔴 | ❌ **不修（实测更优）**：同 B24 —— 键是局部稠密坐标，×31 链式近似单射 |
 | B26 | 冗余分号 | `Block.hpp:59`、`ChunkPos.hpp:43` | 函数体后多一个 `;` | 无害 | 🟢 | ✅ |
-| B27 | 语义双关 | `Block.hpp:43` `contraptionId` | `-1` 表主世界，无 `isMainWorld()` 辅助 | 调用点难读（源码里已自带"这里有些问题"注释） | 🟡 | ✅ |
+| B27 | 语义双关 | `Block.hpp:43` `contraptionId` | `-1` 表主世界，无 `isMainWorld()` 辅助 | 调用点难读（源码里已自带"这里有些问题"注释） | 🟡 | ✅已修（注释/契约写明） |
 | B28 | 可简化 | `Block.hpp:30`、`ChunkPos.hpp:20` `operator==` | 可 `= default`（C++20） | 无 | 🟢 | ✅ |
 | B29 | 类型宽度 | `Block.hpp:53`、`ChunkPos.hpp:37` | 用裸 `size_t` | 风格不统一 | 🟢 | ✅ |
-| B30 | 依赖过重 | `ChunkPos.hpp:2` | 为 `BlockPos` include 整个 `Block.hpp` | 编译耦合（应拆 `BlockPos.hpp`） | 🟡 | ✅ |
+| B30 | 依赖过重 | `ChunkPos.hpp:2` | 为 `BlockPos` include 整个 `Block.hpp` | 编译耦合（应拆 `BlockPos.hpp`） | 🟡 | ✅已修（注释/契约写明） |
 | B31 | 重复定义 | `ChunkPos.hpp` / `Block.hpp` | 两个坐标类型结构几乎一致 | 可用模板统一（原型可不做） | 🟢 | ✅ |
 | — | ~~`>> 4` 耦合未文档化~~ | `ChunkPos.hpp:26` | — | — | — | ❌ **不实**：已有注释"这里 >> 4 强绑定区块大小" |
 | B32 | 可简化 | `ChunkData.hpp:174,183,190` | `std::vector<T>().swap(v)` 释放 hack | 可读性 | 🟢 | ✅ |
@@ -59,9 +59,9 @@
 | B35 | 缺拷贝声明 | `ChunkData.hpp` | 未显式 delete 拷贝（默认行为正确） | 意图不明 | 🟢 | ✅ |
 | B36 | 线性查找 | `ChunkData.hpp:114-123` `paletteFindOrAdd` | 线性扫描字典 | 小调色板下是设计选择 | 🟡 | ✅（设计取舍） |
 | — | ~~`dirty` 是 public 可绕过 `markDirty`~~ | `ChunkData.hpp:52` | — | — | — | ❌ **不实**：`dirty_` 私有，`dirty()` 是只读 getter，只能经 `markDirty` 改 |
-| B37 | 注释与实现不符 | `PlayerInput.hpp:12` | 注释"满时返回 false，可下 tick 重试"，但鼠标回调只 push 一次、不看返回值 | 读者以为有重试机制 | 🟡 | ✅ |
-| B38 | 语义未说明 | `PlayerInput.hpp:28,31` | `toggle*` 连按两次会被合并成一次（`exchange(false)` 只消费一次） | 快速连按丢一次切换 | 🟡 | ✅ |
-| B39 | 信息缺失 | `PlayerInput.hpp:13-15` `ClickEvent` | 只有 `button`，没有点击位置 | 隐式假设"准星在屏幕中心"，未写明 | 🟡 | ✅ |
+| B37 | 注释与实现不符 | `PlayerInput.hpp:12` | 注释"满时返回 false，可下 tick 重试"，但鼠标回调只 push 一次、不看返回值 | 读者以为有重试机制 | 🟡 | ✅已修（注释/契约写明） |
+| B38 | 语义未说明 | `PlayerInput.hpp:28,31` | `toggle*` 连按两次会被合并成一次（`exchange(false)` 只消费一次） | 快速连按丢一次切换 | 🟡 | ✅已修（注释/契约写明） |
+| B39 | 信息缺失 | `PlayerInput.hpp:13-15` `ClickEvent` | 只有 `button`，没有点击位置 | 隐式假设"准星在屏幕中心"，未写明 | 🟡 | ✅已修（注释/契约写明） |
 | B40 | 容量语义 | `PlayerInput.hpp:20` | `clicks{32}` 是 32 个事件（实现内部多一个哨兵槽） | 易误算 | 🟢 | ✅ |
 | B41 | 缺拷贝声明 | `PlayerInput.hpp` | 未显式 delete 拷贝 | 意图不明 | 🟢 | ✅ |
 | B42 | 伪共享 | `PlayerInput.hpp:24-31` | 三个 `toggle*` 同缓存行 | 写频率低，不改 | 🟢 | ✅ |
@@ -82,9 +82,9 @@
 | # | 类型 | 位置 | 现象 | 影响 | 严重度 | 核实 |
 |---|---|---|---|---|---|---|
 | B52 | 默认值错 | `Protocol.hpp:52` `PhysicsResult::contraptionId` | 默认 `0`（`PhysicsCommand` 同字段是 `-1`） | 未赋值回执被当成"刚体 0 的消息" | 🔴 | ✅已修（默认 -1） |
-| B53 | 命名不统一 | `Protocol.hpp:67` | `std::vector<engine::shared::Block>` 与同文件 `std::vector<Block>` 混用 | 可读性 | 🟡 | ✅ |
-| B54 | 适用范围不清 | `Protocol.hpp:47-48` | `processedCommands` / `simTime` 注释只说含义，没说"哪些 type 会带" | 同步校验逻辑难维护 | 🟡 | ✅ |
-| B55 | 单文件多义 | `Protocol.hpp` | 一个文件塞 5 套类型（命令/回执/结构事件/位姿/变更事件） | 方向与所有权难分辨 | 🟡 | ✅ |
+| B53 | 命名不统一 | `Protocol.hpp:67` | `std::vector<engine::shared::Block>` 与同文件 `std::vector<Block>` 混用 | 可读性 | 🟡 | ✅已修（注释/契约写明） |
+| B54 | 适用范围不清 | `Protocol.hpp:47-48` | `processedCommands` / `simTime` 注释只说含义，没说"哪些 type 会带" | 同步校验逻辑难维护 | 🟡 | ✅已修（注释/契约写明） |
+| B55 | 单文件多义 | `Protocol.hpp` | 一个文件塞 5 套类型（命令/回执/结构事件/位姿/变更事件） | 方向与所有权难分辨 | 🟡 | ✅已修（注释/契约写明） |
 | B56 | 注释不全 | `Protocol.hpp:61` `nx/ny/nz` | 只写"碰撞法向"，未写取值 `{-1,0,1}` | 使用者易误以为是连续分量 | 🟢 | ✅（部分） |
 | B57 | 信息缺失 | `Protocol.hpp:26` `dx/dy/dz` | MoveBlock 无起点坐标 | 位移指令不可重放 | 🟢 | ✅ |
 | B58 | 结构偏胖 | `Protocol.hpp:40-68` | `PhysicsResult` 20+ 字段承载 6 种消息 | 每条约 200B（队列 64 深） | 🟢 | ✅ |
@@ -123,11 +123,11 @@
 |---|---|---|---|---|---|---|
 | B79 | 注释矛盾 | `World.hpp:18` 构造函数 | 注释"48×48 石头平台"，实现已不预置（改由模组+流式生成） | 按注释推理必错 | 🔴 | ✅已修（改注释） |
 | B80 | 未显式禁拷贝 | `World.hpp` | 靠 mutex/map 隐式不可拷贝 | 意图不明 | 🟡 | ✅ |
-| B81 | 线程模型分散 | `World.hpp` / `World.cpp` | 两处各写一半 | 易漏读 | 🟡 | ✅ |
-| B82 | 功能重叠 | `World.hpp` `findBlock`/`lookupBlock` | 二态 vs 三态，关系未写清 | 调用方选错（见 B101） | 🟡 | ✅ |
+| B81 | 线程模型分散 | `World.hpp` / `World.cpp` | 两处各写一半 | 易漏读 | 🟡 | ✅已修（注释/契约写明） |
+| B82 | 功能重叠 | `World.hpp` `findBlock`/`lookupBlock` | 二态 vs 三态，关系未写清 | 调用方选错（见 B101） | 🟡 | ✅已修（注释/契约写明） |
 | B83 | 容量偏小 | `World.cpp` `renderSnapshot`/`chunkSnapshot` | `reserve(×64 / ×512)`，实测约 3156 非空气/列 | 多次扩容（性能+峰值） | 🟡 | ✅ |
-| B84 | 锁不对称 | `World.hpp` `dirtyChunksThisTick_` | 写在锁内、读（peek/clear）不加锁 | 靠约定维持，易误读为受锁保护 | 🟡 | ✅ |
-| B85 | 无存盘前置检查 | `World.hpp` `unloadChunks` | 脏 chunk 直接删 | 接存档后会丢数据 | 🟡 | ✅ |
+| B84 | 锁不对称 | `World.hpp` `dirtyChunksThisTick_` | 写在锁内、读（peek/clear）不加锁 | 靠约定维持，易误读为受锁保护 | 🟡 | ✅已修（注释/契约写明） |
+| B85 | 无存盘前置检查 | `World.hpp` `unloadChunks` | 脏 chunk 直接删 | 接存档后会丢数据 | 🟡 | ✅已修（注释/契约写明） |
 | B86 | 回调在锁内 | `World.hpp:62` `forEachBlockInAABB` | 回调在锁内执行、不可重入 | 回调里调 `getBlock` 会自死锁 | 🟢 | ✅（已注明） |
 | B87 | 间接调用 | `World.hpp` `std::function` | 每个方块一次间接调用 | 原型可接受 | 🟢 | ✅ |
 | B88 | 位移实现 | `World.cpp` `appendChunkBlocks` | `cp.x << 4`（C++20 定义良好） | 可读性（或改 `* 16`） | 🟢 | ✅ |
@@ -153,7 +153,7 @@
 | B107 | 拷贝两次 | `RenderBridge.cpp` `flushChangesToRender` | `peekDirtyChunks()` 拷贝 → `assign` 再拷贝 | 每 tick 双倍 | 🟡 | ✅已修（move 而非拷贝） |
 | B108 | 队列满恶化 | `RenderBridge.cpp` `flushChangesToRender` | 失败不清脏 → 下 tick 拷更大一份 | 渲染落后时雪崩 | 🟡 | ⏸ 已评估不改：脏集合有上界（已加载 chunk 数 ≤ 324），不会无限增长 |
 | B109 | 事件粒度过大 | `RenderBridge.cpp` `flushChangesToRender` | 一 tick 全部脏 chunk 塞一条事件 | 脏 100 个时渲染端一次重建 100 个 | 🟡 | ⏸ 已评估不改：限流应放在渲染端按帧预算分片，不该在这里丢事件 |
-| B110 | 背压不可见 | `RenderBridge` 整体 | 业务不知渲染消费到哪 | 积压只能靠症状发现 | 🟡 | ✅ |
+| B110 | 背压不可见 | `RenderBridge` 整体 | 业务不知渲染消费到哪 | 积压只能靠症状发现 | 🟡 | ✅已修（注释/契约写明） |
 | B111 | 容量不足 | `RenderBridge.hpp:44` | 结构事件"不能丢"但队列仅 16 深 | 同 tick 打包 20 个刚体即丢（B95 成因） | 🟡 | ✅已修（容量 16→64） |
 | B112 | 封装泄漏 | `RenderBridge.hpp:33-35` | 三条队列访问器公开 | 同 B105 | 🟢 | ✅ |
 | B113 | 死字段 | `RenderBridge.cpp` | `BlockChangeEvent::tick` 只写不读 | 读者以为它用于去重/排序 | 🟢 | ✅ |
@@ -174,10 +174,10 @@
 | B123 | 失败不致命 | `main.cpp` `warmupWindow` 超时分支 | 预热 30s 超时只打印就继续启动 | 世界可能只灌一部分，渲染端可能一个 chunk 都没有 | 🔴 | ✅已修（改 ERROR 日志写明后果，按决定不硬失败） |
 | B124 | 负下标 | `ColumnGenerator.cpp` `generateColumn` | `out.chunks[y >> 4]`，`kGenMinY < 0` 时负下标 | **内存破坏** | 🔴 | ✅已修（static_assert） |
 | B125 | 闪洞 | `ChunkStreamer.cpp` `applyPendingEvictions` | 淘汰同 tick 结算，不复查是否又回到窗口 | 边界来回走时该列空 2~3 tick（80–120ms） | 🟡 | ✅ |
-| B126 | 注释失真 | `ChunkStreamer.hpp:36` | 写"一次锁写 64KB"，实际一列 4 次锁 | 基于该注释的性能判断会错 | 🟡 | ✅ |
+| B126 | 注释失真 | `ChunkStreamer.hpp:36` | 写"一次锁写 64KB"，实际一列 4 次锁 | 基于该注释的性能判断会错 | 🟡 | ✅已修（注释/契约写明） |
 | B127 | 单 tick 尖峰 | `ChunkStreamer.cpp` `receiveResults` | 废弃结果 `continue` 不计 `applied`，队列积压时一次扫空 | 瞬移后长耗时掉帧 | 🟡 | ✅ |
 | B128 | 隐式三环契约 | `World::unloadChunks` → `flushChangesToRender` → `rebuildChunkMeshes` | "无顶点则删 mesh"靠三环约定 | 任一环被"优化"即留幽灵网格 | 🟡 | ✅ |
-| B129 | 线程归属无保护 | `ChunkStreamer.hpp` | 业务线程 + 生成线程共用一个对象，只靠注释 | 错误线程调用即数据竞争 | 🟡 | ✅ |
+| B129 | 线程归属无保护 | `ChunkStreamer.hpp` | 业务线程 + 生成线程共用一个对象，只靠注释 | 错误线程调用即数据竞争 | 🟡 | ✅已修（注释/契约写明） |
 | B130 | 反向依赖 | `ChunkStreamer.cpp` `receiveResults(World&)` | worldgen → business::World（唯一反向依赖） | 生成器搬 DLL 走不通（规则 7 边界） | 🟡 | ✅ |
 | B131 | 阻止移动 | `ChunkStreamer.cpp` `workerLoop` | `const GenResult res` 只能走 `push(const T&)` | shared_ptr 多一次原子加（可忽略） | 🟢 | ✅ |
 | B132 | 空转 | `ChunkStreamer.cpp` `workerLoop` | 无请求时 `sleep(2ms)` | 稳定后每秒数百次唤醒 | 🟢 | ✅ |

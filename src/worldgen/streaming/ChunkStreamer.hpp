@@ -23,6 +23,12 @@ namespace engine::worldgen {
 //
 // 两条 SPSC 队列方向相反、各自单生产单消费：无需互斥锁。
 // 队列满的策略：请求满 → 剩下的下 tick 再推（不丢请求）；结果满 → 生成线程等业务线程消费。
+//
+// B129（已评估，本轮不改）：本对象被**两个线程共用**（业务线程 tick/takeBatch、
+// 生成线程 workerLoop），归属只靠注释维持，没有编译期/运行期防护。可加
+// "首个调用者即主人"的 Debug 断言，但断言本身要引入原子与线程 id 记录，
+// 且真正防住它的是规则5 的线程本地化（已完成：本类已不再持有 World）。
+// 现在两条队列各自单端使用，误用会立刻表现为队列断言或数据错乱，风险可接受。
 class ChunkStreamer {
 public:
     // 窗口半径（chunk）：4 → 9×9 = 81 列 = 324 个 16³ chunk（1b 决策点②）
@@ -31,7 +37,10 @@ public:
     // 请求队列 256 / 结果队列 64（1b 细节决策）
     static constexpr std::size_t kRequestCapacity = 256;
     static constexpr std::size_t kResultCapacity = 64;
-    // 每 tick 最多应用 4 列 = 16 个 16³ chunk（一次锁写 64KB；25TPS 下约 1.6MB/s）
+    // 每 tick 最多取 4 列 = 16 个 16³ chunk。
+    // B126：原注释写"一次锁写 64KB"，与实现不符 —— 落盘时一列调 4 次
+    // applyGeneratedChunk（每层一次锁），所以每 tick 最多 16 次锁；
+    // 每次锁写入的是一层 16×16×16（约 16KB 压缩后更少）。
     static constexpr std::size_t kMaxApplyPerTick = 4;
     // 卸载半径 = 加载半径 + 1：留一圈滞回（hysteresis），站在窗口边界上不会反复加载/卸载。
     static constexpr int kEvictMargin = 1;

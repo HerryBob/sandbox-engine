@@ -1,4 +1,7 @@
 #pragma once
+// B30：这里只为用 BlockPos 而 include 了整个 Block.hpp（连带 BlockType / PaletteEntry /
+// Block 的定义与 std::hash 特化）。编译耦合偏高，将来应把 BlockPos 拆成独立的
+// BlockPos.hpp，Block.hpp 与 ChunkPos.hpp 都只依赖它。
 #include "shared/block/Block.hpp"
 
 #include <cstddef>

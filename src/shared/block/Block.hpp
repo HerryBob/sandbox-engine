@@ -40,6 +40,10 @@ struct BlockPos {
 struct Block {
     BlockType type = BlockType::Air;
     BlockPos  pos;
+    // B27：这一个字段有两种语义，靠取值区分 —— -1 = 主世界静态方块（pos 是世界坐标）；
+    // ≥0 = 刚体内方块（pos 是刚体局部坐标）。读者必须每次先看取值才能解释 pos，
+    // 容易写反。将来应提供 isMainWorld()/isContraption() 或干脆拆成两个类型；
+    // 本轮只把语义写清楚，不动结构（动了会牵涉协议与渲染）。
     int       contraptionId = -1; // -1=主世界，≥0=刚体（局部坐标）
     //这里有些问题 不应该将刚体属性合并到这里
 };

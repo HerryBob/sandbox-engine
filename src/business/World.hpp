@@ -13,6 +13,11 @@ namespace engine::business {
 
 // 世界方块数据的持有者：存储、锁、只读查询、修改入口。
 // 所有方块数据的读写都必须经过本类的锁；修改时机由 BusinessWorld 决定。
+//
+// 线程模型（B81：原先散落在 .cpp 与各函数注释里，集中在此）：
+//   · 数据本身（chunks_ + chunksLock_）—— **任意线程**可安全读写（内部加锁）；
+//   · 脏集合（dirtyChunksThisTick_）—— **仅业务线程**，不加锁（见 B84 说明）；
+//   · applyGeneratedChunk / unloadChunks —— **仅业务线程**（唯一 World 写者）。
 class World {
 public:
     // 构造空世界：不预置任何方块。方块内容全部来自模组注册 + 流式生成的写入
@@ -32,6 +37,8 @@ public:
         const std::unordered_set<engine::shared::ChunkPos>& chunks,
         bool expandNeighbors = true) const;
     // 按世界坐标查方块；返回空 = 该格不存在（未加载或空气）。
+    // B82：与下面的三态 lookupBlock **功能重叠** —— 这个把"未加载"和"空气"都返回空，
+    // 需要区分时必须用 lookupBlock。保留两态版是因为大多数调用方只关心"有没有方块"。
     std::optional<engine::shared::Block> findBlock(const engine::shared::BlockPos& p) const;
 
     // 单格查询的三种结果。
@@ -82,10 +89,15 @@ public:
     // ---- 区块卸载 ----
     // 删除指定 chunk 并标脏自身与 6 邻居；返回实际删除数量（未加载的忽略）。
     // 只允许业务线程调用。
+    // B85：**前置条件缺失** —— 直接删，不检查该 chunk 是否已存盘。当前没有存档系统，
+    // 所以无害；接存档后必须在调用方保证"已写盘"，或在这里加检查（否则会丢数据）。
     std::size_t unloadChunks(const std::unordered_set<engine::shared::ChunkPos>& cps);
 
     // 本 tick 变脏的 chunk 集合，只读不消费；清空由 clearDirtyChunks 负责。
     // 仅业务线程访问，不加锁。
+    // B84：注意**锁不对称** —— 写入（tryPlace/tryRemove 的 dirty 参数）发生在
+    // chunksLock_ 内，但读取（peek）与清空（clear）不加锁。这不是漏写锁，
+    // 而是脏集合归业务线程独占；不对称容易让读者误以为它受锁保护，故在此写明。
     std::unordered_set<engine::shared::ChunkPos> peekDirtyChunks() const;
     // 清空本 tick 的变脏集合（推送成功后调用）。
     void clearDirtyChunks();
