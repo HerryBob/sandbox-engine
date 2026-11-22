@@ -45,6 +45,13 @@ private:
                         const std::string& modId,
                         const std::vector<std::string>& dependencies,
                         std::unordered_set<std::string>& failedIds);
+
+    // 卸载单个模组（原 unloadAll 的循环体，规则1 拆分）。
+    // 顺序：onUnload → destroy → 按来源清注册 → FreeLibrary → 日志。
+    static void unloadOne(LoadedMod& m);
+
+    // 卸载后的注册表自检日志（原 unloadAll 尾部）。
+    static void logRegistryState();
 };
 
 } // namespace engine::modhost
