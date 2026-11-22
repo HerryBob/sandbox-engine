@@ -86,15 +86,15 @@ static void chdirToExeDir() {
 
 // 引擎主流程：装配四轨 → 启动 → 主线程事件循环 → 优雅停止。
 // presetName：世界预设名（不带 .json），由启动参数 --preset 决定。
-static int run(const std::string& presetName) {
-    initConsole();
-    std::cout << "=== 沙盒引擎 ===\n";
+// ============================================================================
+// run() 的五个自包含段（规则1 拆分）。
+// run() 本身是装配根：绝大多数局部变量被后续阶段使用，整体参数化需要引入
+// AppContext（超出"只拆分"的范围），所以这里只抽"不产生后续依赖"的阶段。
+// ============================================================================
 
-    // 资源索引：先登记引擎自带的 assets/ 与 data/，再由 ModLoader 追加各模组目录下的同名子目录。
-    // 登记顺序即冲突优先级：先登记者优先。
-    resource::g_resourceIndex.addRoot(resource::ResourceKind::Assets, "", "assets");
-    resource::g_resourceIndex.addRoot(resource::ResourceKind::Data, "", "data");
-
+// 模组加载 → 冻结方块/实体注册表 → 解析内置 id → 打印概况 → 加载方块模型。
+// 顺序有硬约束：整条链必须早于 vkCtx.init（图集要遍历方块注册表）。
+static void loadModsAndFreezeRegistries() {
     //方块注册表（#39）：引擎不再写死任何方块，内容全部由 mods/blocks.dll 注册。
     //顺序：loadAll（blocks.dll 按文件名排序最靠前，独占 id 1..6）→ freeze → 按名字解析内置 id。
     //晚于 freeze 的注册会被 Registry::add 静默拒绝；整条链必须早于 vkCtx.init（图集要遍历注册表）。
@@ -120,7 +120,10 @@ static int run(const std::string& presetName) {
     //模型注册表：方块注册之后、Vulkan 初始化之前——
     //图集 build 会读 assets/atlases/blocks.json 的纹理声明，同时核对注册表引用的纹理名
     engine::assets::loadBlockModels();
+}
 
+// 噪声注册（模组批 + 内置 flat）→ 六项自检 → 打印。结果只打印，不影响启动流程。
+static void initNoiseAndRunSelfTests() {
     //世界生成子系统（#33/#34）：噪声注册 → 行为自检 → 锁表。
     //注册分两批，顺序固定：
     //  ① 模组（上面 loadAll 已调完，各 DLL 在 onLoad 里 registerNoise）
@@ -174,6 +177,72 @@ static int run(const std::string& presetName) {
               << (bodyMeshOk ? "通过" : "失败") << "\n";
     std::cout << "模组排序：跨批次依赖方向 + 缺失依赖 + 同批环自检"
               << (sorterOk ? "通过" : "失败") << "\n";
+}
+
+// 同步预热：阻塞到窗口内 warmupColumns 列全部写入（装配期没有 25TPS 约束）。
+// 刻意走和运行期完全同一条路径（tickUpdate → 后台生成 → drainResults → World）。
+static void warmupWindow(engine::worldgen::ChunkStreamer& streamer,
+                         engine::business::World& world,
+                         std::size_t warmupColumns) {
+    const double spawnX = 0.0;
+    const double spawnZ = 8.0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (streamer.stats().applied < warmupColumns &&
+           std::chrono::steady_clock::now() < deadline) {
+        streamer.tickUpdate(spawnX, spawnZ);
+        streamer.drainResults(world, engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    const auto s = streamer.stats();
+    std::cout << "流式预热：请求列=" << s.requested
+              << " 已生成=" << s.generated
+              << " 已应用=" << s.applied
+              << " 方块=" << s.blocks
+              << " 地表=" << s.minSurfaceY << ".." << s.maxSurfaceY
+              << " chunk=" << world.chunkCount() << "(非空，空chunk不建)";
+    if (s.applied < warmupColumns) std::cout << " [未灌满：30s 超时]";
+    std::cout << "\n";
+}
+
+// 区块调色板统计（诊断/验收用）：实际占用 vs 16 位密集数组的对比。
+static void printPaletteStats(engine::business::World& world) {
+    const auto ps = world.paletteStats();
+    const std::size_t denseBytes = ps.chunks * 8192;   // 改造前：16 位密集数组
+    std::cout << "[Palette] chunk=" << ps.chunks
+              << " 4位=" << ps.bits4 << " 8位=" << ps.bits8 << " 16位=" << ps.bits16
+              << " 平均字典=" << std::fixed << std::setprecision(2) << ps.avgPalette << "项"
+              << " 实际=" << ps.totalBytes / 1024 << "KB"
+              << " 密集数组本应=" << denseBytes / 1024 << "KB"
+              << "（省 " << (denseBytes == 0 ? 0.0
+                      : static_cast<double>(denseBytes - ps.totalBytes) * 100.0
+                        / static_cast<double>(denseBytes)) << "%）\n";
+}
+
+// 加玩家物理体：碰撞箱半宽/半高/半深与跳跃初速取自实体类型定义（缺失时退回 MC 口径默认）。
+static void addPlayerPhysicsBody(engine::physics::PhysicsWorld& physics,
+                                 const engine::modhost::EntityTypeInfo* playerType) {
+    const double halfX = (playerType ? playerType->width : 0.6) * 0.5;
+    const double halfY = (playerType ? playerType->height : 1.8) * 0.5;
+    const double halfZ = (playerType ? playerType->depth : 0.6) * 0.5;
+    const double jump  = (playerType ? playerType->jumpSpeed : 4.9);
+    physics.addPlayerBody(0.0, 8.0, 0.0, halfX, halfY, halfZ, jump);
+    std::cout << "玩家碰撞箱：半宽=" << halfX << " 半高=" << halfY << " 半深=" << halfZ
+              << " 跳跃初速=" << jump << "\n";
+}
+
+static int run(const std::string& presetName) {
+    initConsole();
+    std::cout << "=== 沙盒引擎 ===\n";
+
+    // 资源索引：先登记引擎自带的 assets/ 与 data/，再由 ModLoader 追加各模组目录下的同名子目录。
+    // 登记顺序即冲突优先级：先登记者优先。
+    resource::g_resourceIndex.addRoot(resource::ResourceKind::Assets, "", "assets");
+    resource::g_resourceIndex.addRoot(resource::ResourceKind::Data, "", "data");
+
+    loadModsAndFreezeRegistries();
+
+    initNoiseAndRunSelfTests();
 
     // 世界预设（#35）：data/worldgen/presets/<presetName>.json → WorldPreset（纯数据）。
     // 高度场实例化推迟到 ColumnGenerator::prepare()，失败原因在那里报。
@@ -272,31 +341,9 @@ static int run(const std::string& presetName) {
         streamer = std::make_unique<engine::worldgen::ChunkStreamer>(columnGen, radius);
         streamer->start();
 
-        // 同步预热：阻塞到窗口内 81 列全部写入（装配期没有 25TPS 约束）。
-        // 刻意走和运行期完全同一条路径（tickUpdate → 后台生成 → drainResults → World），
-        // 避免"启动一套代码、运行期另一套代码"，预热与动态加载结果必然一致。
-        auto& world = businessWorld.world();
-        const double spawnX = 0.0;
-        const double spawnZ = 8.0;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-        while (streamer->stats().applied < warmupColumns &&
-               std::chrono::steady_clock::now() < deadline) {
-            streamer->tickUpdate(spawnX, spawnZ);
-            streamer->drainResults(world, engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        warmupWindow(*streamer, businessWorld.world(), warmupColumns);
         // 首帧渲染走全量快照重建：装配期的脏标记清掉，避免首帧后再重复重建一遍
-        world.clearDirtyChunks();
-
-        const auto s = streamer->stats();
-        std::cout << "流式预热：请求列=" << s.requested
-                  << " 已生成=" << s.generated
-                  << " 已应用=" << s.applied
-                  << " 方块=" << s.blocks
-                  << " 地表=" << s.minSurfaceY << ".." << s.maxSurfaceY
-                  << " chunk=" << world.chunkCount() << "(非空，空chunk不建)";
-        if (s.applied < warmupColumns) std::cout << " [未灌满：30s 超时]";
-        std::cout << "\n";
+        businessWorld.world().clearDirtyChunks();
     } else {
         std::cout << "流式预热：失败（预设未加载或地层校验未通过）\n";
     }
@@ -305,15 +352,7 @@ static int run(const std::string& presetName) {
     // 首个生物：玩家（运动学、单 AABB、位置锚在脚底中心），从空中落下验证重力与落地。
     // 碰撞箱半宽/半高/半深与跳跃初速全部取自实体类型定义（模组没加载时退回 MC 口径默认）。
     // 物理线程尚未启动，这里属于装配期单线程，可安全增删物理体。
-    {
-        const double halfX = (playerType ? playerType->width : 0.6) * 0.5;
-        const double halfY = (playerType ? playerType->height : 1.8) * 0.5;
-        const double halfZ = (playerType ? playerType->depth : 0.6) * 0.5;
-        const double jump  = (playerType ? playerType->jumpSpeed : 4.9);
-        physicsWorld.addPlayerBody(0.0, 8.0, 0.0, halfX, halfY, halfZ, jump);
-        std::cout << "玩家碰撞箱：半宽=" << halfX << " 半高=" << halfY << " 半深=" << halfZ
-                  << " 跳跃初速=" << jump << "\n";
-    }
+    addPlayerPhysicsBody(physicsWorld, playerType);
     // 玩家位置共享槽（物理线程写 → 输入线程读）：相机跟随的唯一数据来源。
     physicsWorld.attachPlayerState(&playerBodyState);
     // 玩家操控槽（输入线程写 → 物理线程读）：WASD 水平速度 + 空格跳跃。
@@ -343,18 +382,7 @@ static int run(const std::string& presetName) {
 
     // 初始世界统计：生成后快照（诊断/验收用）。
     std::cout << "初始世界：方块=" << businessWorld.blockCount() << "\n";
-    {
-        const auto ps = businessWorld.world().paletteStats();
-        const std::size_t denseBytes = ps.chunks * 8192;   // 改造前：16 位密集数组
-        std::cout << "[Palette] chunk=" << ps.chunks
-                  << " 4位=" << ps.bits4 << " 8位=" << ps.bits8 << " 16位=" << ps.bits16
-                  << " 平均字典=" << std::fixed << std::setprecision(2) << ps.avgPalette << "项"
-                  << " 实际=" << ps.totalBytes / 1024 << "KB"
-                  << " 密集数组本应=" << denseBytes / 1024 << "KB"
-                  << "（省 " << (denseBytes == 0 ? 0.0
-                          : static_cast<double>(denseBytes - ps.totalBytes) * 100.0
-                            / static_cast<double>(denseBytes)) << "%）\n";
-    }
+    printPaletteStats(businessWorld.world());
 
     core::ThreadLoop businessLoop("business");
     core::ThreadLoop physicsLoop("physics");
