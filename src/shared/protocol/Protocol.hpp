@@ -77,6 +77,7 @@ struct PhysicsResult {
 
     // 碰撞事件字段（CollisionEvent 用）：
     int        cx = 0, cy = 0, cz = 0;     // 被撞静态方块的坐标
+    // B56：法向是**整数轴向量**，每个分量只取 {-1, 0, 1}（碰撞发生在轴对齐方块面上）。
     int        nx = 0, ny = 0, nz = 0;     // 碰撞法向（刚体被推回的方向）
     double     impact = 0.0;               // 碰撞瞬间刚体速度（冲击强度）
 
@@ -111,6 +112,8 @@ struct BodyPose {
 // 刚体域方块变更不进此流（复合体 = 动态渲染单元，状态由 RigidBodyPos 驱动）。
 struct BlockChangeEvent {
     long long tick = 0;                              // 业务 tick 序号（事件时序）
+    // B113：tick 目前**只写不读** —— 生产端会填，渲染端不消费它。
+    //        保留是为了将来做"事件时序诊断/去重"时不用改协议；不要假设它被用于排序。
     std::vector<engine::shared::ChunkPos> dirtyChunks; // 本 tick 变脏的 chunk（去重）
 };
 

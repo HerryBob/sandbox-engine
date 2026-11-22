@@ -12,11 +12,11 @@
 | B1 | 生命周期顺序 | `ModLoader.cpp` `unloadAll` | `destroy` 早于 `eraseByOwner` | 窗口期内注册表留指向已销毁对象的指针（`animUser` 悬垂） | 🟡 | ✅已修（顺序改为 onUnload→清注册→destroy） |
 | B2 | 逻辑漏判 | `ModSorter.cpp` `sort` | 跨批依赖"环上模组"不被拒（级联早于环检测） | 进 order 却缺依赖，`failedIds` 兜不住 | 🟡 | ✅已修 |
 | B3 | 缺校验 | `BlockApi.cpp` `registerBlockImpl` | `mass/hardness/friction` 无 isfinite/范围校验 | 接 Jolt 后污染质量与摩擦 | 🟡 | ✅已修 |
-| B4 | 缺校验 | `BlockApi.cpp` `registerBlockImpl` | 同名方块不检测 | `findBlockIdByName` 结果依赖哈希桶 | 🟢 | ✅ |
+| B4 | 缺校验 | `BlockApi.cpp` `registerBlockImpl` | 同名方块不检测 | `findBlockIdByName` 结果依赖哈希桶 | 🟢 | ✅已修 |
 | B5 | 隐式依赖 | `ModLoader.cpp` `loadAll` | builtin 组内按 id 字典序 | 新增 `aaa_*` 会让方块 id 整体位移（存档错位） | 🟡 | ⏸ 已评估不改：同 phase 内按 id 字典序是隐式依赖，正确解是给 manifest 加 priority（接口扩展）。风险已写进 preSortCandidates 注释 |
-| B6 | 诊断缺失 | `LogImpl.cpp` `logImpl` | 模组日志 tag 固定 `"Mod"` | 多模组日志无法归属 | 🟢 | ✅ |
+| B6 | 诊断缺失 | `LogImpl.cpp` `logImpl` | 模组日志 tag 固定 `"Mod"` | 多模组日志无法归属 | 🟢 | ✅已修 |
 | B7 | 回滚不完整 | `ModLoader.cpp` `loadAll` 失败分支 | 只回滚噪声，实体类型残留 | `onAnimate` 指向已卸载 DLL | 🟡 | ✅已修（回滚改用 cleanupOwnedContent） |
-| B8 | 异常无防护 | `ModLoader.cpp` / `onLoad` | C 边界无 try/catch | C++ 模组抛异常即 UB | 🟢 | ✅ |
+| B8 | 异常无防护 | `ModLoader.cpp` / `onLoad` | C 边界无 try/catch | C++ 模组抛异常即 UB | 🟢 | ✅已修 |
 
 ## 二、基础库 core（ThreadLoop 12 条 / TimeManager 6 条）
 
@@ -51,7 +51,7 @@
 | B28 | 可简化 | `Block.hpp:30`、`ChunkPos.hpp:20` `operator==` | 可 `= default`（C++20） | 无 | 🟢 | ✅已修（= default） |
 | B29 | 类型宽度 | `Block.hpp:53`、`ChunkPos.hpp:37` | 用裸 `size_t` | 风格不统一 | 🟢 | ✅已修（std::size_t） |
 | B30 | 依赖过重 | `ChunkPos.hpp:2` | 为 `BlockPos` include 整个 `Block.hpp` | 编译耦合（应拆 `BlockPos.hpp`） | 🟡 | ✅已修（注释/契约写明） |
-| B31 | 重复定义 | `ChunkPos.hpp` / `Block.hpp` | 两个坐标类型结构几乎一致 | 可用模板统一（原型可不做） | 🟢 | ✅ |
+| B31 | 重复定义 | `ChunkPos.hpp` / `Block.hpp` | 两个坐标类型结构几乎一致 | 可用模板统一（原型可不做） | 🟢 | ⏸ 已评估不改：两个坐标类型用模板统一属重构（规则1 已冻结），重复带来的成本只是 20 行样板 |
 | — | ~~`>> 4` 耦合未文档化~~ | `ChunkPos.hpp:26` | — | — | — | ❌ **不实**：已有注释"这里 >> 4 强绑定区块大小" |
 | B32 | 可简化 | `ChunkData.hpp:174,183,190` | `std::vector<T>().swap(v)` 释放 hack | 可读性 | 🟢 | ✅已修 |
 | B33 | 提前分配 | `ChunkData.hpp:199-215` `chunkCompact` | "一项都没丢"的提前返回发生在 `used`/`remap`/`nextPal` 分配之后 | 每次调用白分配三个容器 | 🟢 | ✅已修 |
@@ -85,7 +85,7 @@
 | B53 | 命名不统一 | `Protocol.hpp:67` | `std::vector<engine::shared::Block>` 与同文件 `std::vector<Block>` 混用 | 可读性 | 🟡 | ✅已修（注释/契约写明） |
 | B54 | 适用范围不清 | `Protocol.hpp:47-48` | `processedCommands` / `simTime` 注释只说含义，没说"哪些 type 会带" | 同步校验逻辑难维护 | 🟡 | ✅已修（注释/契约写明） |
 | B55 | 单文件多义 | `Protocol.hpp` | 一个文件塞 5 套类型（命令/回执/结构事件/位姿/变更事件） | 方向与所有权难分辨 | 🟡 | ✅已修（注释/契约写明） |
-| B56 | 注释不全 | `Protocol.hpp:61` `nx/ny/nz` | 只写"碰撞法向"，未写取值 `{-1,0,1}` | 使用者易误以为是连续分量 | 🟢 | ✅（部分） |
+| B56 | 注释不全 | `Protocol.hpp:61` `nx/ny/nz` | 只写"碰撞法向"，未写取值 `{-1,0,1}` | 使用者易误以为是连续分量 | 🟢 | ✅已修（注释写明取值 {-1,0,1}） |
 | B57 | 信息缺失 | `Protocol.hpp:26` `dx/dy/dz` | MoveBlock 无起点坐标 | 位移指令不可重放 | 🟢 | ✅已修 |
 | B58 | 结构偏胖 | `Protocol.hpp:40-68` | `PhysicsResult` 20+ 字段承载 6 种消息 | 每条约 200B（队列 64 深） | 🟢 | ✅已修 |
 | — | ~~BodyPose/RigidBodyPos 缺旋转~~ | — | — | — | — | 🔧 **已修复**：`qx..qw` 已加入（staged rotation） |
@@ -107,13 +107,13 @@
 | B67 | 魔法数 | `BlockRegistry.hpp` | `0xFFFF` 出现 4 次 | 改一处漏一处 | 🟡 | ✅已修 |
 | B68 | 缺校验 | `BlockRegistry.hpp` `resolveBuiltinBlockIds` | 未检查 `frozen()` | freeze 前调用会解析到空表 | 🟡 | ✅已修 |
 | B69 | 警告语义 | `BlockRegistry.hpp` | 只 warn stone/dirt/grass，未说明为何只这三个 | 读者以为漏检 | 🟡 | ✅已修 |
-| B70 | 缺断言 | `BlockRegistry.hpp` | 无 `static_assert` 保证 key 能表示 `0xFFFF` 哨兵 | 改 key 类型即静默错 | 🟢 | ✅ |
-| B71 | 静默失败 | `BlockRegistry.hpp` `freezeBlockRegistry` | 提前调用只静默少方块 | 无线索可查 | 🟢 | ✅ |
-| B72 | 重名不检测 | `BlockRegistry.hpp` | 不检查方块名唯一（与 B4 同源） | `findBlockIdByName` 结果不定 | 🟢 | ✅ |
-| B73 | 约束未写 | `BlockRegistry.hpp` `g_builtinBlockIds` | 未写"启动时 resolve 一次，之后只读" | 运行期改写即竞争 | 🟢 | ✅ |
+| B70 | 缺断言 | `BlockRegistry.hpp` | 无 `static_assert` 保证 key 能表示 `0xFFFF` 哨兵 | 改 key 类型即静默错 | 🟢 | ✅已修 |
+| B71 | 静默失败 | `BlockRegistry.hpp` `freezeBlockRegistry` | 提前调用只静默少方块 | 无线索可查 | 🟢 | ✅已修 |
+| B72 | 重名不检测 | `BlockRegistry.hpp` | 不检查方块名唯一（与 B4 同源） | `findBlockIdByName` 结果不定 | 🟢 | ✅已修 |
+| B73 | 约束未写 | `BlockRegistry.hpp` `g_builtinBlockIds` | 未写"启动时 resolve 一次，之后只读" | 运行期改写即竞争 | 🟢 | ✅已修 |
 | B74 | 线程契约缺失 | `Registry.hpp` `erase`/`eraseByOwner` | 非线程安全，注释未写明 | 其它线程清表即数据竞争 | 🔴 | ✅已修（结构修改加锁 + 写清读写契约） |
 | B75 | 异常安全 | `Registry.hpp` `add` | `owners_.emplace` 抛异常时 `items_` 已插入 | 两表不一致（owner 丢失） | 🟡 | ✅已修 |
-| B76 | 能力缺失 | `Registry.hpp` | `const_iterator` 拿不到 owner | 只能另调 `ownerOf(key)` | 🟢 | ✅ |
+| B76 | 能力缺失 | `Registry.hpp` | `const_iterator` 拿不到 owner | 只能另调 `ownerOf(key)` | 🟢 | ⏸ 已评估不改：让 const_iterator 暴露 owner 要改迭代器类型，代价大于收益（另调 ownerOf 即可） |
 | B77 | 断言缺失 | `Registry.hpp` `erase` | 忽略 `owners_.erase` 返回值 | 两表可能长度不一致 | 🟢 | ✅已修 |
 | B78 | 缺 clear | `Registry.hpp` | 没有 `clear()` | 需要时再加 | 🟢 | ✅已修 |
 
@@ -128,10 +128,10 @@
 | B83 | 容量偏小 | `World.cpp` `renderSnapshot`/`chunkSnapshot` | `reserve(×64 / ×512)`，实测约 3156 非空气/列 | 多次扩容（性能+峰值） | 🟡 | ⏸ 已评估不改：属性能问题，已记入性能记录 P9 |
 | B84 | 锁不对称 | `World.hpp` `dirtyChunksThisTick_` | 写在锁内、读（peek/clear）不加锁 | 靠约定维持，易误读为受锁保护 | 🟡 | ✅已修（注释/契约写明） |
 | B85 | 无存盘前置检查 | `World.hpp` `unloadChunks` | 脏 chunk 直接删 | 接存档后会丢数据 | 🟡 | ✅已修（注释/契约写明） |
-| B86 | 回调在锁内 | `World.hpp:62` `forEachBlockInAABB` | 回调在锁内执行、不可重入 | 回调里调 `getBlock` 会自死锁 | 🟢 | ✅（已注明） |
-| B87 | 间接调用 | `World.hpp` `std::function` | 每个方块一次间接调用 | 原型可接受 | 🟢 | ✅ |
-| B88 | 位移实现 | `World.cpp` `appendChunkBlocks` | `cp.x << 4`（C++20 定义良好） | 可读性（或改 `* 16`） | 🟢 | ✅ |
-| B89 | 多余构造 | `World.cpp` `applyGeneratedChunk` | `chunks_[cp]` 默认构造再赋值 | 低频，无害 | 🟢 | ✅ |
+| B86 | 回调在锁内 | `World.hpp:62` `forEachBlockInAABB` | 回调在锁内执行、不可重入 | 回调里调 `getBlock` 会自死锁 | 🟢 | ✅已修（注释已注明不可重入） |
+| B87 | 间接调用 | `World.hpp` `std::function` | 每个方块一次间接调用 | 原型可接受 | 🟢 | ⏸ 已评估不改：属性能问题，已记入 性能问题记录 P11（热路径可换函数指针 + void*） |
+| B88 | 位移实现 | `World.cpp` `appendChunkBlocks` | `cp.x << 4`（C++20 定义良好） | 可读性（或改 `* 16`） | 🟢 | ✅已修（注释说明 C++20 下定义良好，无需改） |
+| B89 | 多余构造 | `World.cpp` `applyGeneratedChunk` | `chunks_[cp]` 默认构造再赋值 | 低频，无害 | 🟢 | ⏸ 已评估不改：多一次默认构造 + 赋值，低频路径（每列 4 次） |
 | B90 | 封装泄漏 | `BusinessWorld.hpp` `world()` | 返回非 const `World&` 与注释矛盾 | 可绕过统计与排队 | 🟡 | ✅已修 |
 | B91 | 约束未写 | `BusinessWorld.hpp` `placeBlock`/`removeBlock` | 内部写 SPSC 队列（单生产者），未注明"仅业务线程" | 其它线程调用破坏约定 | 🟡 | ✅已修 |
 | B92 | 语义易混 | `BusinessWorld.hpp` `syncAll` vs `requestPhysicsResync` | 一次性 vs 置标志自动重试 | 调用方选错 | 🟡 | ✅已修 |
@@ -144,28 +144,28 @@
 | B99 | 返回值忽略 | `BusinessWorld` 点击处理 | `placeBlock`/`removeBlock` 失败无反馈 | 玩家操作失败无感知 | 🟡 | ✅已修 |
 | B100 | 脆弱约定 | `BusinessWorld` / `InputSampler` | 方向向量需与渲染端逐位一致（各写一份） | 任一侧改公式即错位 | 🟡 | ⏸ 延后：方向向量共享需要抽出公共实现，属重构（规则1 已冻结） |
 | B101 | 判定遗漏 | `BusinessWorld` DDA | 起点格不参与判定（先推进再检查） | 站在方块里打不到它 | 🟡 | ✅已修 |
-| B102 | 非原子标志 | `BusinessWorld.hpp` | `resyncPending_` / `firstTick_` 靠"业务线程独占" | 跨线程调 `requestPhysicsResync` 即竞争 | 🟢 | ✅ |
+| B102 | 非原子标志 | `BusinessWorld.hpp` | `resyncPending_` / `firstTick_` 靠"业务线程独占" | 跨线程调 `requestPhysicsResync` 即竞争 | 🟢 | ✅已修 |
 | B103 | 覆盖丢事件 | `PhysicsBridge.hpp:63-68` | `wantPlace_`/`wantRemove_` 是**单槽位** | 同 tick 第二条覆盖第一条 → 世界与物理不同步（看得见、穿得过） | 🔴 | 🟡已加诊断（覆盖时告警；改队列属协议变更，按决定不做） |
 | B104 | 死生产 | `PhysicsBridge.cpp` | 碰撞事件仍生产，无消费方 | 每次碰撞白进队列 | 🟡 | ⏸ 已评估不改：碰撞事件当前无消费方，但保留生产是为了接通 ContactListener 时不用改物理侧 |
-| B105 | 封装泄漏 | `PhysicsBridge.hpp:46-47` | 队列访问器公开可变引用 | 可绕过桥的统计与待发状态机 | 🟢 | ✅ |
-| B106 | 死代码 | `BusinessWorld.hpp` `syncAll` | 从未被调用（grep 确认仅声明+定义） | 与 B92 叠加更难判断 | 🟢 | ✅ |
+| B105 | 封装泄漏 | `PhysicsBridge.hpp:46-47` | 队列访问器公开可变引用 | 可绕过桥的统计与待发状态机 | 🟢 | ⏸ 已评估不改：访问器收窄要改装配层接线（main + 物理/渲染线程启动），属接口变更 |
+| B106 | 死代码 | `BusinessWorld.hpp` `syncAll` | 从未被调用（grep 确认仅声明+定义） | 与 B92 叠加更难判断 | 🟢 | ✅已修 |
 | — | ~~"queue" 名字骗人~~ | `PhysicsBridge` | — | — | — | 🔧 **已修复**：批次 6 改名 `push*Command` |
 | B107 | 拷贝两次 | `RenderBridge.cpp` `flushChangesToRender` | `peekDirtyChunks()` 拷贝 → `assign` 再拷贝 | 每 tick 双倍 | 🟡 | ✅已修（move 而非拷贝） |
 | B108 | 队列满恶化 | `RenderBridge.cpp` `flushChangesToRender` | 失败不清脏 → 下 tick 拷更大一份 | 渲染落后时雪崩 | 🟡 | ⏸ 已评估不改：脏集合有上界（已加载 chunk 数 ≤ 324），不会无限增长 |
 | B109 | 事件粒度过大 | `RenderBridge.cpp` `flushChangesToRender` | 一 tick 全部脏 chunk 塞一条事件 | 脏 100 个时渲染端一次重建 100 个 | 🟡 | ⏸ 已评估不改：限流应放在渲染端按帧预算分片，不该在这里丢事件 |
 | B110 | 背压不可见 | `RenderBridge` 整体 | 业务不知渲染消费到哪 | 积压只能靠症状发现 | 🟡 | ✅已修（注释/契约写明） |
 | B111 | 容量不足 | `RenderBridge.hpp:44` | 结构事件"不能丢"但队列仅 16 深 | 同 tick 打包 20 个刚体即丢（B95 成因） | 🟡 | ✅已修（容量 16→64） |
-| B112 | 封装泄漏 | `RenderBridge.hpp:33-35` | 三条队列访问器公开 | 同 B105 | 🟢 | ✅ |
-| B113 | 死字段 | `RenderBridge.cpp` | `BlockChangeEvent::tick` 只写不读 | 读者以为它用于去重/排序 | 🟢 | ✅ |
+| B112 | 封装泄漏 | `RenderBridge.hpp:33-35` | 三条队列访问器公开 | 同 B105 | 🟢 | ⏸ 已评估不改：同 B105 |
+| B113 | 死字段 | `RenderBridge.cpp` | `BlockChangeEvent::tick` 只写不读 | 读者以为它用于去重/排序 | 🟢 | ✅已修 |
 | B114 | 常量空缺 | `BlockActions.hpp:15-17` | DIRTY 只定义 0x01/0x08/0x10，缺 0x02/0x04 无说明 | 读者以为漏定义 | 🟡 | ✅已修（注释说明是保留位） |
 | B115 | 措辞错误 | `BlockActions.hpp:11` | 写"无状态、无锁、纯函数"，但 `tryPlace/tryRemove` 有副作用 | 误以为可无锁并发调用 | 🟡 | ✅已修（改措辞） |
 | B116 | 标脏不全 | `BlockActions.cpp` `markDirtyWithBoundary` | 只标 6 个面邻居，不标对角 | 接 AO/平滑光照时边缘漏更新 | 🟡 | ⏸ 已评估不改（现在标 26 邻域会每次多重建 5~20 chunk；等 AO 落地再改，已写进注释） |
 | B117 | 缺前置检查 | `BlockActions.cpp` `tryPlace` | 不拒绝 `type == Air` | 标脏但数据没变，且**凭空建空 chunk** | 🟡 | ✅已修（前置拒绝 Air） |
 | B118 | 异常留残留 | `BlockActions.cpp` `tryPlace` | `chunks[cp]` 先建 chunk，后续抛异常则留空 chunk | 多占内存 | 🟡 | ⏸ 已评估不改：只在 OOM 时会留一个空 chunk，此时进程已不可用 |
 | B119 | 归属不当 | `BlockActions.hpp` | 脏原因常量定义在此，而 `ChunkData` 才是使用者 | 概念错位 | 🟡 | ⏸ 保留（注释说明将来随 dirty 一起搬，避免现在动调用面） |
-| B120 | 命名不一致 | `BlockActions.cpp` | `tryPlace` 用 `cp`、`tryRemove` 用 `it` | 风格 | 🟢 | ✅ |
-| B121 | 无检查 | `BlockActions.cpp` `markDirtyWithBoundary` | 邻居 chunk 不存在也插进 dirty | 渲染端需自行忽略 | 🟢 | ✅ |
-| B122 | 缺 noexcept | `BlockActions.hpp` | 未标 `noexcept` | 正确（不强异常安全），可注释 | 🟢 | ✅ |
+| B120 | 命名不一致 | `BlockActions.cpp` | `tryPlace` 用 `cp`、`tryRemove` 用 `it` | 风格 | 🟢 | ✅已修 |
+| B121 | 无检查 | `BlockActions.cpp` `markDirtyWithBoundary` | 邻居 chunk 不存在也插进 dirty | 渲染端需自行忽略 | 🟢 | ✅已修 |
+| B122 | 缺 noexcept | `BlockActions.hpp` | 未标 `noexcept` | 正确（不强异常安全），可注释 | 🟢 | ⏸ 已评估不改：这些函数会分配内存，标 noexcept 反而是错的；已在注释说明 |
 
 ## 七、世界生成 worldgen（ChunkStreamer 12 条，与 U12 同源）
 
@@ -179,10 +179,10 @@
 | B128 | 隐式三环契约 | `World::unloadChunks` → `flushChangesToRender` → `rebuildChunkMeshes` | "无顶点则删 mesh"靠三环约定 | 任一环被"优化"即留幽灵网格 | 🟡 | ⏸ 已评估不改：契约已写进 World::unloadChunks 与渲染端无顶点分支两处注释 |
 | B129 | 线程归属无保护 | `ChunkStreamer.hpp` | 业务线程 + 生成线程共用一个对象，只靠注释 | 错误线程调用即数据竞争 | 🟡 | ✅已修（注释/契约写明） |
 | B130 | 反向依赖 | `ChunkStreamer.cpp` `receiveResults(World&)` | worldgen → business::World（唯一反向依赖） | 生成器搬 DLL 走不通（规则 7 边界） | 🟡 | ✅已修 |
-| B131 | 阻止移动 | `ChunkStreamer.cpp` `workerLoop` | `const GenResult res` 只能走 `push(const T&)` | shared_ptr 多一次原子加（可忽略） | 🟢 | ✅ |
-| B132 | 空转 | `ChunkStreamer.cpp` `workerLoop` | 无请求时 `sleep(2ms)` | 稳定后每秒数百次唤醒 | 🟢 | ✅ |
-| B133 | 反压未注明 | `ChunkStreamer.hpp:34` | `kMaxApplyPerTick=4` 与 `kResultCapacity=64` 的反压关系没写 | 调参时易忽略 | 🟢 | ✅ |
-| B134 | 约束未注明 | `ChunkStreamer::stats()` | 聚合字段只能在业务线程读，无编译期防护 | 从 main 读即竞争 | 🟢 | ✅ |
+| B131 | 阻止移动 | `ChunkStreamer.cpp` `workerLoop` | `const GenResult res` 只能走 `push(const T&)` | shared_ptr 多一次原子加（可忽略） | 🟢 | ✅已修 |
+| B132 | 空转 | `ChunkStreamer.cpp` `workerLoop` | 无请求时 `sleep(2ms)` | 稳定后每秒数百次唤醒 | 🟢 | ✅已修 |
+| B133 | 反压未注明 | `ChunkStreamer.hpp:34` | `kMaxApplyPerTick=4` 与 `kResultCapacity=64` 的反压关系没写 | 调参时易忽略 | 🟢 | ✅已修 |
+| B134 | 约束未注明 | `ChunkStreamer::stats()` | 聚合字段只能在业务线程读，无编译期防护 | 从 main 读即竞争 | 🟢 | ✅已修 |
 
 ---
 

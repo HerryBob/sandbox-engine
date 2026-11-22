@@ -132,11 +132,13 @@ private:
     std::atomic<long long>     tickCount_{0};
 
     std::atomic<long long> playerActions_{ 0 };  // 已处理玩家点击计数
-    bool resyncPending_ = false;                 // 待重下发全量方块集（业务线程独占）
+    // B102：两个标志改成 atomic —— 语义上仍"只有业务线程写"，但 requestPhysicsResync()
+    // 的调用点可能在别的线程（例如某个模组或诊断入口），普通 bool 会变成数据竞争。
+    std::atomic<bool> resyncPending_{ false };   // 待重下发全量方块集
     // B96：收物理回执时复用的事件缓冲（避免每 tick 构造/销毁 vector）。
     // 只在业务线程使用，容量留在跨 tick 之间。
     std::vector<engine::shared::BodyStructureEvent> bodyEvents_;
-    bool firstTick_ = true;                      // 首个业务 tick 强制全量同步：地形预热在主线程完成，业务线程无新列可触发
+    std::atomic<bool> firstTick_{ true };                      // 首个业务 tick 强制全量同步：地形预热在主线程完成，业务线程无新列可触发
 
     std::atomic<long long> placedBlockCount_{0};       // 成功放置（裁决通过）次数
     std::atomic<long long> removedBlockCount_{0};      // 成功破坏次数

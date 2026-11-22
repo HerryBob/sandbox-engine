@@ -23,9 +23,9 @@ BusinessWorld::BusinessWorld(engine::core::TimeManager& tm,
 void BusinessWorld::tick(double scale) {
     // 首个业务 tick 强制一次全量同步：地形预热在装配期（主线程）完成，
     // 业务线程起来后没有新列可触发 requestPhysicsResync，物理侧会一直空集合。
-    if (firstTick_) {
-        firstTick_ = false;
-        resyncPending_ = true;
+    if (firstTick_.load(std::memory_order_relaxed)) {
+        firstTick_.store(false, std::memory_order_relaxed);
+        resyncPending_.store(true, std::memory_order_relaxed);
     }
     // 25TPS：每个业务 tick 推进 dt=0.04s，受 time_scale 缩放（与物理线程统一 25/25）。
     // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
@@ -46,8 +46,8 @@ void BusinessWorld::syncWorldToPhysics() {
     // 区块卸载等批量变更后需要重发全量：指令槽位是单槽位状态机，
     // pushSyncCommand 在"已有待发指令"时返回 false —— 保留标志，下 tick 继续重试，
     // 否则物理侧会一直留着已卸载区域的幽灵碰撞体。
-    if (resyncPending_) {
-        if (physicsBridge_.pushSyncCommand()) resyncPending_ = false;
+    if (resyncPending_.load(std::memory_order_relaxed)) {
+        if (physicsBridge_.pushSyncCommand()) resyncPending_.store(false, std::memory_order_relaxed);
     }
     // tick 边界：委托 PhysicsBridge 发指令（全量同步需现场生成世界快照）。
     physicsBridge_.syncWorldToPhysics(world_.renderSnapshot());
@@ -241,7 +241,7 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
 
 void BusinessWorld::requestPhysicsResync() {
     // 只置标志；真正的下发在 syncWorldToPhysics（那里才有世界快照，且每 tick 会重试）。
-    resyncPending_ = true;
+    resyncPending_.store(true, std::memory_order_relaxed);
 }
 
 long long BusinessWorld::placedBlockCount() const {

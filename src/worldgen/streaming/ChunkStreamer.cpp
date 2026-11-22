@@ -67,7 +67,9 @@ void ChunkStreamer::workerLoop() {
         generatedColumnCount_.fetch_add(1, std::memory_order_relaxed);
 
         // 结果队列满 = 业务线程还没消费完：等它（有界等待，不丢结果）
-        const GenResult res{req.pos, std::move(blocks)};
+        // B131：**不加 const** —— const 只能绑 push(const T&)，会让 shared_ptr 多一次原子加；
+        //       去掉 const 后走 push(T&&) noexcept，引用计数直接搬过去。
+        GenResult res{req.pos, std::move(blocks)};
         while (!genToBusinessResults_.push(res)) {
             if (loop_.shouldStop()) return;   // 收工：不再阻塞退出流程
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

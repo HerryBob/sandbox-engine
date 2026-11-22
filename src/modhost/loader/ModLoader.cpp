@@ -272,7 +272,16 @@ bool ModLoader::loadOne(fs::path dllPath,
     }
 
     // 阶段④：初始化。模组在这里校验 api->version 并注册内容。
-    if (vtbl->onLoad(self, &g_api) != 0) {
+    // B8：接住异常 —— onLoad 抛出来的异常不允许穿过 C 边界（否则 UB，且会跳过下面的清理）。
+    int loadResult = -1;
+    try {
+        loadResult = vtbl->onLoad(self, &g_api);
+    } catch (const std::exception& e) {
+        ENGINE_LOG_ERROR("Mod", "onLoad 抛出异常（按失败处理）：" + shown + " —— " + e.what());
+    } catch (...) {
+        ENGINE_LOG_ERROR("Mod", "onLoad 抛出未知异常（按失败处理）：" + shown);
+    }
+    if (loadResult != 0) {
         ENGINE_LOG_ERROR("Mod", "onLoad 返回 false，放弃该模组：" + shown);
         // B7：回滚必须覆盖**所有**能按来源清的内容（噪声 + 实体类型）。
         // 原来只清噪声 → 实体类型残留，而它的 onAnimate 指向随后被 FreeLibrary 的
@@ -369,7 +378,15 @@ void ModLoader::unloadAll() {
 // 注册表里 ModEntityDef::animUser / 噪声 provider 仍指向刚被销毁的对象，可被调到。
 void ModLoader::unloadOne(LoadedMod& m) {
     if (m.self != nullptr && m.vtbl != nullptr) {
-        m.vtbl->onUnload(m.self);
+        // B8：C 边界不允许异常穿过 —— 用 C++ 写的模组若在 onUnload 里抛异常，
+        // 不接住就是 UB（而且是在卸载路径上，最容易变成"退出时崩"）。
+        try {
+            m.vtbl->onUnload(m.self);
+        } catch (const std::exception& e) {
+            ENGINE_LOG_ERROR("Mod", "onUnload 抛出异常（已忽略）：" + m.name + " —— " + e.what());
+        } catch (...) {
+            ENGINE_LOG_ERROR("Mod", "onUnload 抛出未知异常（已忽略）：" + m.name);
+        }
     }
 
     // 先断注册（此时实例还活着，注册表里的指针尚未悬垂）

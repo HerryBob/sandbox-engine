@@ -35,6 +35,9 @@ public:
     // 将来要放大窗口，只改这个常量或构造参数。
     static constexpr int kDefaultRadius = 4;
     // 请求队列 256 / 结果队列 64（1b 细节决策）
+    // B133：两者的**反压关系**：业务线程每 tick 最多消费 4 列（kMaxApplyPerTick），
+    //        而结果队列容量 64 —— 业务线程连续卡顿 16 tick（640ms）以上，结果队列就会填满，
+    //        此时生成线程的 push 会失败/阻塞等待。调小容量或调大每 tick 消费量前先算这条。
     static constexpr std::size_t kRequestCapacity = 256;
     static constexpr std::size_t kResultCapacity = 64;
     // 每 tick 最多取 4 列 = 16 个 16³ chunk。
@@ -84,6 +87,9 @@ public:
     StreamBatch takeBatch(std::size_t maxColumns = kMaxApplyPerTick);
 
     GenStats stats() const;
+    // B134：stats() 里的聚合字段（appliedBlocks_ / minSurfaceY_ / maxSurfaceY_）是**普通成员**，
+    //         只在业务线程（takeBatch 调用方）读写 —— 从 main 线程调 stats() 读它们是数据竞争。
+    //         计数字段（requested/generated/applied）是原子，任意线程可读。
     std::size_t knownColumns() const { return known_.size(); }
 
 private:

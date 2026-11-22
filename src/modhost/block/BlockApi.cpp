@@ -49,6 +49,17 @@ std::int32_t registerBlockImpl(void* host, const ModBlockDef* def) {
         return -1;
     }
 
+    // B4：方块名必须唯一 —— 否则 findBlockIdByName 返回哪个 id 取决于哈希桶顺序，
+    // 生成器引用 "grass" 时就可能拿到别的模组的同名方块。
+    for (auto it = engine::registry::g_blockRegistry.begin();
+         it != engine::registry::g_blockRegistry.end(); ++it) {
+        if (it->second.name == def->name) {
+            ENGINE_LOG_ERROR("Mod", std::string("registerBlock 被拒绝：方块名重复（")
+                      + def->name + "）");
+            return -1;
+        }
+    }
+
     engine::registry::BlockInfo info{};
     info.name       = def->name;
     // B59：不再写 opaque —— 面剔除改由 renderType 决定（BlockInfo 里已删除该字段）。

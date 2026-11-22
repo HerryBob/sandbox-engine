@@ -53,6 +53,8 @@ namespace engine::registry {
         std::uint16_t grass = kInvalidBlockId;
     };
 
+    // B73：这张缓存**只在启动时 resolve 一次，之后只读** —— 写入点在 resolveBuiltinBlockIds，
+    // 读取点遍布生成器/业务/玩家输入。运行期改写它会导致不同线程看到不同的内置 id。
     inline BuiltinBlockIds g_builtinBlockIds;
 
     // 解析内置方块 id；缺失项保持 kInvalidBlockId 并打 Warn（多半是 mods/blocks.dll 没加载）。
