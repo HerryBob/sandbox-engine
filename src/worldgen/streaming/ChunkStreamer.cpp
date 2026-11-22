@@ -154,9 +154,15 @@ ChunkStreamer::StreamBatch ChunkStreamer::takeBatch(std::size_t maxColumns) {
 
     // ② 取生成结果：已被淘汰的列直接丢弃 —— 否则会把刚删掉的 chunk 又写回来
     //    （队列里可能还压着淘汰前排队/在算的请求，这是允许的浪费，但结果不能落地）。
+    // B127：加"最多检查 4×maxColumns 个"的上限 —— 否则队列里积压大量**已淘汰列**的
+    //    结果时，一趟 while 会连着 pop 几百次（每次都要查 known_），表现为单 tick 尖峰
+    //    （瞬移/快速移动后掉帧）。超出的留到下 tick 继续。
     std::size_t taken = 0;
+    std::size_t inspected = 0;
+    const std::size_t maxInspect = maxColumns * 4U;
     GenResult res;
-    while (taken < maxColumns && genToBusinessResults_.pop(res)) {
+    while (taken < maxColumns && inspected < maxInspect && genToBusinessResults_.pop(res)) {
+        ++inspected;
         if (known_.find(res.pos) == known_.end()) continue;   // 在途结果属于已淘汰的列
         appliedColumnCount_.fetch_add(1, std::memory_order_relaxed);
         // 聚合统计（本线程独占，无并发）—— 必须在 move 之前读

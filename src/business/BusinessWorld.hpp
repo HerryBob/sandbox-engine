@@ -43,6 +43,11 @@ public:
 
     // ---- 命令式接口（演示/玩家/脚本事件源共用）----
     // 请求全量同步：把当前世界方块整体同步给物理（排队 SyncBlockSet，用于初始/重建）。
+    // B92：与下面 requestPhysicsResync 的区别 ——
+    //   syncAll()              立刻试一次，失败**直接返回 false**，重试责任在调用方；
+    //   requestPhysicsResync() 只置标志，由 syncWorldToPhysics 每 tick 自动重试。
+    //   想"自动重试"用后者；想"立刻知道成功与否"用前者。
+    // B106：本函数目前**没有任何调用点**（世界重建都走 requestPhysicsResync）。
     bool syncAll();
 
     double     simTime() const;
@@ -79,12 +84,19 @@ public:
 
     // 装配期入口：世界数据真源（main 启动生成/世界重建用）。
     // 运行期外部不得持有引用（写路径仍只经命令式接口，保持调度边界）。
+    // B90（已评估，本轮不改）：返回**非 const** 引用，与上面这句注释自相矛盾 ——
+    // 拿到它就能绕过 BusinessWorld 的调度（直接 placeBlock 绕过统计与排队、
+    // 直接 clearDirtyChunks 绕过 flush 时序）。正确做法是拆成
+    // worldForSetup()（非 const，仅装配期）+ worldReadOnly()（const，运行期），
+    // 但那会改动 main 的接线方式，属于接口变更，本轮只把矛盾写清楚。
     engine::business::World& world() { return world_; }
 
     // ---- 方块放置/破坏（业务裁决，主世界静态方块）----
     // 裁决规则：①位置已占用 → 拒绝放置；②破坏不存在的方块 → 拒绝。
     // 裁决通过后修改方块表并自动排队 PlaceBlock/RemoveBlock 指令
     // （下次 syncWorldToPhysics 发出）。
+    // B91：**只允许业务线程调用** —— 内部会往 PhysicsBridge 的 SPSC 队列塞指令
+    // （单生产者约定），从别的线程调会破坏该约定（UB）。
     bool placeBlock(const engine::shared::BlockPos& p, engine::shared::BlockType type);
     bool removeBlock(const engine::shared::BlockPos& p);
 
@@ -121,6 +133,9 @@ private:
 
     std::atomic<long long> playerActions_{ 0 };  // 已处理玩家点击计数
     bool resyncPending_ = false;                 // 待重下发全量方块集（业务线程独占）
+    // B96：收物理回执时复用的事件缓冲（避免每 tick 构造/销毁 vector）。
+    // 只在业务线程使用，容量留在跨 tick 之间。
+    std::vector<engine::shared::BodyStructureEvent> bodyEvents_;
     bool firstTick_ = true;                      // 首个业务 tick 强制全量同步：地形预热在主线程完成，业务线程无新列可触发
 
     std::atomic<long long> placedBlockCount_{0};       // 成功放置（裁决通过）次数

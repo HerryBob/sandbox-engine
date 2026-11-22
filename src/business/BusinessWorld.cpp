@@ -55,13 +55,21 @@ void BusinessWorld::syncWorldToPhysics() {
 
 void BusinessWorld::receiveResultsFromPhysics() {
     // tick 边界：委托 PhysicsBridge 收物理回执（位置快照/碰撞体数量/刚体数据）。
-    std::vector<engine::shared::BodyStructureEvent> bodyEvents;
+    // B96：复用成员而不是每 tick 构造局部 vector —— 它只在业务线程用。
+    bodyEvents_.clear();
     std::optional<engine::shared::BodyPose> bodyPose;
-    physicsBridge_.receiveResultsFromPhysics(&bodyEvents, &bodyPose);
+    physicsBridge_.receiveResultsFromPhysics(&bodyEvents_, &bodyPose);
     // 刚体数据转给渲染桥：结构事件逐条送（事件流），位姿只送最新（状态）。
-    // 结构事件队列深度 16，远高于实际事件速率（每次打包/解包一条），
-    // push 失败即逻辑异常，不在此处重试。
-    for (const auto& ev : bodyEvents) renderBridge_.pushBodyStructure(ev);
+    // push 失败即逻辑异常（队列已从 16 提到 64），不在此处重试。
+    // B95：**检查返回值** —— 事件流丢了会导致渲染端多一个/漏一个网格，
+    // 以前完全静默（连日志都没有）。
+    for (const auto& ev : bodyEvents_) {
+        if (!renderBridge_.pushBodyStructure(ev)) {
+            ENGINE_LOG_ERROR("Render",
+                "刚体结构事件入队失败（队列满）：contraptionId=" +
+                std::to_string(ev.contraptionId) + "，渲染端会缺/多一个网格");
+        }
+    }
     if (bodyPose) renderBridge_.pushBodyPose(*bodyPose);
 }
 
@@ -173,8 +181,19 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
         int hx = 0, hy = 0, hz = 0;         // 命中格（左键破坏目标）
         int px = ix, py = iy, pz = iz;      // 放置位（默认 = 起点格）
 
+        // B101：**起点格也参与判定**。原来是"先推进、再检查"，所以站在方块里时
+        // 打不到身上这一格（射线第一格永远是邻格）。先探一次起点，再决定要不要推进。
+        {
+            engine::shared::BlockType t0 = engine::shared::BlockType::Air;
+            if (lookupBlock(engine::shared::BlockPos{ ix, iy, iz }, t0) ==
+                World::LookupResult::Occupied) {
+                hit = true; hx = ix; hy = iy; hz = iz;
+                px = ix; py = iy; pz = iz;  // 无"前格"：放置位退化为自身（会被裁决拒绝）
+            }
+        }
+
         // ⑤ DDA 推进：最多 8 格（射线距离上限）。每次选最小的 tMax 推进对应轴
-        for (int s = 0; s < 8; ++s) {
+        for (int s = 0; s < 8 && !hit; ++s) {
             if (tMaxX < tMaxY && tMaxX < tMaxZ) {
                 tMaxX += tDeltaX; ix += stepX; dirX = stepX; dirY = 0; dirZ = 0;
             }
@@ -203,13 +222,19 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
         if (!hit) continue;  // 8 格内没碰到方块：本次点击已消费，无事可做
 
         if (ev.button == 0) {  // 左键：破坏命中格
-            removeBlock(engine::shared::BlockPos{ hx, hy, hz });
+            // B99：检查返回值 —— 失败说明裁决拒绝（方块已不存在），以前完全静默。
+            if (!removeBlock(engine::shared::BlockPos{ hx, hy, hz })) {
+                ENGINE_LOG_DEBUG("Business", "破坏被拒绝（目标已不是方块）");
+            }
         }
         else if (ev.button == 1) {  // 右键：在放置位放 Stone
             // 方块 id 由注册表运行期分配，不能写死枚举值——读 freeze 后解析好的缓存。
-            placeBlock(engine::shared::BlockPos{ px, py, pz },
-                static_cast<engine::shared::BlockType>(
-                    engine::registry::g_builtinBlockIds.stone));
+            // B99：同上，放置失败（位置已占用）以前也是静默的。
+            if (!placeBlock(engine::shared::BlockPos{ px, py, pz },
+                    static_cast<engine::shared::BlockType>(
+                        engine::registry::g_builtinBlockIds.stone))) {
+                ENGINE_LOG_DEBUG("Business", "放置被拒绝（位置已占用）");
+            }
         }
     }
 }
