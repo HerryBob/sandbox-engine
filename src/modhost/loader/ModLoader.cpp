@@ -135,6 +135,12 @@ std::vector<Candidate> collectCandidates(const std::string& dir) {
 
 // ③ 预排序：先 phase 升序，同 phase 按 id。
 //    这一步只固定"同层节点"的先后，真正的前后关系由依赖排序决定。
+//
+// B5（已评估，本轮不改）：同 phase（尤其 builtin 组）内按 manifest.id **字典序**，
+// 是隐式依赖 —— 方块 id 由注册顺序分配，新加一个 id 排在 "builtin_blocks" 前面的
+// builtin 模组，会让全部内置方块 id 整体 +N，旧存档里的 id 就对不上了。
+// 正确做法是给每个 builtin 模组一个显式优先级字段（manifest 加 priority），
+// 属于接口扩展，本轮不做；这里把风险写明。
 void preSortCandidates(std::vector<Candidate>& candidates) {
     std::sort(candidates.begin(), candidates.end(),
         [](const Candidate& a, const Candidate& b) {

@@ -83,6 +83,7 @@ void ChunkStreamer::tick(double playerX, double playerZ) {
     // ① 淘汰：走出"加载半径 + 1"的列进入待卸载集合。
     // 比加载半径多留一圈 = 滞回，避免玩家站在窗口边界时同一列反复卸载/重建。
     // 这里只摘 known_、收集坐标；真正删 chunk 在 receiveResults（那里才持有 World）。
+    cancelReturnedEvictions(cx, cz);
     collectEvictions(cx, cz);
 
     // ② 收集窗口内尚未请求的列。窗口固定 (2r+1)×(2r+1) 格，每 tick 全扫一遍；
@@ -95,6 +96,24 @@ void ChunkStreamer::tick(double playerX, double playerZ) {
 
     // ④ 入队（队列满：剩下的下 tick 再推）
     enqueueRequests(candidates);
+}
+
+void ChunkStreamer::cancelReturnedEvictions(int cx, int cz) {
+    // B125：淘汰是"标记 + 延迟结算"的。若玩家在两个 tick 之间又走回这一列，
+    // 结算时把它卸掉就会出现 2~3 tick（约 80–120ms）的地形空洞。
+    // 这里在每 tick 开头复查：又回到**加载半径**内的列取消淘汰，并恢复 known_ 记录
+    // （该列其实还没被卸，恢复后不会再被请求一次，也不会闪洞）。
+    if (pendingEvict_.empty()) return;
+    for (auto it = pendingEvict_.begin(); it != pendingEvict_.end(); ) {
+        const int dx = it->x - cx;
+        const int dz = it->z - cz;
+        if (std::abs(dx) <= radius_ && std::abs(dz) <= radius_) {
+            known_.insert(*it);          // 还没卸：恢复"已请求"记录
+            it = pendingEvict_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void ChunkStreamer::collectEvictions(int cx, int cz) {

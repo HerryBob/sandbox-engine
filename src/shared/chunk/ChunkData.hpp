@@ -112,6 +112,9 @@ inline void ChunkData::paletteIndexSet(std::int32_t i, std::uint16_t v) {
 }
 
 inline std::uint16_t ChunkData::paletteFindOrAdd(PaletteEntry e) {
+    // B36（已评估，本轮不改）：线性查找。
+    // 调色板通常只有 2~4 项（典型地表 chunk：草/土/石），线性扫描比哈希更快且无分配；
+    // 极端块（几十种方块）才会退化成几百次比较，仍是每格一次的小常数。
     const std::size_t n = palette_.size();
     for (std::size_t k = 0; k < n; ++k)
         if (palette_[k] == e) return static_cast<std::uint16_t>(k);

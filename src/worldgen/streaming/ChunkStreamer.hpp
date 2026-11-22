@@ -92,6 +92,8 @@ private:
     // ---- tick 的四段（规则1 拆分）----
     // ① 淘汰：走出 radius_ + kEvictMargin 的列进 pendingEvict_，并从 known_ 摘掉
     void collectEvictions(int cx, int cz);
+    // ①' 复查：又回到 radius_ 内的待淘汰列取消淘汰（B125，避免走回来时闪洞）
+    void cancelReturnedEvictions(int cx, int cz);
     // ② 收集窗口内尚未请求的列（known_ 挡住已请求的）
     std::vector<ColPos> collectWindowCandidates(int cx, int cz) const;
     // ④ 入队（队列满即停；只记成功的，失败的不能记，否则永不重试）

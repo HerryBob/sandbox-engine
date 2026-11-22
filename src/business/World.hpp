@@ -95,6 +95,11 @@ public:
     // 只允许业务线程调用。
     // B85：**前置条件缺失** —— 直接删，不检查该 chunk 是否已存盘。当前没有存档系统，
     // 所以无害；接存档后必须在调用方保证"已写盘"，或在这里加检查（否则会丢数据）。
+    // B128：这里标脏，渲染端重建时取不到方块 → 删掉该 chunk 的 mesh。
+    //       这是一条**三环隐式契约**：unloadChunks 标脏 → RenderBridge 汇总事件 →
+    //       VulkanContext::rebuildChunkMeshes 的"无顶点则删 mesh"分支。
+    //       任何一环被"优化"掉（比如渲染端把无顶点改成 continue），就会留下幽灵网格。
+    //       已在该分支写死注释，改动前请连同这里一起看。
     std::size_t unloadChunks(const std::unordered_set<engine::shared::ChunkPos>& cps);
 
     // 本 tick 变脏的 chunk 集合，只读不消费；清空由 clearDirtyChunks 负责。

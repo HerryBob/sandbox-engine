@@ -164,6 +164,10 @@ void appendTopologicalOrder(SortState& s, std::vector<std::size_t>& order) {
                 if (inDegree[k] == 0) continue;
                 reject(s, group[k], "循环依赖");
             }
+            // B2：环上模组被标拒之后**必须再级联一次**。第一次级联（函数开头）发生在
+            // 环检测之前，覆盖不到"依赖环上模组"的这批 —— 它们会留在 order 里却没有依赖，
+            // 而 ModLoader 的 failedIds 兜不住（被拒模组根本不进 order）。
+            cascadeRejections(s);
         }
     }
 }

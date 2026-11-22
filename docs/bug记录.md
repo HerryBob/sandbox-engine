@@ -10,10 +10,10 @@
 | # | 类型 | 位置 | 现象 | 影响 | 严重度 | 核实 |
 |---|---|---|---|---|---|---|
 | B1 | 生命周期顺序 | `ModLoader.cpp` `unloadAll` | `destroy` 早于 `eraseByOwner` | 窗口期内注册表留指向已销毁对象的指针（`animUser` 悬垂） | 🟡 | ✅已修（顺序改为 onUnload→清注册→destroy） |
-| B2 | 逻辑漏判 | `ModSorter.cpp` `sort` | 跨批依赖"环上模组"不被拒（级联早于环检测） | 进 order 却缺依赖，`failedIds` 兜不住 | 🟡 | ✅ |
+| B2 | 逻辑漏判 | `ModSorter.cpp` `sort` | 跨批依赖"环上模组"不被拒（级联早于环检测） | 进 order 却缺依赖，`failedIds` 兜不住 | 🟡 | ✅已修 |
 | B3 | 缺校验 | `BlockApi.cpp` `registerBlockImpl` | `mass/hardness/friction` 无 isfinite/范围校验 | 接 Jolt 后污染质量与摩擦 | 🟡 | ✅已修 |
 | B4 | 缺校验 | `BlockApi.cpp` `registerBlockImpl` | 同名方块不检测 | `findBlockIdByName` 结果依赖哈希桶 | 🟢 | ✅ |
-| B5 | 隐式依赖 | `ModLoader.cpp` `loadAll` | builtin 组内按 id 字典序 | 新增 `aaa_*` 会让方块 id 整体位移（存档错位） | 🟡 | ✅ |
+| B5 | 隐式依赖 | `ModLoader.cpp` `loadAll` | builtin 组内按 id 字典序 | 新增 `aaa_*` 会让方块 id 整体位移（存档错位） | 🟡 | ⏸ 已评估不改：同 phase 内按 id 字典序是隐式依赖，正确解是给 manifest 加 priority（接口扩展）。风险已写进 preSortCandidates 注释 |
 | B6 | 诊断缺失 | `LogImpl.cpp` `logImpl` | 模组日志 tag 固定 `"Mod"` | 多模组日志无法归属 | 🟢 | ✅ |
 | B7 | 回滚不完整 | `ModLoader.cpp` `loadAll` 失败分支 | 只回滚噪声，实体类型残留 | `onAnimate` 指向已卸载 DLL | 🟡 | ✅已修（回滚改用 cleanupOwnedContent） |
 | B8 | 异常无防护 | `ModLoader.cpp` / `onLoad` | C 边界无 try/catch | C++ 模组抛异常即 UB | 🟢 | ✅ |
@@ -57,7 +57,7 @@
 | B33 | 提前分配 | `ChunkData.hpp:199-215` `chunkCompact` | "一项都没丢"的提前返回发生在 `used`/`remap`/`nextPal` 分配之后 | 每次调用白分配三个容器 | 🟢 | ✅ |
 | B34 | 越界不设防 | `ChunkData.hpp:60` `chunkLocalOf` | 对 `i` 越界不检查 | 内部约定（可加 assert） | 🟢 | ✅ |
 | B35 | 缺拷贝声明 | `ChunkData.hpp` | 未显式 delete 拷贝（默认行为正确） | 意图不明 | 🟢 | ✅ |
-| B36 | 线性查找 | `ChunkData.hpp:114-123` `paletteFindOrAdd` | 线性扫描字典 | 小调色板下是设计选择 | 🟡 | ✅（设计取舍） |
+| B36 | 线性查找 | `ChunkData.hpp:114-123` `paletteFindOrAdd` | 线性扫描字典 | 小调色板下是设计选择 | 🟡 | ⏸ 已评估不改：调色板通常 2~4 项，线性扫描比哈希更快且无分配 |
 | — | ~~`dirty` 是 public 可绕过 `markDirty`~~ | `ChunkData.hpp:52` | — | — | — | ❌ **不实**：`dirty_` 私有，`dirty()` 是只读 getter，只能经 `markDirty` 改 |
 | B37 | 注释与实现不符 | `PlayerInput.hpp:12` | 注释"满时返回 false，可下 tick 重试"，但鼠标回调只 push 一次、不看返回值 | 读者以为有重试机制 | 🟡 | ✅已修（注释/契约写明） |
 | B38 | 语义未说明 | `PlayerInput.hpp:28,31` | `toggle*` 连按两次会被合并成一次（`exchange(false)` 只消费一次） | 快速连按丢一次切换 | 🟡 | ✅已修（注释/契约写明） |
@@ -173,10 +173,10 @@
 |---|---|---|---|---|---|---|
 | B123 | 失败不致命 | `main.cpp` `warmupWindow` 超时分支 | 预热 30s 超时只打印就继续启动 | 世界可能只灌一部分，渲染端可能一个 chunk 都没有 | 🔴 | ✅已修（改 ERROR 日志写明后果，按决定不硬失败） |
 | B124 | 负下标 | `ColumnGenerator.cpp` `generateColumn` | `out.chunks[y >> 4]`，`kGenMinY < 0` 时负下标 | **内存破坏** | 🔴 | ✅已修（static_assert） |
-| B125 | 闪洞 | `ChunkStreamer.cpp` `applyPendingEvictions` | 淘汰同 tick 结算，不复查是否又回到窗口 | 边界来回走时该列空 2~3 tick（80–120ms） | 🟡 | ✅ |
+| B125 | 闪洞 | `ChunkStreamer.cpp` `applyPendingEvictions` | 淘汰同 tick 结算，不复查是否又回到窗口 | 边界来回走时该列空 2~3 tick（80–120ms） | 🟡 | ✅已修 |
 | B126 | 注释失真 | `ChunkStreamer.hpp:36` | 写"一次锁写 64KB"，实际一列 4 次锁 | 基于该注释的性能判断会错 | 🟡 | ✅已修（注释/契约写明） |
 | B127 | 单 tick 尖峰 | `ChunkStreamer.cpp` `receiveResults` | 废弃结果 `continue` 不计 `applied`，队列积压时一次扫空 | 瞬移后长耗时掉帧 | 🟡 | ✅已修 |
-| B128 | 隐式三环契约 | `World::unloadChunks` → `flushChangesToRender` → `rebuildChunkMeshes` | "无顶点则删 mesh"靠三环约定 | 任一环被"优化"即留幽灵网格 | 🟡 | ✅ |
+| B128 | 隐式三环契约 | `World::unloadChunks` → `flushChangesToRender` → `rebuildChunkMeshes` | "无顶点则删 mesh"靠三环约定 | 任一环被"优化"即留幽灵网格 | 🟡 | ⏸ 已评估不改：契约已写进 World::unloadChunks 与渲染端无顶点分支两处注释 |
 | B129 | 线程归属无保护 | `ChunkStreamer.hpp` | 业务线程 + 生成线程共用一个对象，只靠注释 | 错误线程调用即数据竞争 | 🟡 | ✅已修（注释/契约写明） |
 | B130 | 反向依赖 | `ChunkStreamer.cpp` `receiveResults(World&)` | worldgen → business::World（唯一反向依赖） | 生成器搬 DLL 走不通（规则 7 边界） | 🟡 | ✅已修 |
 | B131 | 阻止移动 | `ChunkStreamer.cpp` `workerLoop` | `const GenResult res` 只能走 `push(const T&)` | shared_ptr 多一次原子加（可忽略） | 🟢 | ✅ |
