@@ -186,13 +186,50 @@
 
 ---
 
+## 八、渲染接缝（通读发现，⏳ 未复现验证）
+
+> 现象（用户实测）：破坏方块后，当前区块边缘会短暂变空/透明，持续几帧；
+> 移动镜头时特别明显。下面是代码层面推导出的两条成因，**尚未做实验确认**。
+
+| # | 类型 | 位置 | 现象 | 根因 | 严重度 | 状态 |
+|---|---|---|---|---|---|---|
+| B135 | 请求单槽覆盖 | `VulkanContext::requestChunkRebuild` | `pendingDirtyChunks_ = dirtyChunks` 是**覆盖**而非并集；`chunkRebuildRequested_` 只是一个 bool | 两次变更事件落在同一次重建之前时，前一批脏 chunk 永久丢失 → 那个 chunk 的网格停在旧状态 | 🔴 | ⏳ 待验证 |
+| B136 | 范围不一致 | `VulkanContext::rebuildChunkMeshes:685` | 剔除依据是「脏 chunk ∪ 1 环邻居」（`chunkSnapshot(expandNeighbors=true)`），但重建集合只有脏 chunk（`rebuildSet = dirtyChunks`） | 用邻居的数据剔掉了面，却不重建邻居的网格 → **接缝一侧缺面，看穿墙体**。第 1376 行注释写"∪6 邻居由内部展开"，**实现里没有** | 🔴 | ⏳ 待验证 |
+
+### 成因链（为什么"几帧后自己好"）
+
+1. 破坏 chunk 边界上的方块 → `markDirtyWithBoundary` 把 A、B 两个 chunk 都标脏；
+2. 两个 chunk 的网格必须**同批重建**，接缝才闭合；
+3. 重建本身很慢（见 `性能问题记录 P14`：`vkDeviceWaitIdle` + 每 chunk 全量扫方块），
+   一帧被拉长，业务线程可能在一个重建周期内 tick 两次；
+4. 第二次事件**覆盖**了第一次的脏集合 → 其中一个 chunk 没被重建，接缝停在旧网格 → 看穿；
+5. 该 chunk 下次被标脏（旁边再砸一块 / 加载卸载）时自动修好 → 表现为"持续几次"。
+
+### 修法草案（待验证后执行）
+
+| 优先级 | 改动 | 位置 | 风险 |
+|---|---|---|---|
+| **P0-a** | 脏集合改 **`insert`（并集）**，快照仍覆盖（最新最准） | `requestChunkRebuild` | 极低（1 行） |
+| **P0-b** | `rebuildSet` 展开到 **6 面邻居**，与 `chunkSnapshot` 的 1-ring 对齐（信息本来就在手上） | `rebuildChunkMeshes:685` | 中（重建量 ×7，须先做 P1-a） |
+| **P1-a** | 快照先按 chunk 分组一次，替掉"每 chunk 扫全部方块" | `rebuildChunkMeshes:706` | 低 |
+| **P1-b** | 旧 buffer 延迟销毁（2~3 帧后），去掉 `vkDeviceWaitIdle` | `rebuildChunkMeshes:683` | 中（生命周期） |
+
+### 验证手段
+
+- **最省事的判定**：把 `pendingDirtyChunks_ = dirty;` 改成 `insert`，只跑一次 ——
+  洞消失 = 确认 B135（请求丢失）；洞还在 = 直接做 P0-b。
+- **硬指标**：`重建 chunk=` 日志里 A/B 两个 chunk 是否**同批**成对出现。
+- **目视**：贴着 chunk 边界（x=15）连续砸方块，同时快速左右扫镜头。
+
+---
+
 ## 汇总
 
 | 项 | 数量 |
 |---|---|
-| 核实条目 | **134 条**（B1–B134） |
-| 其中 🔴 | **13 条** |
+| 核实条目 | **136 条**（B1–B136；B135/B136 为通读新发现，待验证） |
+| 其中 🔴 | **15 条**（含 B135/B136） |
 | 文档误记（❌ 不实） | **8 条**（TimeManager ×2、ChunkData ×1、PlayerBodyState ×1、ChunkPos ×1、Protocol ×3） |
 | 已被重构修复（🔧） | **3 条**（BodyPose 缺旋转、`queue*` 命名、"事件流语义"） |
-| 归类为性能（→ `性能问题记录.md`） | 8 条（P1–P8） |
+| 归类为性能（→ `性能问题记录.md`） | 8 条（P1–P8）→ 现共 14 条（P1–P14） |
 | 归类为渲染端注意项（规则 2/5 豁免） | 3 条（CameraState→Vulkan） |
