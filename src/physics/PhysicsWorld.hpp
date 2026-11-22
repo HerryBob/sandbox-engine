@@ -90,6 +90,18 @@ public:
 
 private:
     void maybeLog();
+
+    // ---- advance 的三段（规则1 拆分）----
+    // 消费业务指令队列：放置/破坏/全量同步 → 静态碰撞体集合；
+    // Pack/UnpackContraption → 刚体建/拆 + 碰撞体形态转移。
+    void applyCommands(engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness);
+    void onSyncBlockSet(const engine::shared::PhysicsCommand& cmd);
+    void onPlaceBlock(const engine::shared::PhysicsCommand& cmd);
+    void onRemoveBlock(const engine::shared::PhysicsCommand& cmd);
+    void onPackContraption(const engine::shared::PhysicsCommand& cmd);
+    void onUnpackContraption(const engine::shared::PhysicsCommand& cmd);
+    // 刚体插值快照：为玩家体成组写 PlayerBodyState（seqlock 包住 prev/curr/时刻）
+    void snapshotPlayerBody(double wallDt);
     // 注意：原 recomputeAABB / moveKinematicAxis 已删除（求解器迁 Jolt 时整段替换）。
     // 二者的职责分别由 compound shape 的 GetLocalBounds() 和 CharacterVirtual 承担。
 
