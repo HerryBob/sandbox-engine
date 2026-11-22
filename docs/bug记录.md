@@ -26,14 +26,14 @@
 | B10 | 空回调 | `ThreadLoop.hpp:27` | `body` 为空仍启动 → `body()` 抛 `bad_function_call` | **terminate** | 🔴 | ✅已修 |
 | B11 | noexcept 误用 | `ThreadLoop.hpp:31-34` `stop` | `noexcept` 内 `join()`（可抛） | self-join/失败 → **terminate** | 🔴 | ✅已修 |
 | B12 | 异常未捕获 | `ThreadLoop.hpp:25-28` | 线程入口无 try/catch | body 抛异常 → **terminate** | 🔴 | ✅已修 |
-| B13 | 状态残留 | `ThreadLoop.hpp:22` | 先置 `running_=true` 再构造 `thread_`；构造抛则状态不一致 | 之后 `stop`/`shouldStop` 行为异常 | 🟡 | ✅ |
-| B14 | 并发无约定 | `ThreadLoop.hpp` | `start/stop` 未注明非线程安全 | 并发调用 UB | 🟡 | ✅ |
-| B15 | self-join | `ThreadLoop.hpp` | body 内调 `stop()` | 见 B11 | 🟡 | ✅ |
+| B13 | 状态残留 | `ThreadLoop.hpp:22` | 先置 `running_=true` 再构造 `thread_`；构造抛则状态不一致 | 之后 `stop`/`shouldStop` 行为异常 | 🟡 | ✅已修（构造失败时回滚 running_） |
+| B14 | 并发无约定 | `ThreadLoop.hpp` | `start/stop` 未注明非线程安全 | 并发调用 UB | 🟡 | ✅已修（注明只允许单线程调用） |
+| B15 | self-join | `ThreadLoop.hpp` | body 内调 `stop()` | 见 B11 | 🟡 | ✅已修（随 B11 加 self-join 守卫） |
 | B16 | 缺 include | `ThreadLoop.hpp` | 用 `std::move` 但未含 `<utility>` | 依赖传递包含（可移植性） | 🟢 | ✅ |
 | B17 | 移动未禁 | `ThreadLoop.hpp` | 只 delete 了拷贝，移动未显式 delete（因 atomic 隐式删） | 意图不清晰 | 🟢 | ✅ |
 | B18 | 命名反直觉 | `ThreadLoop.hpp:36` `shouldStop` | 语义是 `!running_`，字段叫 `running_` | 易写反 | 🟢 | ✅ |
 | B19 | 内存序 | `ThreadLoop.hpp` | 全 `relaxed`（含停止标志） | 停止延迟（高频循环可接受） | 🟢 | ✅ |
-| B20 | 静默归域 | `TimeManager.hpp:78-83` `domainOf` | 非 Physics 一律归 business（含非法值） | 改错轨速度且无提示 | 🟡 | ✅ |
+| B20 | 静默归域 | `TimeManager.hpp:78-83` `domainOf` | 非 Physics 一律归 business（含非法值） | 改错轨速度且无提示 | 🟡 | ✅已修（加 assert，release 行为不变） |
 | B21 | 无输入校验 | `TimeManager.hpp:25` `setGlobalScale` | 不校验 NaN/负数/0 | 下游 dt 异常 | 🟢 | ✅ |
 | B22 | 未显式禁拷贝 | `TimeManager.hpp` | 靠 atomic 成员隐式不可拷贝 | 意图不明 | 🟢 | ✅ |
 | B23 | 缓存行 | `TimeManager.hpp:85-87` | 三个原子同缓存行 | 写频率极低，可忽略 | 🟢 | ✅ |
@@ -66,12 +66,12 @@
 | B41 | 缺拷贝声明 | `PlayerInput.hpp` | 未显式 delete 拷贝 | 意图不明 | 🟢 | ✅ |
 | B42 | 伪共享 | `PlayerInput.hpp:24-31` | 三个 `toggle*` 同缓存行 | 写频率低，不改 | 🟢 | ✅ |
 | B43 | 内存序缺口 | `PlayerBodyState.hpp:56-67` `readInterpolated` | 数据用 `relaxed` 读，第二次 `seq` 用 acquire，但缺**读后 acquire fence** | **ARM64 上 relaxed 读可被重排到 `s1` 之后 → 采信半新半旧数据** | 🔴 | ✅已修（加 fence） |
-| B44 | 自防御缺失 | `PlayerBodyState.hpp:48` `readInterpolated` | 函数自身不检查 `valid`（靠调用方先查） | 首帧若漏查则读到全 0 位置 | 🟡 | ✅ |
-| B45 | 类型宽度 | `PlayerBodyState.hpp:23,34,35` | `unsigned long long` / `long long` | 跨平台宽度不确定 | 🟡 | ✅ |
+| B44 | 自防御缺失 | `PlayerBodyState.hpp:48` `readInterpolated` | 函数自身不检查 `valid`（靠调用方先查） | 首帧若漏查则读到全 0 位置 | 🟡 | ✅已修（未就绪时显式返回 0） |
+| B45 | 类型宽度 | `PlayerBodyState.hpp:23,34,35` | `unsigned long long` / `long long` | 跨平台宽度不确定 | 🟡 | ✅已修（改 uint64_t/int64_t） |
 | B46 | lock-free 未断言 | `PlayerBodyState.hpp:23` | `atomic<uint64_t>` 未加 `static_assert(is_always_lock_free)` | 非 lock-free 平台上"原子"变锁 | 🟢 | ✅ |
 | — | ~~写侧 seqlock 规则没说明~~ | `PlayerBodyState.hpp:20` | — | — | — | ❌ **不实**：第 20 行已写明"奇数表示写者正在写，偶数且读前后一致才采信" |
 | B47 | 原子前提 | `CameraState.hpp:12-16` | `atomic<double>` 未断言 lock-free（`TimeManager` 有，这里没有） | 非 lock-free 平台无保证 | 🔴 | ✅已修（加 static_assert） |
-| B48 | 非一致快照 | `CameraState.hpp` | 5 个字段各自读，无 seqlock | 可能读到"新位置 + 旧朝向"（一帧错位） | 🟡 | ✅ |
+| B48 | 非一致快照 | `CameraState.hpp` | 5 个字段各自读，无 seqlock | 可能读到"新位置 + 旧朝向"（一帧错位） | 🟡 | ⏸ 已评估不改：错位肉眼不可见，改 seqlock 要让渲染端每帧多两次原子读 + 重试分支（理由已写进注释） |
 | B49 | 裸 int 枚举 | `CameraState.hpp:21` `viewMode` | `atomic<int>` 而非 `enum class ViewMode` | 非法值无约束 | 🟡 | ✅ |
 | B50 | 内存序 | `CameraState.hpp` | 全默认 `seq_cst` | 可放宽（可选优化） | 🟢 | ✅ |
 | B51 | 伪共享 | `CameraState.hpp` | 5-6 个原子同缓存行 | 写频率低，不改 | 🟢 | ✅ |

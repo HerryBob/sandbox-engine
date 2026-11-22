@@ -19,6 +19,8 @@ public:
     ~ThreadLoop() { stop(); }
     //线程单一化 负责线程控制
 
+    // 线程安全：start / stop 只能在**同一个线程**调用（通常是装配/收尾线程），
+    // 不支持并发 start/stop（B14）。
     void start(std::function<void()> body) {
         // B9：重复 start() 会给 joinable 的 std::thread 赋值 → std::terminate。
         if (thread_.joinable()) {
@@ -30,20 +32,29 @@ public:
             ENGINE_LOG_ERROR("Thread", "start() 传入空 body：线程 " + name_ + "，忽略");
             return;
         }
+        // 顺序不能反：running_ 必须在 body 可能开始执行之前就置真，
+        // 否则新线程第一句 shouldStop() 可能读到 false 立刻退出。
         running_.store(true, std::memory_order_relaxed);
-        // 线程入口登记日志用名字，日志行才能区分 business / physics / render 等。
-        // lambda 捕获 this：name_ 的生命周期覆盖整个线程（stop() 先 join 再析构）。
-        thread_ = std::thread([this, body = std::move(body)] {
-            engine::core::logSetThreadName(name_.c_str());
-            // B12：异常不允许穿出线程入口（穿出即调用 std::terminate）。
-            try {
-                body();
-            } catch (const std::exception& e) {
-                ENGINE_LOG_ERROR("Thread", "线程体抛异常（" + name_ + "）：" + e.what());
-            } catch (...) {
-                ENGINE_LOG_ERROR("Thread", "线程体抛未知异常（" + name_ + "）");
-            }
-        });
+        try {
+            // 线程入口登记日志用名字，日志行才能区分 business / physics / render 等。
+            // lambda 捕获 this：name_ 的生命周期覆盖整个线程（stop() 先 join 再析构）。
+            thread_ = std::thread([this, body = std::move(body)] {
+                engine::core::logSetThreadName(name_.c_str());
+                // B12：异常不允许穿出线程入口（穿出即调用 std::terminate）。
+                try {
+                    body();
+                } catch (const std::exception& e) {
+                    ENGINE_LOG_ERROR("Thread", "线程体抛异常（" + name_ + "）：" + e.what());
+                } catch (...) {
+                    ENGINE_LOG_ERROR("Thread", "线程体抛未知异常（" + name_ + "）");
+                }
+            });
+        } catch (const std::exception& e) {
+            // B13：std::thread 构造抛异常（资源不足）时，running_ 已经置真 ——
+            // 不恢复就会留下"标志说在跑、实际没线程"的不一致状态，后续 stop() 行为异常。
+            running_.store(false, std::memory_order_relaxed);
+            ENGINE_LOG_ERROR("Thread", "启动线程失败（" + name_ + "）：" + e.what());
+        }
     }
 
     void stop() noexcept {

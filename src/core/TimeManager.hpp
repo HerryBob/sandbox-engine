@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cassert>
 
 namespace engine::core {
 
@@ -76,9 +77,13 @@ namespace engine::core {
 
     private:
         const std::atomic<double>& domainOf(Domain d) const noexcept {
+            // B20：三元表达式的 else 分支会把**任何**非 Physics 值（含非法枚举）静默
+            // 当成 Business。调试期用断言把误传立刻暴露；release 行为保持不变。
+            assert(d == Domain::Business || d == Domain::Physics);
             return d == Domain::Physics ? physics_ : business_;
         }
         std::atomic<double>& domainOf(Domain d) noexcept {
+            assert(d == Domain::Business || d == Domain::Physics);
             return d == Domain::Physics ? physics_ : business_;
         }
 
