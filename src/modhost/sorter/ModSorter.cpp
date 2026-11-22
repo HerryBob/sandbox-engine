@@ -9,101 +9,116 @@
 #include <vector>
 
 namespace engine::modhost {
+namespace {
 
-SortResult ModSorter::sort(const std::vector<ModManifest>& items) {
-    SortResult result;
+// ============================================================================
+// 排序过程的共享状态（规则1：原 sort 的局部变量按职责集中到这里）
+// ============================================================================
+struct SortState {
+    explicit SortState(const std::vector<ModManifest>& src)
+        : items(src), rejected(src.size(), false), reason(src.size()) {}
 
-    const std::size_t n = items.size();
-    std::vector<bool> rejectedFlag(n, false);
-    std::vector<std::string> reason(n);
+    const std::vector<ModManifest>& items;
+    std::vector<bool>        rejected;   // 每个下标的拒绝标记
+    std::vector<std::string> reason;     // 拒绝原因（仅在 rejected[i] 为真时有效）
+    std::unordered_map<std::string, std::size_t> byId;    // id → 下标（去重后的幸存者）
+    std::unordered_set<std::string>              duplicateIds;   // 已判定重复的 id
+    std::unordered_map<std::string, std::vector<std::size_t>> dependents;  // 被依赖 id → 依赖它的下标
+};
 
-    // ---- 1. id 索引；同一 id 出现多次时，涉及的模组全部拒绝 ----
-    std::unordered_map<std::string, std::size_t> byId;
-    std::unordered_set<std::string> duplicateIds;
+void reject(SortState& s, std::size_t i, const std::string& why) {
+    s.rejected[i] = true;
+    s.reason[i] = why;
+}
 
+// ① id 索引；同一 id 出现多次时，涉及的模组**全部**拒绝（谁也不知道该用哪个）
+void indexIds(SortState& s) {
+    const std::size_t n = s.items.size();
     for (std::size_t i = 0; i < n; ++i) {
-        const std::string& id = items[i].id;
+        const std::string& id = s.items[i].id;
 
-        if (duplicateIds.count(id) > 0) {
-            rejectedFlag[i] = true;
-            reason[i] = "id 重复：" + id;
+        if (s.duplicateIds.count(id) > 0) {
+            reject(s, i, "id 重复：" + id);
             continue;
         }
 
-        const auto it = byId.find(id);
-        if (it == byId.end()) {
-            byId.emplace(id, i);
+        const auto it = s.byId.find(id);
+        if (it == s.byId.end()) {
+            s.byId.emplace(id, i);
             continue;
         }
 
         const std::size_t other = it->second;
-        rejectedFlag[other] = true;
-        reason[other] = "id 重复：" + id;
-        rejectedFlag[i] = true;
-        reason[i] = "id 重复：" + id;
-        duplicateIds.insert(id);
-        byId.erase(it);
+        reject(s, other, "id 重复：" + id);
+        reject(s, i, "id 重复：" + id);
+        s.duplicateIds.insert(id);
+        s.byId.erase(it);
     }
+}
 
-    // ---- 2. 反向表：被依赖的 id → 依赖它的下标列表 ----
-    std::unordered_map<std::string, std::vector<std::size_t>> dependents;
-    for (std::size_t i = 0; i < n; ++i) {
-        for (const std::string& dep : items[i].dependencies) {
-            dependents[dep].push_back(i);
+// ② 反向表：被依赖的 id → 依赖它的下标列表
+void buildDependents(SortState& s) {
+    for (std::size_t i = 0; i < s.items.size(); ++i) {
+        for (const std::string& dep : s.items[i].dependencies) {
+            s.dependents[dep].push_back(i);
         }
     }
+}
 
-    // ---- 3. 直接拒绝：依赖的 id 不存在，或依赖了更晚批次的模组 ----
-    for (std::size_t i = 0; i < n; ++i) {
-        if (rejectedFlag[i]) continue;
+// ③ 直接拒绝：依赖的 id 不存在，或依赖了更晚批次的模组
+void rejectUnresolvableDeps(SortState& s) {
+    for (std::size_t i = 0; i < s.items.size(); ++i) {
+        if (s.rejected[i]) continue;
 
-        for (const std::string& dep : items[i].dependencies) {
-            const auto it = byId.find(dep);
-            if (it == byId.end()) {
-                rejectedFlag[i] = true;
-                reason[i] = "依赖不存在：" + dep;
+        for (const std::string& dep : s.items[i].dependencies) {
+            const auto it = s.byId.find(dep);
+            if (it == s.byId.end()) {
+                reject(s, i, "依赖不存在：" + dep);
                 break;
             }
             // 被依赖方的批次晚于自己 → 它在自己之后才加载，依赖拿不到
-            if (items[it->second].phase > items[i].phase) {
-                rejectedFlag[i] = true;
-                reason[i] = "依赖了更晚批次的模组：" + dep;
+            if (s.items[it->second].phase > s.items[i].phase) {
+                reject(s, i, "依赖了更晚批次的模组：" + dep);
                 break;
             }
         }
     }
+}
 
-    // ---- 4. 级联：依赖方跟着被拒绝 ----
+// ④ 级联：依赖方跟着被拒绝（BFS；同一节点只入队一次）
+void cascadeRejections(SortState& s) {
     std::vector<std::size_t> cascade;
-    for (std::size_t i = 0; i < n; ++i) {
-        if (rejectedFlag[i]) cascade.push_back(i);
+    for (std::size_t i = 0; i < s.items.size(); ++i) {
+        if (s.rejected[i]) cascade.push_back(i);
     }
     for (std::size_t head = 0; head < cascade.size(); ++head) {
         const std::size_t x = cascade[head];
-        const auto it = dependents.find(items[x].id);
-        if (it == dependents.end()) continue;
+        const auto it = s.dependents.find(s.items[x].id);
+        if (it == s.dependents.end()) continue;
 
         for (std::size_t y : it->second) {
-            if (rejectedFlag[y]) continue;
-            rejectedFlag[y] = true;
-            reason[y] = "依赖的模组被拒绝：" + items[x].id;
+            if (s.rejected[y]) continue;
+            reject(s, y, "依赖的模组被拒绝：" + s.items[x].id);
             cascade.push_back(y);
         }
     }
+}
 
-    // ---- 5. 按 phase 分组，组内 Kahn 拓扑排序 ----
+// ⑤ 按 phase 分组，组内 Kahn 拓扑排序；可加载下标按顺序追加到 order。
+//    跨组依赖已在第 ③ 步校验过批次方向，这里只统计组内入度。
+void appendTopologicalOrder(SortState& s, std::vector<std::size_t>& order) {
+    const std::size_t n = s.items.size();
+
     std::vector<ModPhase> phases;
-    for (const ModManifest& m : items) {
-        phases.push_back(m.phase);
-    }
+    for (const ModManifest& m : s.items) phases.push_back(m.phase);
     std::sort(phases.begin(), phases.end());
     phases.erase(std::unique(phases.begin(), phases.end()), phases.end());
 
     for (ModPhase phase : phases) {
         std::vector<std::size_t> group;
         for (std::size_t i = 0; i < n; ++i) {
-            if (rejectedFlag[i]) continue;
-            if (items[i].phase != phase) continue;
+            if (s.rejected[i]) continue;
+            if (s.items[i].phase != phase) continue;
             group.push_back(i);
         }
         if (group.empty()) continue;
@@ -113,15 +128,14 @@ SortResult ModSorter::sort(const std::vector<ModManifest>& items) {
             toLocal.emplace(group[k], k);
         }
 
-        // 入度只统计组内依赖；跨组依赖已在第 3 步校验过批次方向
         std::vector<std::size_t> inDegree(group.size(), 0);
         std::vector<std::vector<std::size_t>> next(group.size());
 
         for (std::size_t k = 0; k < group.size(); ++k) {
             const std::size_t global = group[k];
-            for (const std::string& dep : items[global].dependencies) {
-                const auto itId = byId.find(dep);
-                if (itId == byId.end()) continue;
+            for (const std::string& dep : s.items[global].dependencies) {
+                const auto itId = s.byId.find(dep);
+                if (itId == s.byId.end()) continue;
                 const auto itLocal = toLocal.find(itId->second);
                 if (itLocal == toLocal.end()) continue;   // 跨组依赖，不计入组内入度
 
@@ -137,7 +151,7 @@ SortResult ModSorter::sort(const std::vector<ModManifest>& items) {
 
         for (std::size_t head = 0; head < queue.size(); ++head) {
             const std::size_t k = queue[head];
-            result.order.push_back(group[k]);
+            order.push_back(group[k]);
             for (std::size_t nk : next[k]) {
                 --inDegree[nk];
                 if (inDegree[nk] == 0) queue.push_back(nk);
@@ -148,18 +162,32 @@ SortResult ModSorter::sort(const std::vector<ModManifest>& items) {
         if (queue.size() < group.size()) {
             for (std::size_t k = 0; k < group.size(); ++k) {
                 if (inDegree[k] == 0) continue;
-                rejectedFlag[group[k]] = true;
-                reason[group[k]] = "循环依赖";
+                reject(s, group[k], "循环依赖");
             }
         }
     }
+}
 
-    // ---- 6. 收集被拒绝的模组 ----
-    for (std::size_t i = 0; i < n; ++i) {
-        if (rejectedFlag[i]) {
-            result.rejected.push_back(RejectedMod{i, reason[i]});
-        }
+// ⑥ 收集被拒绝的模组（按原下标顺序）
+void collectRejected(const SortState& s, std::vector<RejectedMod>& out) {
+    for (std::size_t i = 0; i < s.items.size(); ++i) {
+        if (s.rejected[i]) out.push_back(RejectedMod{i, s.reason[i]});
     }
+}
+
+} // namespace
+
+SortResult ModSorter::sort(const std::vector<ModManifest>& items) {
+    SortResult result;
+    SortState s(items);
+
+    indexIds(s);                    // ① 去重
+    buildDependents(s);             // ② 反向表
+    rejectUnresolvableDeps(s);      // ③ 缺失 / 更晚批次
+    cascadeRejections(s);           // ④ 级联
+    appendTopologicalOrder(s, result.order);   // ⑤ 分组 + Kahn
+    collectRejected(s, result.rejected);       // ⑥ 收集
+
     return result;
 }
 
