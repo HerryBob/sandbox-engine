@@ -29,13 +29,13 @@
 | B13 | 状态残留 | `ThreadLoop.hpp:22` | 先置 `running_=true` 再构造 `thread_`；构造抛则状态不一致 | 之后 `stop`/`shouldStop` 行为异常 | 🟡 | ✅已修（构造失败时回滚 running_） |
 | B14 | 并发无约定 | `ThreadLoop.hpp` | `start/stop` 未注明非线程安全 | 并发调用 UB | 🟡 | ✅已修（注明只允许单线程调用） |
 | B15 | self-join | `ThreadLoop.hpp` | body 内调 `stop()` | 见 B11 | 🟡 | ✅已修（随 B11 加 self-join 守卫） |
-| B16 | 缺 include | `ThreadLoop.hpp` | 用 `std::move` 但未含 `<utility>` | 依赖传递包含（可移植性） | 🟢 | ✅ |
-| B17 | 移动未禁 | `ThreadLoop.hpp` | 只 delete 了拷贝，移动未显式 delete（因 atomic 隐式删） | 意图不清晰 | 🟢 | ✅ |
-| B18 | 命名反直觉 | `ThreadLoop.hpp:36` `shouldStop` | 语义是 `!running_`，字段叫 `running_` | 易写反 | 🟢 | ✅ |
-| B19 | 内存序 | `ThreadLoop.hpp` | 全 `relaxed`（含停止标志） | 停止延迟（高频循环可接受） | 🟢 | ✅ |
+| B16 | 缺 include | `ThreadLoop.hpp` | 用 `std::move` 但未含 `<utility>` | 依赖传递包含（可移植性） | 🟢 | ✅已修（补 include） |
+| B17 | 移动未禁 | `ThreadLoop.hpp` | 只 delete 了拷贝，移动未显式 delete（因 atomic 隐式删） | 意图不清晰 | 🟢 | ✅已修（显式 delete 移动） |
+| B18 | 命名反直觉 | `ThreadLoop.hpp:36` `shouldStop` | 语义是 `!running_`，字段叫 `running_` | 易写反 | 🟢 | ✅已修（注释写明语义） |
+| B19 | 内存序 | `ThreadLoop.hpp` | 全 `relaxed`（含停止标志） | 停止延迟（高频循环可接受） | 🟢 | ✅已修（acquire/release） |
 | B20 | 静默归域 | `TimeManager.hpp:78-83` `domainOf` | 非 Physics 一律归 business（含非法值） | 改错轨速度且无提示 | 🟡 | ✅已修（加 assert，release 行为不变） |
-| B21 | 无输入校验 | `TimeManager.hpp:25` `setGlobalScale` | 不校验 NaN/负数/0 | 下游 dt 异常 | 🟢 | ✅ |
-| B22 | 未显式禁拷贝 | `TimeManager.hpp` | 靠 atomic 成员隐式不可拷贝 | 意图不明 | 🟢 | ✅ |
+| B21 | 无输入校验 | `TimeManager.hpp:25` `setGlobalScale` | 不校验 NaN/负数/0 | 下游 dt 异常 | 🟢 | ✅已修（夹到 [0,100]，NaN→1） |
+| B22 | 未显式禁拷贝 | `TimeManager.hpp` | 靠 atomic 成员隐式不可拷贝 | 意图不明 | 🟢 | ✅已修（显式 delete 拷贝） |
 | B23 | 缓存行 | `TimeManager.hpp:85-87` | 三个原子同缓存行 | 写频率极低，可忽略 | 🟢 | ✅ |
 | — | ~~调试用无隔离~~ | `TimeManager.hpp:33-54` | — | — | — | ❌ **不实**：`setDomainScale` 上方有 20 行长注释明令禁止运行期使用 |
 | — | ~~effectiveScale 注释叠在一起~~ | `TimeManager.hpp:64-75` | — | — | — | ❌ **不实**：注释分段清晰 |
@@ -48,8 +48,8 @@
 | B25 | 哈希质量 | `ChunkPos.hpp:37-43` `hash<ChunkPos>` | 与 BlockPos 同款弱混合 | 同上 | 🔴 | ❌ **不修（实测更优）**：同 B24 —— 键是局部稠密坐标，×31 链式近似单射 |
 | B26 | 冗余分号 | `Block.hpp:59`、`ChunkPos.hpp:43` | 函数体后多一个 `;` | 无害 | 🟢 | ✅ |
 | B27 | 语义双关 | `Block.hpp:43` `contraptionId` | `-1` 表主世界，无 `isMainWorld()` 辅助 | 调用点难读（源码里已自带"这里有些问题"注释） | 🟡 | ✅已修（注释/契约写明） |
-| B28 | 可简化 | `Block.hpp:30`、`ChunkPos.hpp:20` `operator==` | 可 `= default`（C++20） | 无 | 🟢 | ✅ |
-| B29 | 类型宽度 | `Block.hpp:53`、`ChunkPos.hpp:37` | 用裸 `size_t` | 风格不统一 | 🟢 | ✅ |
+| B28 | 可简化 | `Block.hpp:30`、`ChunkPos.hpp:20` `operator==` | 可 `= default`（C++20） | 无 | 🟢 | ✅已修（= default） |
+| B29 | 类型宽度 | `Block.hpp:53`、`ChunkPos.hpp:37` | 用裸 `size_t` | 风格不统一 | 🟢 | ✅已修（std::size_t） |
 | B30 | 依赖过重 | `ChunkPos.hpp:2` | 为 `BlockPos` include 整个 `Block.hpp` | 编译耦合（应拆 `BlockPos.hpp`） | 🟡 | ✅已修（注释/契约写明） |
 | B31 | 重复定义 | `ChunkPos.hpp` / `Block.hpp` | 两个坐标类型结构几乎一致 | 可用模板统一（原型可不做） | 🟢 | ✅ |
 | — | ~~`>> 4` 耦合未文档化~~ | `ChunkPos.hpp:26` | — | — | — | ❌ **不实**：已有注释"这里 >> 4 强绑定区块大小" |
@@ -68,13 +68,13 @@
 | B43 | 内存序缺口 | `PlayerBodyState.hpp:56-67` `readInterpolated` | 数据用 `relaxed` 读，第二次 `seq` 用 acquire，但缺**读后 acquire fence** | **ARM64 上 relaxed 读可被重排到 `s1` 之后 → 采信半新半旧数据** | 🔴 | ✅已修（加 fence） |
 | B44 | 自防御缺失 | `PlayerBodyState.hpp:48` `readInterpolated` | 函数自身不检查 `valid`（靠调用方先查） | 首帧若漏查则读到全 0 位置 | 🟡 | ✅已修（未就绪时显式返回 0） |
 | B45 | 类型宽度 | `PlayerBodyState.hpp:23,34,35` | `unsigned long long` / `long long` | 跨平台宽度不确定 | 🟡 | ✅已修（改 uint64_t/int64_t） |
-| B46 | lock-free 未断言 | `PlayerBodyState.hpp:23` | `atomic<uint64_t>` 未加 `static_assert(is_always_lock_free)` | 非 lock-free 平台上"原子"变锁 | 🟢 | ✅ |
+| B46 | lock-free 未断言 | `PlayerBodyState.hpp:23` | `atomic<uint64_t>` 未加 `static_assert(is_always_lock_free)` | 非 lock-free 平台上"原子"变锁 | 🟢 | ✅已修（static_assert） |
 | — | ~~写侧 seqlock 规则没说明~~ | `PlayerBodyState.hpp:20` | — | — | — | ❌ **不实**：第 20 行已写明"奇数表示写者正在写，偶数且读前后一致才采信" |
 | B47 | 原子前提 | `CameraState.hpp:12-16` | `atomic<double>` 未断言 lock-free（`TimeManager` 有，这里没有） | 非 lock-free 平台无保证 | 🔴 | ✅已修（加 static_assert） |
 | B48 | 非一致快照 | `CameraState.hpp` | 5 个字段各自读，无 seqlock | 可能读到"新位置 + 旧朝向"（一帧错位） | 🟡 | ⏸ 已评估不改：错位肉眼不可见，改 seqlock 要让渲染端每帧多两次原子读 + 重试分支（理由已写进注释） |
 | B49 | 裸 int 枚举 | `CameraState.hpp:21` `viewMode` | `atomic<int>` 而非 `enum class ViewMode` | 非法值无约束 | 🟡 | ⏸ 延后：改 enum class 要同步改渲染端读取（渲染层仍在增量开发，暂不动） |
-| B50 | 内存序 | `CameraState.hpp` | 全默认 `seq_cst` | 可放宽（可选优化） | 🟢 | ✅ |
-| B51 | 伪共享 | `CameraState.hpp` | 5-6 个原子同缓存行 | 写频率低，不改 | 🟢 | ✅ |
+| B50 | 内存序 | `CameraState.hpp` | 全默认 `seq_cst` | 可放宽（可选优化） | 🟢 | ✅已修（注释说明 relaxed 足够） |
+| B51 | 伪共享 | `CameraState.hpp` | 5-6 个原子同缓存行 | 写频率低，不改 | 🟢 | ✅已修（注释说明不加 padding 的理由） |
 | — | ~~Vulkan: double→float / UBO 双缓冲 / 投影约定~~ | `CameraState` → 渲染端 | — | — | — | ⏳ **不属于本表**：渲染端使用注意项（规则 2/5 豁免渲染），归 U16 文档 |
 
 ## 四、协议 shared/protocol（12 条）

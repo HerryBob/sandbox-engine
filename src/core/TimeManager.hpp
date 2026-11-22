@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cassert>
+#include <cmath>   // B21：std::isfinite
 
 namespace engine::core {
 
@@ -22,8 +23,18 @@ namespace engine::core {
             "TimeManager requires lock-free atomic<double>; "
             "this platform's atomic<double> is not lock-free");
     public:
+        // B22：显式禁止拷贝/移动（原来靠 atomic 成员隐式失效）。
+        TimeManager() = default;
+        TimeManager(const TimeManager&) = delete;
+        TimeManager& operator=(const TimeManager&) = delete;
+
         // 服务端权威：设置整个世界的时间缩放系数（业务、物理一起缩放）。
+        // B21：输入校验 —— NaN / 负数 / 0 都会让下游 dt 异常（0 会让世界冻结，
+        // 负数会让时间倒流）。这里夹到合法区间 [0, 100]，NaN 退化为 1.0。
         void setGlobalScale(double s) noexcept {
+            if (!std::isfinite(s)) s = 1.0;
+            if (s < 0.0) s = 0.0;
+            if (s > 100.0) s = 100.0;
             global_.store(s, std::memory_order_relaxed);
         }
         // 读取当前全局时间缩放系数（默认 1.0）。

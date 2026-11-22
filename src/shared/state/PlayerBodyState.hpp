@@ -23,6 +23,10 @@ struct PlayerBodyState {
     // ---- 插值快照（seqlock 保护）----
     // B45：用定宽类型（std::uint64_t / std::int64_t）而不是 unsigned long long /
     // long long —— 后者在 LP64 与 LLP64 上宽度不同，跨平台时 seq 的溢出行为会变。
+    // B46：这个槽在物理线程 25Hz 写、输入/渲染线程高频读，必须真无锁
+    // （非 lock-free 平台上 atomic<uint64_t> 会退化成锁）。
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+                  "PlayerBodyState requires lock-free atomic<uint64_t>");
     std::atomic<std::uint64_t> seq{ 0 };
     std::atomic<double> prevX{ 0.0 };
     std::atomic<double> prevY{ 0.0 };

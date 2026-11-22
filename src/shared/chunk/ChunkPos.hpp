@@ -19,10 +19,8 @@ struct ChunkPos {
     int y = 0;
     int z = 0;
 
-    // 手写逐成员比较（与 BlockPos 一致，显式清晰）。
-    bool operator==(const ChunkPos& rhs) const {
-        return x == rhs.x && y == rhs.y && z == rhs.z;
-    }
+    // 手写逐成员比较（B28：C++20 可直接 = default）。
+    bool operator==(const ChunkPos& rhs) const = default;
 };
 
 // 世界坐标 → 区块坐标（算术右移向下取整：-1 属于 chunk -1，块内 15）。
@@ -37,7 +35,7 @@ inline ChunkPos toChunkOf(const BlockPos& p) {
 namespace std {
 template <>
 struct hash<engine::shared::ChunkPos> {
-    size_t operator()(const engine::shared::ChunkPos& p) const noexcept {
+    std::size_t operator()(const engine::shared::ChunkPos& p) const noexcept {
         // 与 BlockPos 同款混合散列（区块坐标也是三维整数坐标）。
         size_t h = static_cast<size_t>(p.x);
         h = h * 31 + static_cast<size_t>(p.y);

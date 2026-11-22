@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <utility>   // B16：std::move
 
 namespace engine::core {
 
@@ -16,6 +17,9 @@ public:
     explicit ThreadLoop(std::string name) : name_(std::move(name)) {} //初始化和防止隐式转换
     ThreadLoop(const ThreadLoop&) = delete;
     ThreadLoop& operator=(const ThreadLoop&) = delete;
+    // B17：移动也显式删除（atomic/thread 本就让移动隐式失效，写出来是为了读者不用推）。
+    ThreadLoop(ThreadLoop&&) = delete;
+    ThreadLoop& operator=(ThreadLoop&&) = delete;
     ~ThreadLoop() { stop(); }
     //线程单一化 负责线程控制
 
@@ -61,7 +65,7 @@ public:
         // B11/B15：self-join（在线程自己的 body 里调 stop）会在 noexcept 里抛
         // system_error → std::terminate。直接返回：线程会自然退出。
         if (thread_.get_id() == std::this_thread::get_id()) return;
-        running_.store(false, std::memory_order_relaxed);
+        running_.store(false, std::memory_order_release);   // B19：与 shouldStop 的 acquire 配对
         if (thread_.joinable()) {
             // noexcept 里不允许异常穿出（join 只在非 joinable 时抛，此处已守卫，
             // 兜底再包一层，避免平台差异导致 terminate）。
@@ -73,8 +77,12 @@ public:
         }
     }
 
+    // B18：字段叫 running_，但语义是"已启动/未要求停止"——shouldStop() 返回 !running_。
+    // 读法：running_ == false ⇒ 该停了。名字容易写反，故在此注明。
     bool shouldStop() const noexcept {
-        return !running_.load(std::memory_order_relaxed);
+        // B19：停止标志用 acquire/release（原来是 relaxed）——
+        // body 里可能在停止前读其它线程写的状态，acquire 保证那些写在"看到停止"之前可见。
+        return !running_.load(std::memory_order_acquire);
     }
 
     const std::string& name() const noexcept { return name_; }

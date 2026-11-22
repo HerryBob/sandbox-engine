@@ -26,10 +26,8 @@ struct BlockPos {
     int y = 0;
     int z = 0;
 
-    // 手写逐成员比较（显式清晰；坐标映射 key 需要）。
-    bool operator==(const BlockPos& rhs) const {
-        return x == rhs.x && y == rhs.y && z == rhs.z;
-    }
+    // 手写逐成员比较（B28：C++20 可直接 = default）。
+    bool operator==(const BlockPos& rhs) const = default;
 };
 
 // 一个方块 = 类型 + 位置 + 所属域。
@@ -54,7 +52,7 @@ struct Block {
 namespace std {
 template <>
 struct hash<engine::shared::BlockPos> {
-    size_t operator()(const engine::shared::BlockPos& p) const noexcept {
+    std::size_t operator()(const engine::shared::BlockPos& p) const noexcept {
         // 简单混合散列：xyz 各占位混合，原型够用。
         size_t h = static_cast<size_t>(p.x);
         h = h * 31 + static_cast<size_t>(p.y);
