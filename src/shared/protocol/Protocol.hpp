@@ -49,7 +49,9 @@ struct PhysicsResult {
     long long  blockSetSize = 0;           // BlockSetSize：物理侧静态碰撞体数量快照
 
     // Contraption 字段（回执/刚体快照用）：
-    int        contraptionId = 0;          // 刚体 ID（打包完成/解包完成/刚体位置）
+    // 默认 -1 = "不属于任何刚体"，与 PhysicsCommand 的同名字段保持一致
+    // （B52：原来默认 0，而 0 是合法的刚体 id，未赋值的回执会被误认成"刚体 0 的消息"）。
+    int        contraptionId = -1;         // 刚体 ID（打包完成/解包完成/刚体位置）
     int        blockCount = 0;             // 打包的方块数
     double     rx = 0.0, ry = 0.0, rz = 0.0; // 刚体世界位置（RigidBodyPos 用）
     // 刚体旋转（四元数，RigidBodyPos / ContraptionPacked 用）。默认单位四元数 = 无旋转。

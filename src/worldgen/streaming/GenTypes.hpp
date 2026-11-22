@@ -25,6 +25,10 @@ struct ColPos {
 
 // 生成高度范围（沿用 1a；1b 只改水平范围，不改高度）。
 constexpr int kGenMinY = 0;
+// B124：ColumnGenerator::generateColumn 用 out.chunks[y >> 4] 把绝对 y 直接当层号下标。
+// 只有 kGenMinY == 0 时这才成立；改成负数会静默产生负下标（越界写）。
+// 真要做负高度，必须同步把下标改成 (y - kGenMinY) >> 4 —— 那时这条断言会提醒你。
+static_assert(kGenMinY >= 0, "generateColumn 假定 kGenMinY == 0；负高度需要改层号换算");
 constexpr int kGenMaxY = 63;
 
 // 一列覆盖的竖直 chunk 层数：y ∈ [0,63] → 4 个 16³ chunk。
