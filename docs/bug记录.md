@@ -157,12 +157,12 @@
 | B111 | 容量不足 | `RenderBridge.hpp:44` | 结构事件"不能丢"但队列仅 16 深 | 同 tick 打包 20 个刚体即丢（B95 成因） | 🟡 | ✅ |
 | B112 | 封装泄漏 | `RenderBridge.hpp:33-35` | 三条队列访问器公开 | 同 B105 | 🟢 | ✅ |
 | B113 | 死字段 | `RenderBridge.cpp` | `BlockChangeEvent::tick` 只写不读 | 读者以为它用于去重/排序 | 🟢 | ✅ |
-| B114 | 常量空缺 | `BlockActions.hpp:15-17` | DIRTY 只定义 0x01/0x08/0x10，缺 0x02/0x04 无说明 | 读者以为漏定义 | 🟡 | ✅ |
-| B115 | 措辞错误 | `BlockActions.hpp:11` | 写"无状态、无锁、纯函数"，但 `tryPlace/tryRemove` 有副作用 | 误以为可无锁并发调用 | 🟡 | ✅ |
-| B116 | 标脏不全 | `BlockActions.cpp` `markDirtyWithBoundary` | 只标 6 个面邻居，不标对角 | 接 AO/平滑光照时边缘漏更新 | 🟡 | ✅ |
-| B117 | 缺前置检查 | `BlockActions.cpp` `tryPlace` | 不拒绝 `type == Air` | 标脏但数据没变，且**凭空建空 chunk** | 🟡 | ✅ |
+| B114 | 常量空缺 | `BlockActions.hpp:15-17` | DIRTY 只定义 0x01/0x08/0x10，缺 0x02/0x04 无说明 | 读者以为漏定义 | 🟡 | ✅已修（注释说明是保留位） |
+| B115 | 措辞错误 | `BlockActions.hpp:11` | 写"无状态、无锁、纯函数"，但 `tryPlace/tryRemove` 有副作用 | 误以为可无锁并发调用 | 🟡 | ✅已修（改措辞） |
+| B116 | 标脏不全 | `BlockActions.cpp` `markDirtyWithBoundary` | 只标 6 个面邻居，不标对角 | 接 AO/平滑光照时边缘漏更新 | 🟡 | ⏸ 已评估不改（现在标 26 邻域会每次多重建 5~20 chunk；等 AO 落地再改，已写进注释） |
+| B117 | 缺前置检查 | `BlockActions.cpp` `tryPlace` | 不拒绝 `type == Air` | 标脏但数据没变，且**凭空建空 chunk** | 🟡 | ✅已修（前置拒绝 Air） |
 | B118 | 异常留残留 | `BlockActions.cpp` `tryPlace` | `chunks[cp]` 先建 chunk，后续抛异常则留空 chunk | 多占内存 | 🟡 | ✅ |
-| B119 | 归属不当 | `BlockActions.hpp` | 脏原因常量定义在此，而 `ChunkData` 才是使用者 | 概念错位 | 🟡 | ✅ |
+| B119 | 归属不当 | `BlockActions.hpp` | 脏原因常量定义在此，而 `ChunkData` 才是使用者 | 概念错位 | 🟡 | ⏸ 保留（注释说明将来随 dirty 一起搬，避免现在动调用面） |
 | B120 | 命名不一致 | `BlockActions.cpp` | `tryPlace` 用 `cp`、`tryRemove` 用 `it` | 风格 | 🟢 | ✅ |
 | B121 | 无检查 | `BlockActions.cpp` `markDirtyWithBoundary` | 邻居 chunk 不存在也插进 dirty | 渲染端需自行忽略 | 🟢 | ✅ |
 | B122 | 缺 noexcept | `BlockActions.hpp` | 未标 `noexcept` | 正确（不强异常安全），可注释 | 🟢 | ✅ |

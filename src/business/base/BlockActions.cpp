@@ -20,6 +20,10 @@ bool tryPlace(std::unordered_map<engine::shared::ChunkPos, engine::shared::Chunk
               std::unordered_set<engine::shared::ChunkPos>& dirty,
               const engine::shared::BlockPos& p,
               engine::shared::BlockType type) {
+    // B117：Air 不是"要放的方块"。不拦它会：给一个位置标脏（数据其实没变），
+    // 并且因为下面 `chunks[cp]` 会默认构造，凭空建出一个全空气 chunk 占内存。
+    if (type == engine::shared::BlockType::Air) return false;
+
     // 裁决：位置已被占用（chunk 存在且该格非空气）→ 拒绝放置。
     const auto cp = engine::shared::toChunkOf(p);
     const auto it = chunks.find(cp);
