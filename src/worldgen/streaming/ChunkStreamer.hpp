@@ -2,17 +2,15 @@
 
 #include "core/SPSCQueue.hpp"
 #include "core/ThreadLoop.hpp"
+#include "shared/chunk/ChunkPos.hpp"
 #include "worldgen/generator/ColumnGenerator.hpp"
 #include "worldgen/streaming/GenTypes.hpp"
 
 #include <atomic>
 #include <cstddef>
+#include <memory>
 #include <unordered_set>
 #include <vector>
-
-namespace engine::business {
-class World;   // 前向声明：写入只经 World::applyGeneratedChunk，不展开其实现
-}
 
 namespace engine::worldgen {
 // 流式区块生成器（1b）：把一个"按玩家位置动态请求 + 后台生成 + 结果回传"的闭环装进一个对象。
@@ -38,12 +36,19 @@ public:
     // 卸载半径 = 加载半径 + 1：留一圈滞回（hysteresis），站在窗口边界上不会反复加载/卸载。
     static constexpr int kEvictMargin = 1;
 
-    // 一次 drain 的结果：
-    //   appliedColumns = 本次真正写进 World 的列数
-    //   evictedChunks  = 本次卸载掉的 chunk 数（> 0 时调用方需要重同步物理静态集合）
-    struct DrainOutcome {
-        std::size_t appliedColumns = 0;
-        std::size_t evictedChunks = 0;
+    // 一批"待落地"的流式结果（业务线程取走后写入 World）。
+    // 本类是线程本地化的：**不持有、不访问 World** —— 只产出数据。
+    struct StreamBatch {
+        // 要卸载的 chunk（一列 = kGenChunkLevels 个竖直 chunk）
+        std::unordered_set<engine::shared::ChunkPos> deadChunks;
+        // 已生成、可写入世界的列（按取出的先后）
+        struct Column {
+            ColPos pos;
+            std::shared_ptr<const ColumnBlocks> blocks;
+        };
+        std::vector<Column> columns;
+
+        bool empty() const { return deadChunks.empty() && columns.empty(); }
     };
 
     // generator 必须已 prepare()，且生命周期要覆盖 streamer（建议同处一个作用域）。
@@ -64,11 +69,10 @@ public:
     // playerX/playerZ 为世界坐标（可为负）：内部 floor 后 >>4 转 chunk 坐标。
     void tick(double playerX, double playerZ);
 
-    // 业务线程每 tick 调用：最多 maxApply 列写进 world，并先结算上一 tick 积攒的淘汰列。
-    // 必须由"唯一 World 写者"线程调用（内部会写 dirtyChunksThisTick_）。
-    // 返回本次实际写入的列数与卸载的 chunk 数。
-    DrainOutcome receiveResults(engine::business::World& world,
-                              std::size_t maxApply = kMaxApplyPerTick);
+    // 业务线程每 tick 调用：取走"待落地"的一批（替换已卸载的列 + 最多 maxColumns 列成品）。
+    // 只做队列操作与自己状态的更新，不碰 World —— 落盘由调用方执行
+    // （规则5：线程类的成员里不出现别的线程的数据对象）。
+    StreamBatch takeBatch(std::size_t maxColumns = kMaxApplyPerTick);
 
     GenStats stats() const;
     std::size_t knownColumns() const { return known_.size(); }
@@ -83,12 +87,6 @@ private:
     std::vector<ColPos> collectWindowCandidates(int cx, int cz) const;
     // ④ 入队（队列满即停；只记成功的，失败的不能记，否则永不重试）
     void enqueueRequests(const std::vector<ColPos>& candidates);
-
-    // ---- receiveResults 的两段（规则1 拆分）----
-    // ① 结算上一 tick 积攒的淘汰列
-    void applyPendingEvictions(engine::business::World& world, DrainOutcome& out);
-    // ② 应用生成结果（已被淘汰的列直接丢弃），返回写入列数
-    std::size_t applyGeneratedResults(engine::business::World& world, std::size_t maxApply);
 
     const ColumnGenerator& generator_;
     int radius_;
@@ -108,7 +106,7 @@ private:
     std::atomic<std::size_t> appliedColumnCount_{0};
     std::atomic<bool> started_{false};
 
-    // 已应用列的聚合统计：只在 receiveResults 所在线程（唯一 World 写者）读写，
+    // 已应用列的聚合统计：只在业务线程（takeBatch 调用方）读写，
     // 与后台线程的生成计数分开，避免为三个普通字段引入锁/CAS。
     std::size_t appliedBlocks_ = 0;
     int minSurfaceY_ = kGenMaxY;

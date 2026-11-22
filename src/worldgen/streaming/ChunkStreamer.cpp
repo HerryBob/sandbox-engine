@@ -1,6 +1,5 @@
 #include "worldgen/streaming/ChunkStreamer.hpp"
 
-#include "business/World.hpp"
 #include "shared/chunk/ChunkPos.hpp"
 
 #include <algorithm>
@@ -134,56 +133,40 @@ void ChunkStreamer::enqueueRequests(const std::vector<ColPos>& candidates) {
     }
 }
 
-ChunkStreamer::DrainOutcome ChunkStreamer::receiveResults(engine::business::World& world,
-                                                        std::size_t maxApply) {
-    DrainOutcome out;
-    applyPendingEvictions(world, out);                            // ① 先结算淘汰
-    out.appliedColumns = applyGeneratedResults(world, maxApply);   // ② 再应用结果
-    return out;
-}
+ChunkStreamer::StreamBatch ChunkStreamer::takeBatch(std::size_t maxColumns) {
+    StreamBatch batch;
 
-void ChunkStreamer::applyPendingEvictions(engine::business::World& world, DrainOutcome& out) {
-    // 一列 = 4 个竖直堆叠的 16³ chunk。
-    // World::unloadChunks 会标脏"自身 + 还在的邻居"，渲染端重建时取不到方块就删 mesh，
-    // 不需要给渲染端新增"卸载"接口。
-    if (pendingEvict_.empty()) return;
-
-    std::unordered_set<engine::shared::ChunkPos> dead;
-    dead.reserve(pendingEvict_.size() * static_cast<std::size_t>(kGenChunkLevels));
-    for (const ColPos& col : pendingEvict_) {
-        for (int level = 0; level < kGenChunkLevels; ++level) {
-            dead.insert(engine::shared::ChunkPos{
-                col.x, (kGenMinY / engine::shared::CHUNK_SIZE) + level, col.z});
+    // ① 淘汰列 → 待卸载 chunk 列表（一列 = kGenChunkLevels 个竖直 chunk）。
+    //    只产数据、不删：World::unloadChunks 由调用方（业务线程）执行。
+    //    World::unloadChunks 会标脏"自身 + 还在的邻居"，渲染端重建时取不到方块就删 mesh，
+    //    不需要给渲染端新增"卸载"接口。
+    if (!pendingEvict_.empty()) {
+        batch.deadChunks.reserve(pendingEvict_.size() *
+                                 static_cast<std::size_t>(kGenChunkLevels));
+        for (const ColPos& col : pendingEvict_) {
+            for (int level = 0; level < kGenChunkLevels; ++level) {
+                batch.deadChunks.insert(engine::shared::ChunkPos{
+                    col.x, (kGenMinY / engine::shared::CHUNK_SIZE) + level, col.z});
+            }
         }
+        pendingEvict_.clear();
     }
-    out.evictedChunks = world.unloadChunks(dead);
-    pendingEvict_.clear();
-}
 
-std::size_t ChunkStreamer::applyGeneratedResults(engine::business::World& world,
-                                                 std::size_t maxApply) {
-    // 已被淘汰的列直接丢弃 —— 否则会把刚删掉的 chunk 又写回来
-    // （队列里可能还压着淘汰前排队/在算的请求，这是允许的浪费，但结果不能落地）。
-    std::size_t applied = 0;
+    // ② 取生成结果：已被淘汰的列直接丢弃 —— 否则会把刚删掉的 chunk 又写回来
+    //    （队列里可能还压着淘汰前排队/在算的请求，这是允许的浪费，但结果不能落地）。
+    std::size_t taken = 0;
     GenResult res;
-    while (applied < maxApply && genToBusinessResults_.pop(res)) {
+    while (taken < maxColumns && genToBusinessResults_.pop(res)) {
         if (known_.find(res.pos) == known_.end()) continue;   // 在途结果属于已淘汰的列
-        // 一列 = 4 个竖直堆叠的 16³ chunk：逐层写入（每个 chunk 一次锁 + 标脏自身与邻居）
-        for (int level = 0; level < kGenChunkLevels; ++level) {
-            const engine::shared::ChunkPos cp{
-                res.pos.x,
-                (kGenMinY / engine::shared::CHUNK_SIZE) + level,
-                res.pos.z};
-            world.applyGeneratedChunk(cp, res.blocks->chunks[level]);
-        }
         appliedColumnCount_.fetch_add(1, std::memory_order_relaxed);
-        // 聚合统计（本线程独占，无并发）
+        // 聚合统计（本线程独占，无并发）—— 必须在 move 之前读
         appliedBlocks_ += res.blocks->blockCount;
         minSurfaceY_ = std::min(minSurfaceY_, res.blocks->minSurfaceY);
         maxSurfaceY_ = std::max(maxSurfaceY_, res.blocks->maxSurfaceY);
-        ++applied;
+        batch.columns.push_back(StreamBatch::Column{res.pos, std::move(res.blocks)});
+        ++taken;
     }
-    return applied;
+    return batch;
 }
 
 GenStats ChunkStreamer::stats() const {

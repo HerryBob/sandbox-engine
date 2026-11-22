@@ -179,8 +179,25 @@ static void initNoiseAndRunSelfTests() {
               << (sorterOk ? "通过" : "失败") << "\n";
 }
 
+// 把一批流式结果落地到世界（业务线程 / 装配期单线程调用）。
+// 规则5：ChunkStreamer 只产数据（它不持有 World），"写 World"留在唯一写者这一侧。
+static void applyStreamBatch(engine::business::World& world,
+                             const engine::worldgen::ChunkStreamer::StreamBatch& batch) {
+    if (!batch.deadChunks.empty()) world.unloadChunks(batch.deadChunks);
+    for (const auto& col : batch.columns) {
+        const auto& blocks = *col.blocks;
+        for (int level = 0; level < engine::worldgen::kGenChunkLevels; ++level) {
+            const engine::shared::ChunkPos cp{
+                col.pos.x,
+                (engine::worldgen::kGenMinY / engine::shared::CHUNK_SIZE) + level,
+                col.pos.z};
+            world.applyGeneratedChunk(cp, blocks.chunks[level]);
+        }
+    }
+}
+
 // 同步预热：阻塞到窗口内 warmupColumns 列全部写入（装配期没有 25TPS 约束）。
-// 刻意走和运行期完全同一条路径（tick → 后台生成 → receiveResults → World）。
+// 刻意走和运行期完全同一条路径（tick → 后台生成 → takeBatch → World）。
 static void warmupWindow(engine::worldgen::ChunkStreamer& streamer,
                          engine::business::World& world,
                          std::size_t warmupColumns) {
@@ -190,7 +207,7 @@ static void warmupWindow(engine::worldgen::ChunkStreamer& streamer,
     while (streamer.stats().applied < warmupColumns &&
            std::chrono::steady_clock::now() < deadline) {
         streamer.tick(spawnX, spawnZ);
-        streamer.receiveResults(world, engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
+        applyStreamBatch(world, streamer.takeBatch(engine::worldgen::ChunkStreamer::kMaxApplyPerTick));
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
@@ -404,15 +421,16 @@ static int run(const std::string& presetName) {
             // 否则渲染端要等下一个 tick 才看到它。
             if (streamer) {
                 streamer->tick(cameraState.camX.load(), cameraState.camZ.load());
-                const auto drained = streamer->receiveResults(
-                    businessWorld.world(),
+                const auto batch = streamer->takeBatch(
                     engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
                 // 世界 chunk 集合有变化（加载或卸载）→ 物理侧必须重下一次全量方块集。
                 // 只认"卸载"不够：卸载与分批加载错在不同 tick，最后一次加载若不重同步，
                 // 物理侧就停在旧的中间态快照（实测：世界 90 列、物理仍 81 列）。
-                // 稳态时两者都为 0（不再触发），开销只在滑动的那几个 tick。
-                if (drained.evictedChunks > 0 || drained.appliedColumns > 0)
+                // 稳态时 batch 为空（不再触发），开销只在滑动的那几个 tick。
+                if (!batch.empty()) {
+                    applyStreamBatch(businessWorld.world(), batch);
                     businessWorld.requestPhysicsResync();
+                }
                 if (++streamReportCounter >= 25) {
                     streamReportCounter = 0;
                     const auto s = streamer->stats();
