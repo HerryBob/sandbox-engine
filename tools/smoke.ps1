@@ -95,7 +95,10 @@ if ($NoBuild) {
 
 # ---- 2~3. 运行 + 抓指标（可重复调用）----
 function Invoke-Measure {
-    $log = Join-Path $env:TEMP ('smoke_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
+    # 日志留在工作区内（AGENTS.md：不要在 E:\MinecraftGame2 之外写文件）
+    $logDir = Join-Path $repo 'build\smoke-logs'
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    $log = Join-Path $logDir ('smoke_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
     $err = $log + '.err'
 
     $proc = Start-Process -FilePath $exe -WorkingDirectory $BuildDir `
