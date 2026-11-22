@@ -4,7 +4,9 @@
 #include "modapi/mod_c_api.h"
 
 #include <cstddef>
+#include <filesystem>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace engine::business { class World; }
@@ -34,6 +36,15 @@ private:
     };
 
     static std::vector<LoadedMod> s_mods_;
+
+    // 加载单个模组（原 loadAll 内联体的第四段，规则1 拆分）。
+    // 成功：已登记进 s_mods_ 并返回 true。
+    // 失败：已完成该关卡的清理（必要时 FreeLibrary），把 modId 记进 failedIds，返回 false。
+    static bool loadOne(std::filesystem::path dllPath,
+                        const std::string& dirName,
+                        const std::string& modId,
+                        const std::vector<std::string>& dependencies,
+                        std::unordered_set<std::string>& failedIds);
 };
 
 } // namespace engine::modhost

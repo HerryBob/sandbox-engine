@@ -61,12 +61,9 @@ $tolerance = [ordered]@{
 
 # ---- 1. 构建 ----
 if (-not $NoBuild) {
-    $cmake = (Get-Command cmake.exe -ErrorAction SilentlyContinue).Source
-    if (-not $cmake) {
-        $cmake = 'E:\VS2026\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
-    }
     Write-Host "[smoke] 构建 $BuildDir ..."
-    & $cmake --build $BuildDir 2>&1 | Out-String | Write-Verbose
+    # 统一走 build.ps1：Ninja 生成器需要 vcvars 的 INCLUDE/LIB 环境
+    & (Join-Path $PSScriptRoot 'build.ps1') -BuildDir $BuildDir
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[smoke] FAIL：构建失败" -ForegroundColor Red
         exit 1

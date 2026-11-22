@@ -56,12 +56,21 @@ fs::path findSingleDll(const fs::path& modDir, const std::string& shown) {
 
 std::vector<ModLoader::LoadedMod> ModLoader::s_mods_;
 
-std::size_t ModLoader::loadAll(const std::string& dir) {
-    if (!fs::exists(dir) || !fs::is_directory(dir)) {
-        ENGINE_LOG_INFO("Mod", "模组目录不存在，按 0 个模组继续（" + dir + "）");
-        return 0;
-    }
+// ============================================================================
+// 加载流水线的前四段（规则1 拆分：原 loadAll 的内联体按职责拆出，行为逐行不变）
+// ============================================================================
+namespace {
 
+// 一个候选模组：目录内唯一的 DLL + 目录名 + 已校验的清单
+struct Candidate {
+    fs::path    dll;          // 目录内唯一的 DLL
+    std::string dirName;      // 目录名（日志标识）
+    ModManifest manifest;     // 清单（收集阶段已保证存在）
+};
+
+// ① 填引擎能力表：四个子结构各填一份 version/host/log + 能力函数。
+//    必须在任何模组加载之前调用 —— 模组 onLoad 第一件事就是调 api->*.log。
+void prepareModApi() {
     g_api = ModApi{};
     // 共用基类字段在三个子结构各填一份（继承布局：每个子结构自带 version/host/log）
     g_api.block.version       = kEngineApiVersion;
@@ -85,15 +94,11 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
     g_api.entity.host           = &g_host;
     g_api.entity.log            = &logImpl;
     g_api.entity.registerEntity = &registerEntityImpl;
+}
 
-    // 一个子目录 = 一个模组：目录内一个 *.dll + 一个必需的 mod.json。
-    // 先收集再排序，不依赖目录枚举顺序，保证每次启动的加载次序一致。
-    struct Candidate {
-        fs::path    dll;          // 目录内唯一的 DLL
-        std::string dirName;      // 目录名（日志标识）
-        ModManifest manifest;     // 清单（收集阶段已保证存在）
-    };
-
+// ② 扫目录收集候选：一个子目录 = 一个模组（一个 *.dll + 一个必需的 mod.json）。
+//    散装文件 / DLL 数量不对 / 缺清单 / 清单非法 —— 全部在这里跳过并记日志。
+std::vector<Candidate> collectCandidates(const std::string& dir) {
     std::vector<Candidate> candidates;
     for (const auto& entry : fs::directory_iterator(dir)) {
         if (!entry.is_directory()) {
@@ -121,8 +126,12 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
                        std::to_string(c.manifest.dependencies.size()) + " 个）");
         candidates.push_back(c);
     }
-    // 排序：先 phase 升序，同 phase 按 id。
-    // 这一步只固定"同层节点"的先后，真正的前后关系由依赖排序决定。
+    return candidates;
+}
+
+// ③ 预排序：先 phase 升序，同 phase 按 id。
+//    这一步只固定"同层节点"的先后，真正的前后关系由依赖排序决定。
+void preSortCandidates(std::vector<Candidate>& candidates) {
     std::sort(candidates.begin(), candidates.end(),
         [](const Candidate& a, const Candidate& b) {
             if (a.manifest.phase != b.manifest.phase) {
@@ -131,124 +140,49 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
             }
             return a.manifest.id < b.manifest.id;
         });
+}
 
-    // 排序输入：每条模组一份清单（收集阶段已保证清单存在）
+// ④ 拓扑排序 + 打印被拒原因；返回可加载模组的下标（与 candidates 同序）。
+std::vector<std::size_t> sortCandidates(const std::vector<Candidate>& candidates,
+                                        std::vector<ModManifest>& items) {
+    const SortResult sorted = ModSorter::sort(items);
+    for (const RejectedMod& r : sorted.rejected) {
+        ENGINE_LOG_ERROR("Mod", "拒绝加载 " + candidates[r.index].dirName + "：" + r.reason);
+    }
+    return sorted.order;
+}
+
+} // namespace
+
+std::size_t ModLoader::loadAll(const std::string& dir) {
+    if (!fs::exists(dir) || !fs::is_directory(dir)) {
+        ENGINE_LOG_INFO("Mod", "模组目录不存在，按 0 个模组继续（" + dir + "）");
+        return 0;
+    }
+
+    prepareModApi();
+
+    // 收集再排序：不依赖目录枚举顺序，保证每次启动的加载次序一致
+    std::vector<Candidate> candidates = collectCandidates(dir);
+    preSortCandidates(candidates);
+    // 排序输入：每条模组一份清单（预排序之后构造，与 candidates 同序）
     std::vector<ModManifest> items;
     items.reserve(candidates.size());
     for (const Candidate& c : candidates) {
         items.push_back(c.manifest);
     }
 
-    const SortResult sorted = ModSorter::sort(items);
-    for (const RejectedMod& r : sorted.rejected) {
-        ENGINE_LOG_ERROR("Mod", "拒绝加载 " + candidates[r.index].dirName + "：" + r.reason);
-    }
+    const std::vector<std::size_t> order = sortCandidates(candidates, items);
 
     // 加载失败的模组 id 集合：被依赖方失败时，依赖方一并跳过（运行期级联）
     std::unordered_set<std::string> failedIds;
 
     std::size_t okCount = 0;
-    for (std::size_t idx : sorted.order) {
-        const Candidate& c = candidates[idx];
-        const std::string shown = c.dirName;
-        const std::string& modId = items[idx].id;
-
-        // 依赖的模组没加载成功 → 本模组也跳过，否则它要用的东西并不存在
-        bool missingDep = false;
-        for (const std::string& dep : items[idx].dependencies) {
-            if (failedIds.count(dep) == 0) continue;
-            ENGINE_LOG_ERROR("Mod", "跳过 " + shown + "：依赖的模组未加载（" + dep + "）");
-            missingDep = true;
-            break;
+    for (std::size_t idx : order) {
+        if (loadOne(candidates[idx].dll, candidates[idx].dirName,
+                    items[idx].id, items[idx].dependencies, failedIds)) {
+            ++okCount;
         }
-        if (missingDep) {
-            failedIds.insert(modId);
-            continue;
-        }
-
-        HMODULE h = ::LoadLibraryW(c.dll.wstring().c_str());
-        if (h == nullptr) {
-            ENGINE_LOG_ERROR("Mod", "LoadLibrary 失败（GetLastError=" +
-                      std::to_string(static_cast<long>(::GetLastError())) + "）：" + shown);
-            failedIds.insert(modId);
-            continue;
-        }
-
-        // GetProcAddress 返回 FARPROC，必须先转 void* 再转目标函数指针类型：
-        // 直接 FARPROC → 函数指针在 MSVC 下会触发 C4191（不安全类型转换）。
-        CreateModCFn createC = reinterpret_cast<CreateModCFn>(
-            reinterpret_cast<void*>(::GetProcAddress(h, kCreateModCSymbol)));
-
-        if (createC == nullptr) {
-            ENGINE_LOG_ERROR("Mod", "拒绝加载 " + shown + "：缺少 CreateModC 导出符号");
-            failedIds.insert(modId);
-            ::FreeLibrary(h);
-            continue;
-        }
-
-        // 阶段③：实例化。构造函数里不做注册（注册一律放 onLoad，方便失败回滚）
-        ModSelf self = nullptr;
-        const ModVtbl* vtbl = nullptr;
-        if (createC(&g_api, &self, &vtbl) != 0 || self == nullptr || vtbl == nullptr) {
-            ENGINE_LOG_ERROR("Mod", "CreateModC 失败（实例或函数表为空）：" + shown);
-            failedIds.insert(modId);
-            ::FreeLibrary(h);
-            continue;
-        }
-        // 入口表 ABI 必须严格相等：布局不同的话，之后每次函数表调用都会错位。
-        if (vtbl->abiVersion != MODAPI_MOD_ABI_VERSION) {
-            ENGINE_LOG_ERROR("Mod", "拒绝加载 " + shown + "：模组入口 ABI=" +
-                             std::to_string(vtbl->abiVersion) + "，引擎要求 " +
-                             std::to_string(MODAPI_MOD_ABI_VERSION));
-            vtbl->destroy(self);   // 先让模组销毁实例，再卸库
-            failedIds.insert(modId);
-            ::FreeLibrary(h);
-            continue;
-        }
-
-        // 来源标记：onLoad 里注册内容时要记到这本模组名下，必须在 onLoad 之前设置。
-        // 拷成 std::string —— name(self) 返回 DLL 静态区的字符串，卸载后即失效。
-        g_host.currentMod = vtbl->name(self);
-
-        // 清单 id 与 DLL 自报名字不一致：只警告，不拒绝（排序与拒绝以清单为准）
-        if (c.manifest.id != vtbl->name(self)) {
-            ENGINE_LOG_WARN("Mod", "清单 id 与 ModVtbl::name() 不一致：" + c.manifest.id +
-                             " vs " + vtbl->name(self) + "（" + shown + "）");
-        }
-
-        // 阶段④：初始化。模组在这里校验 api->version 并注册内容。
-        if (vtbl->onLoad(self, &g_api) != 0) {
-            ENGINE_LOG_ERROR("Mod", "onLoad 返回 false，放弃该模组：" + shown);
-            // 失败回滚：把这个模组已经注册进去的内容按来源清掉，避免残留
-            // （噪声表里存的是它的函数指针，随后的 FreeLibrary 会让它们悬垂）。
-            const std::size_t rolledBack = engine::worldgen::NoiseRegistry::eraseByOwner(
-                g_host.currentMod.c_str());
-            if (rolledBack > 0) {
-                ENGINE_LOG_INFO("Mod", "回滚噪声注册 " + std::to_string(rolledBack) + " 个（" + shown + "）");
-            }
-            vtbl->destroy(self);
-            g_host.currentMod.clear();
-            failedIds.insert(modId);
-            ::FreeLibrary(h);
-            continue;
-        }
-
-        std::ostringstream oss;
-        oss << "加载成功：" << vtbl->name(self) << " v" << vtbl->version(self)
-            << "（" << shown << "）";
-        ENGINE_LOG_INFO("Mod", oss.str());
-
-        // 模组资源：目录下的 assets/ 与 data/ 并入全局索引（不存在则跳过）。
-        // 失败模组不登记 —— 代码没加载，其资源也不该占用名字。
-        const fs::path modRoot = c.dll.parent_path();
-        engine::resource::g_resourceIndex.addRoot(
-            engine::resource::ResourceKind::Assets, g_host.currentMod, modRoot / "assets");
-        engine::resource::g_resourceIndex.addRoot(
-            engine::resource::ResourceKind::Data, g_host.currentMod, modRoot / "data");
-
-        s_mods_.push_back(LoadedMod{c.dll.string(), g_host.currentMod, reinterpret_cast<void*>(h), self, vtbl});
-        g_host.currentMod.clear();
-        ++okCount;
     }
 
     if (okCount == 0) {
@@ -257,6 +191,109 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
         ENGINE_LOG_INFO("Mod", "加载 " + std::to_string(okCount) + " 个模组");
     }
     return okCount;
+}
+
+// ⑤ 加载单个模组（原 loadAll 内联体的第四段）。
+//    六道关卡：级联 / LoadLibrary / 导出符号 / 实例化 / 入口 ABI / onLoad；
+//    每道失败都按"是否已映射、是否已实例化"分级清理，然后把 modId 记进 failedIds。
+bool ModLoader::loadOne(fs::path dllPath,
+                        const std::string& dirName,
+                        const std::string& modId,
+                        const std::vector<std::string>& dependencies,
+                        std::unordered_set<std::string>& failedIds) {
+    const std::string shown = dirName;
+
+    // 依赖的模组没加载成功 → 本模组也跳过，否则它要用的东西并不存在
+    for (const std::string& dep : dependencies) {
+        if (failedIds.count(dep) == 0) continue;
+        ENGINE_LOG_ERROR("Mod", "跳过 " + shown + "：依赖的模组未加载（" + dep + "）");
+        failedIds.insert(modId);
+        return false;
+    }
+
+    HMODULE h = ::LoadLibraryW(dllPath.wstring().c_str());
+    if (h == nullptr) {
+        ENGINE_LOG_ERROR("Mod", "LoadLibrary 失败（GetLastError=" +
+                  std::to_string(static_cast<long>(::GetLastError())) + "）：" + shown);
+        failedIds.insert(modId);
+        return false;
+    }
+
+    // GetProcAddress 返回 FARPROC，必须先转 void* 再转目标函数指针类型：
+    // 直接 FARPROC → 函数指针在 MSVC 下会触发 C4191（不安全类型转换）。
+    CreateModCFn createC = reinterpret_cast<CreateModCFn>(
+        reinterpret_cast<void*>(::GetProcAddress(h, kCreateModCSymbol)));
+
+    if (createC == nullptr) {
+        ENGINE_LOG_ERROR("Mod", "拒绝加载 " + shown + "：缺少 CreateModC 导出符号");
+        failedIds.insert(modId);
+        ::FreeLibrary(h);
+        return false;
+    }
+
+    // 阶段③：实例化。构造函数里不做注册（注册一律放 onLoad，方便失败回滚）
+    ModSelf self = nullptr;
+    const ModVtbl* vtbl = nullptr;
+    if (createC(&g_api, &self, &vtbl) != 0 || self == nullptr || vtbl == nullptr) {
+        ENGINE_LOG_ERROR("Mod", "CreateModC 失败（实例或函数表为空）：" + shown);
+        failedIds.insert(modId);
+        ::FreeLibrary(h);
+        return false;
+    }
+    // 入口表 ABI 必须严格相等：布局不同的话，之后每次函数表调用都会错位。
+    if (vtbl->abiVersion != MODAPI_MOD_ABI_VERSION) {
+        ENGINE_LOG_ERROR("Mod", "拒绝加载 " + shown + "：模组入口 ABI=" +
+                         std::to_string(vtbl->abiVersion) + "，引擎要求 " +
+                         std::to_string(MODAPI_MOD_ABI_VERSION));
+        vtbl->destroy(self);   // 先让模组销毁实例，再卸库
+        failedIds.insert(modId);
+        ::FreeLibrary(h);
+        return false;
+    }
+
+    // 来源标记：onLoad 里注册内容时要记到这本模组名下，必须在 onLoad 之前设置。
+    // 拷成 std::string —— name(self) 返回 DLL 静态区的字符串，卸载后即失效。
+    g_host.currentMod = vtbl->name(self);
+
+    // 清单 id 与 DLL 自报名字不一致：只警告，不拒绝（排序与拒绝以清单为准）
+    if (modId != vtbl->name(self)) {
+        ENGINE_LOG_WARN("Mod", "清单 id 与 ModVtbl::name() 不一致：" + modId +
+                         " vs " + vtbl->name(self) + "（" + shown + "）");
+    }
+
+    // 阶段④：初始化。模组在这里校验 api->version 并注册内容。
+    if (vtbl->onLoad(self, &g_api) != 0) {
+        ENGINE_LOG_ERROR("Mod", "onLoad 返回 false，放弃该模组：" + shown);
+        // 失败回滚：把这个模组已经注册进去的内容按来源清掉，避免残留
+        // （噪声表里存的是它的函数指针，随后的 FreeLibrary 会让它们悬垂）。
+        const std::size_t rolledBack = engine::worldgen::NoiseRegistry::eraseByOwner(
+            g_host.currentMod.c_str());
+        if (rolledBack > 0) {
+            ENGINE_LOG_INFO("Mod", "回滚噪声注册 " + std::to_string(rolledBack) + " 个（" + shown + "）");
+        }
+        vtbl->destroy(self);
+        g_host.currentMod.clear();
+        failedIds.insert(modId);
+        ::FreeLibrary(h);
+        return false;
+    }
+
+    std::ostringstream oss;
+    oss << "加载成功：" << vtbl->name(self) << " v" << vtbl->version(self)
+        << "（" << shown << "）";
+    ENGINE_LOG_INFO("Mod", oss.str());
+
+    // 模组资源：目录下的 assets/ 与 data/ 并入全局索引（不存在则跳过）。
+    // 失败模组不登记 —— 代码没加载，其资源也不该占用名字。
+    const fs::path modRoot = dllPath.parent_path();
+    engine::resource::g_resourceIndex.addRoot(
+        engine::resource::ResourceKind::Assets, g_host.currentMod, modRoot / "assets");
+    engine::resource::g_resourceIndex.addRoot(
+        engine::resource::ResourceKind::Data, g_host.currentMod, modRoot / "data");
+
+    s_mods_.push_back(LoadedMod{dllPath.string(), g_host.currentMod, reinterpret_cast<void*>(h), self, vtbl});
+    g_host.currentMod.clear();
+    return true;
 }
 
 void ModLoader::unloadAll() {
