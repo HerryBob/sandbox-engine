@@ -218,7 +218,16 @@ static void warmupWindow(engine::worldgen::ChunkStreamer& streamer,
               << " 方块=" << s.blocks
               << " 地表=" << s.minSurfaceY << ".." << s.maxSurfaceY
               << " chunk=" << world.chunkCount() << "(非空，空chunk不建)";
-    if (s.applied < warmupColumns) std::cout << " [未灌满：30s 超时]";
+    if (s.applied < warmupColumns) {
+        // B123：预热失败**不致命**（硬失败会让慢机器/慢磁盘直接起不来，按决定不做），
+        // 但后果必须可见：世界只有部分列，渲染端可能一个 chunk 都没有，
+        // 后续所有"看不见东西/碰撞对不上"的现象都可能源于此。
+        ENGINE_LOG_ERROR("Main",
+            "流式预热超时：已应用 " + std::to_string(s.applied) + "/" +
+            std::to_string(warmupColumns) + " 列 —— 世界不完整，渲染端可能没有 chunk；"
+            "继续启动（按设计不硬失败）");
+        std::cout << " [未灌满：30s 超时]";
+    }
     std::cout << "\n";
 }
 

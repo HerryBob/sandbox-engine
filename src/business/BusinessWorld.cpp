@@ -184,7 +184,14 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
             else {
                 tMaxZ += tDeltaZ; iz += stepZ; dirX = 0; dirY = 0; dirZ = stepZ;
             }
-            if (findBlock(engine::shared::BlockPos{ ix, iy, iz }).has_value()) {
+            // B97：改用三态查询。原来用 findBlock（两态），把"所在 chunk 未加载"
+            // 和"这里是空气"当成了同一件事 —— 射线会直接穿过未加载区域，
+            // 命中背后的方块、或者算出很远的放置位，表现为"放块位置随机"。
+            // 现在遇到未加载就结束射线：宁可这一下不生效，也不猜。
+            engine::shared::BlockType hitType = engine::shared::BlockType::Air;
+            const auto q = lookupBlock(engine::shared::BlockPos{ ix, iy, iz }, hitType);
+            if (q == World::LookupResult::NotLoaded) break;   // 未加载：射线到此为止
+            if (q == World::LookupResult::Occupied) {
                 hit = true;
                 hx = ix; hy = iy; hz = iz;
                 px = ix - dirX; py = iy - dirY; pz = iz - dirZ;  // 放置位 = 命中格前一格

@@ -135,11 +135,11 @@
 | B90 | 封装泄漏 | `BusinessWorld.hpp` `world()` | 返回非 const `World&` 与注释矛盾 | 可绕过统计与排队 | 🟡 | ✅ |
 | B91 | 约束未写 | `BusinessWorld.hpp` `placeBlock`/`removeBlock` | 内部写 SPSC 队列（单生产者），未注明"仅业务线程" | 其它线程调用破坏约定 | 🟡 | ✅ |
 | B92 | 语义易混 | `BusinessWorld.hpp` `syncAll` vs `requestPhysicsResync` | 一次性 vs 置标志自动重试 | 调用方选错 | 🟡 | ✅ |
-| B93 | 能力缺失 | `BusinessWorld.hpp` | 只转发 `findBlock`，未转发 `lookupBlock` | 想区分"未加载/空气"只能绕过封装 | 🟡 | ✅ |
+| B93 | 能力缺失 | `BusinessWorld.hpp` | 只转发 `findBlock`，未转发 `lookupBlock` | 想区分"未加载/空气"只能绕过封装 | 🟡 | ✅已修（随 B97 转发） |
 | B94 | 覆盖丢状态 | `BusinessWorld.cpp` `receiveResultsFromPhysics` | 位姿单 `optional<BodyPose>` | 多刚体后到覆盖先到（玩家体与演示刚体一直互相覆盖） | 🟡 | ✅ |
 | B95 | 返回值忽略 | `BusinessWorld.cpp` `pushBodyStructure` | 结构事件"不能丢"但返回值没人看 | 队列满静默丢 → 渲染缺网格 | 🟡 | ✅ |
 | B96 | 每 tick 构造 | `BusinessWorld.cpp` | `bodyEvents` 局部 vector 每 tick 构造 | 可复用成员（收益有限） | 🟡 | ✅ |
-| B97 | 语义缺失 | `BusinessWorld` DDA | `findBlock` 把"未加载"当"空气" | 射线穿过未加载区域（结果看起来随机） | 🔴 | ⏸ 需决策（要换三态查询 = 接口语义变更） |
+| B97 | 语义缺失 | `BusinessWorld` DDA | `findBlock` 把"未加载"当"空气" | 射线穿过未加载区域（结果看起来随机） | 🔴 | ✅已修（DDA 改三态，遇未加载即止） |
 | B98 | 已知缺口 | `BusinessWorld` 点击处理 | 右键永远放 Stone | 无法放置其它方块 | 🔴 | ⏸ 不修（= 新功能：方块选择器） |
 | B99 | 返回值忽略 | `BusinessWorld` 点击处理 | `placeBlock`/`removeBlock` 失败无反馈 | 玩家操作失败无感知 | 🟡 | ✅ |
 | B100 | 脆弱约定 | `BusinessWorld` / `InputSampler` | 方向向量需与渲染端逐位一致（各写一份） | 任一侧改公式即错位 | 🟡 | ✅ |
@@ -171,7 +171,7 @@
 
 | # | 类型 | 位置 | 现象 | 影响 | 严重度 | 核实 |
 |---|---|---|---|---|---|---|
-| B123 | 失败不致命 | `main.cpp` `warmupWindow` 超时分支 | 预热 30s 超时只打印就继续启动 | 世界可能只灌一部分，渲染端可能一个 chunk 都没有 | 🔴 | ⏸ 需决策（硬失败会让慢机器直接起不来） |
+| B123 | 失败不致命 | `main.cpp` `warmupWindow` 超时分支 | 预热 30s 超时只打印就继续启动 | 世界可能只灌一部分，渲染端可能一个 chunk 都没有 | 🔴 | ✅已修（改 ERROR 日志写明后果，按决定不硬失败） |
 | B124 | 负下标 | `ColumnGenerator.cpp` `generateColumn` | `out.chunks[y >> 4]`，`kGenMinY < 0` 时负下标 | **内存破坏** | 🔴 | ✅已修（static_assert） |
 | B125 | 闪洞 | `ChunkStreamer.cpp` `applyPendingEvictions` | 淘汰同 tick 结算，不复查是否又回到窗口 | 边界来回走时该列空 2~3 tick（80–120ms） | 🟡 | ✅ |
 | B126 | 注释失真 | `ChunkStreamer.hpp:36` | 写"一次锁写 64KB"，实际一列 4 次锁 | 基于该注释的性能判断会错 | 🟡 | ✅ |

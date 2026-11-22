@@ -66,6 +66,14 @@ public:
     // 值返回避免悬垂/并发写风险。
     std::optional<engine::shared::Block> findBlock(const engine::shared::BlockPos& p) const;
 
+    // 三态查询（B93/B97）：区分"未加载 / 空气 / 有方块"。
+    // findBlock 把前两者都返回 nullopt —— 需要区分的调用方（如 DDA 射线）用这个，
+    // 不必绕过封装去拿 World&。
+    World::LookupResult lookupBlock(const engine::shared::BlockPos& p,
+                                    engine::shared::BlockType& outType) const {
+        return world_.lookupBlock(p, outType);
+    }
+
     // 已加载 chunk 数（空 chunk 不占内存；断言/诊断用）。
     std::size_t chunkCount() const;
 
