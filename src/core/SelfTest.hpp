@@ -2,6 +2,11 @@
 // 装配期自检：不依赖窗口 / GPU / 磁盘，纯内存断言。
 // 全部在建 VulkanContext 之前跑；返回 false 表示某条机制被破坏，
 // 由调用方决定是打印告警还是终止启动。
+//
+// 来源：本文件原在 src/SelfTest.hpp（与 main.cpp 同级的根目录）。
+// 规则1 第二轮（同类型文件归一）移入 core/ —— 自检是跨领域的基础设施，
+// 与 Log / SPSCQueue / ThreadLoop / TimeManager 同类。CMake 用 GLOB_RECURSE，
+// 移动无需改构建脚本。
 
 namespace engine::selftest {
 

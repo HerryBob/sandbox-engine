@@ -1,4 +1,5 @@
-#include "SelfTest.hpp"
+// 装配期自检实现。来源：原 src/SelfTest.cpp，规则1 第二轮移入 core/（见 SelfTest.hpp 头部说明）。
+#include "core/SelfTest.hpp"
 
 #include "modhost/manifest/Manifest.hpp"
 #include "modhost/sorter/ModSorter.hpp"

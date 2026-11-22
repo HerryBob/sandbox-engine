@@ -1,7 +1,7 @@
 // 沙盒引擎 · 单机入口
 // 引擎本体在 core/business/physics/input/render；本文件只做装配：
 //   Vulkan 上下文 → 进程内 SPSC 队列 → 四线程启动 → 主线程 GLFW 事件循环 → 优雅停止。
-#include "SelfTest.hpp"
+#include "core/SelfTest.hpp"
 #include "business/BusinessWorld.hpp"
 #include "business/PhysicsBridge.hpp"
 #include "business/RenderBridge.hpp"

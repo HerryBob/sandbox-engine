@@ -18,7 +18,7 @@
 #include <sstream>
 #include <vector>
 //相邻面剔除相关
-#include "render/optimization/meshing/FaceCulling.hpp"
+#include "render/meshing/FaceCulling.hpp"
 #include <unordered_set>
 #include "registry/BlockRegistry.hpp"
 #include "render/assets/ModelRegistry.hpp"
