@@ -1,6 +1,7 @@
 #pragma once
 #include "core/SPSCQueue.hpp"
 #include "core/TimeManager.hpp"
+#include "physics/PhysicsState.hpp"
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerBodyState.hpp"
 #include "shared/state/PlayerControlState.hpp"
@@ -11,35 +12,6 @@
 #include <vector>
 
 namespace engine::physics {
-
-// 物理体运动类型（对应 Jolt 的 RigidBodyType）。
-// Static 永不移动（地形，当前不进 bodies_）；Dynamic 按速度积分并做碰撞回退（方块组）；
-// Kinematic 速度由外部设定、受重力、位置由碰撞修正（生物/玩家）。
-enum class MotionType { Static, Dynamic, Kinematic };
-
-// 原型最小刚体（Contraption 打包产物）。
-// 位置用 double（精度设计见架构文档 2.8：复合体=基准+局部坐标）。
-struct RigidBody {
-    int    id = 0;              // 刚体 ID（物理分配）
-    MotionType motion = MotionType::Dynamic; // 运动类型：方块组=Dynamic，生物=Kinematic
-    double x = 0.0, y = 0.0, z = 0.0; // 世界位置（基准；生物为脚底中心）
-    double vx = 0.0, vy = 0.0, vz = 0.0; // 速度（2.3 积分用）
-    // 姿态（四元数）。当前只在打包时设一个固定值，用于验证"旋转数据通路"；
-    // Jolt 接入后由刚体的真实角速度积分得到（届时删掉打包处那行临时赋值）。
-    float  qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
-    int    blockCount = 0;      // 打包的方块数
-    // 内部方块（局部坐标 + 类型）：世界坐标 = 基准 + 局部坐标（架构 2.8）。
-    // 解包时按基准偏移回写静态碰撞体集合。
-    std::vector<engine::shared::Block> blocks;
-    // 碰撞体半宽 / 中心偏移（相对基准）。
-    // 求解器删除后这两组字段不再是"手工 AABB"：
-    //   - 生物：作为 CapsuleShape 的尺寸（装配期由 addPlayerBody 传入）
-    //   - 刚体：Jolt 的 compound shape 自己算，这两组字段届时可删
-    double halfExtentX = 0.0, halfExtentY = 0.0, halfExtentZ = 0.0;
-    double centerOffsetX = 0.0, centerOffsetY = 0.0, centerOffsetZ = 0.0;
-    // 踩地标志（求解器删除后恒为 false；Jolt 接入后由 CharacterVirtual::GetGroundState 取代）。
-    bool   onGround = false;
-};
 
 // 物理世界（25TPS，dt=0.04s）。
 // 用累积待处理模拟时间(accumulator)驱动，不硬绑定业务 tick 次数。
@@ -128,10 +100,9 @@ private:
     // 上次写入 PlayerBodyState 的墙钟时刻（纳秒）。用于计算 tickDurationNs：
     // 两次写入的墙钟差 = 本次物理 tick 的实际墙钟间隔，自适应时间缩放和调度抖动。
     long long                  lastPlayerStateWriteNs_ = 0;
-    // 刚体表（纯物理线程独占读写；bodyCount_ 是它的原子投影供 main 读）。
-    std::vector<RigidBody>     bodies_;
-    long long                  nextBodyId_{1};    // 刚体 ID 分配器
-    int                        playerBodyId_{-1}; // 玩家体 id（-1 = 未创建）
+    // 数据层（PhysicsState）：刚体表 + 静态碰撞体表 + id 分配。
+    // 逻辑层只通过它的访问器读写，不直接碰容器 —— 接 Jolt 时这一层基本不动。
+    PhysicsState               state_;
     engine::shared::PlayerBodyState* playerState_{nullptr}; // 玩家位置输出槽（装配期注入）
     engine::shared::PlayerControlState* playerControl_{nullptr}; // 玩家操控输入槽（装配期注入）
     std::atomic<long long>     bodyCount_{0};
@@ -142,12 +113,6 @@ private:
                                     // 物理循环每墙钟帧调 pushResultsToBusiness，但模拟 tick 只
                                     // 25Hz——同一模拟时刻的位置被重复发 ~15 次（旧行为）。
                                     // 位置快照语义：只发"新模拟时刻"的位置（数据层②修正）。
-
-    // 静态方块碰撞体集合（纯物理线程独占）。
-    // 求解器删除后它只是"静态世界的影子"（没有碰撞消费方），保留是为了让
-    // SyncBlockSet / Place / Remove 的指令语义完整；Jolt 接入后由"每 chunk 一个
-    // StaticCompoundShape"取代。
-    std::unordered_map<engine::shared::BlockPos, engine::shared::BlockType>  colliders_;
 };
 
 } // namespace engine::physics

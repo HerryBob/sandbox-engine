@@ -20,7 +20,7 @@ int PhysicsWorld::addPlayerBody(double x, double y, double z,
     // 尺寸存进 halfExtent（Jolt 接入后作为 CapsuleShape 的参数）；
     // centerOffsetY = 半高，让"基准 y = 脚底"成立。
     RigidBody b;
-    b.id = static_cast<int>(nextBodyId_++);
+    b.id = state_.allocateBodyId();
     b.motion = MotionType::Kinematic;
     b.x = x;
     b.y = y;
@@ -32,9 +32,9 @@ int PhysicsWorld::addPlayerBody(double x, double y, double z,
     b.centerOffsetY = halfExtentY; // AABB 中心在脚底上方半高，底部正好落在基准 y
     b.centerOffsetZ = 0.0;
     if (jumpSpeed > 0.0) jumpSpeed_ = jumpSpeed;
-    bodies_.push_back(b);
-    bodyCount_.store(static_cast<long long>(bodies_.size()), std::memory_order_relaxed);
-    playerBodyId_ = b.id;
+    state_.bodies().push_back(b);
+    bodyCount_.store(static_cast<long long>(state_.bodies().size()), std::memory_order_relaxed);
+    state_.setPlayerBodyId(b.id);
     return b.id;
 }
 
@@ -106,10 +106,10 @@ void PhysicsWorld::applyCommands(engine::core::SPSCQueue<engine::shared::Physics
 
 void PhysicsWorld::onSyncBlockSet(const engine::shared::PhysicsCommand& cmd) {
     // 全量同步：重建静态碰撞体集合（初始世界 / 世界重建时用）。
-    // 注意：colliders_ 目前只是"静态世界的影子"，没有碰撞消费方（求解器已删）。
+    // 注意：碰撞体集合目前只是"静态世界的影子"，没有碰撞消费方（求解器已删）。
     // Jolt 接入后这里改成"逐 chunk 建 StaticCompoundShape"，且要按脏 chunk 增量重建。
-    colliders_.clear();
-    for (const auto& b : cmd.blocks) colliders_[b.pos] = b.type;
+    state_.colliders().clear();
+    for (const auto& b : cmd.blocks) state_.colliders()[b.pos] = b.type;
 }
 
 void PhysicsWorld::onPlaceBlock(const engine::shared::PhysicsCommand& cmd) {
@@ -118,13 +118,13 @@ void PhysicsWorld::onPlaceBlock(const engine::shared::PhysicsCommand& cmd) {
     //      增量重算碰撞箱——碰撞箱实时扩张贴合新方块组）。
     const engine::shared::BlockPos p{cmd.x, cmd.y, cmd.z};
     if (cmd.contraptionId < 0) {
-        colliders_[p] = static_cast<engine::shared::BlockType>(cmd.blockType);
+        state_.colliders()[p] = static_cast<engine::shared::BlockType>(cmd.blockType);
         return;
     }
     const auto it = std::find_if(
-        bodies_.begin(), bodies_.end(),
+        state_.bodies().begin(), state_.bodies().end(),
         [&](const RigidBody& b) { return b.id == cmd.contraptionId; });
-    if (it != bodies_.end()) {
+    if (it != state_.bodies().end()) {
         it->blocks.push_back(engine::shared::Block{
             static_cast<engine::shared::BlockType>(cmd.blockType), p});
         it->blockCount = static_cast<int>(it->blocks.size());
@@ -136,13 +136,13 @@ void PhysicsWorld::onRemoveBlock(const engine::shared::PhysicsCommand& cmd) {
     // 破坏：业务裁决已通过。目标域同上。
     const engine::shared::BlockPos p{cmd.x, cmd.y, cmd.z};
     if (cmd.contraptionId < 0) {
-        colliders_.erase(p);
+        state_.colliders().erase(p);
         return;
     }
     const auto it = std::find_if(
-        bodies_.begin(), bodies_.end(),
+        state_.bodies().begin(), state_.bodies().end(),
         [&](const RigidBody& b) { return b.id == cmd.contraptionId; });
-    if (it != bodies_.end()) {
+    if (it != state_.bodies().end()) {
         for (auto bIt = it->blocks.begin(); bIt != it->blocks.end(); ++bIt) {
             if (bIt->pos == p) { it->blocks.erase(bIt); break; }
         }
@@ -155,7 +155,7 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
     // 打包：新建刚体，应用业务裁决的初始速度（起飞速度）。
     // 物理形态转移（架构 2.7）：方块从静态碰撞体集合转移进刚体。
     RigidBody body;
-    body.id = static_cast<int>(nextBodyId_++);
+    body.id = state_.allocateBodyId();
     body.blockCount = cmd.blockCount;
     body.vx = cmd.ivx;
     body.vy = cmd.ivy;
@@ -164,10 +164,10 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
     // 四元数 = (0, sin22.5°, 0, cos22.5°)。Jolt 接入后删掉这一行。
     body.qx = 0.0f; body.qy = 0.38268343f; body.qz = 0.0f; body.qw = 0.92387953f;
     body.blocks = cmd.blocks; // 局部坐标 = 世界坐标（刚体建在原点 0）
-    for (const auto& b : cmd.blocks) colliders_.erase(b.pos);
+    for (const auto& b : cmd.blocks) state_.colliders().erase(b.pos);
     // 碰撞箱不再手算：Jolt 接入时由 MutableCompoundShape 的 AddShape 生成。
-    bodies_.push_back(body);
-    bodyCount_.store(static_cast<long long>(bodies_.size()),
+    state_.bodies().push_back(body);
+    bodyCount_.store(static_cast<long long>(state_.bodies().size()),
                      std::memory_order_relaxed);
     // 回执：打包完成（回执必须逐条送达，不参与快照合并）。
     // 带局部坐标方块列表 + 刚体位置：业务不必自留副本，渲染端直接拿它建网格。
@@ -187,21 +187,21 @@ void PhysicsWorld::onUnpackContraption(const engine::shared::PhysicsCommand& cmd
     // 回执携带世界坐标方块列表：业务据此重建 blocks_（解包闭环，架构 2.7）。
     std::vector<engine::shared::Block> worldBlocks;
     const auto it = std::find_if(
-        bodies_.begin(), bodies_.end(),
+        state_.bodies().begin(), state_.bodies().end(),
         [&](const RigidBody& b) { return b.id == cmd.contraptionId; });
-    if (it != bodies_.end()) {
+    if (it != state_.bodies().end()) {
         worldBlocks.reserve(it->blocks.size());
         for (const auto& b : it->blocks) {
             const engine::shared::BlockPos world{
                 static_cast<int>(std::llround(it->x + b.pos.x)),
                 static_cast<int>(std::llround(it->y + b.pos.y)),
                 static_cast<int>(std::llround(it->z + b.pos.z))};
-            colliders_[world] = b.type;
+            state_.colliders()[world] = b.type;
             worldBlocks.push_back(engine::shared::Block{b.type, world});
         }
-        bodies_.erase(it);
+        state_.bodies().erase(it);
     }
-    bodyCount_.store(static_cast<long long>(bodies_.size()),
+    bodyCount_.store(static_cast<long long>(state_.bodies().size()),
                      std::memory_order_relaxed);
     engine::shared::PhysicsResult r;
     r.type = engine::shared::PhysicsResult::Type::ContraptionUnpacked;
@@ -212,10 +212,10 @@ void PhysicsWorld::onUnpackContraption(const engine::shared::PhysicsCommand& cmd
 
 void PhysicsWorld::snapshotPlayerBody(double wallDt) {
     // ---- 刚体积分：已删除 ----
-    for (auto& b : bodies_) {
+    for (auto& b : state_.bodies()) {
         if (b.motion != MotionType::Kinematic) continue;
         // 插值快照：先记下本 tick 起点的位置（= 上一 tick 的终点）。
-        const bool   isPlayerBody = (b.id == playerBodyId_ && playerState_ != nullptr);
+        const bool   isPlayerBody = (b.id == state_.playerBodyId() && playerState_ != nullptr);
         const double tickStartX = b.x;
         const double tickStartY = b.y;
         const double tickStartZ = b.z;
@@ -267,12 +267,12 @@ void PhysicsWorld::pushResultsToBusiness(
     // ② 刚体位置快照（合并语义，数据层 ② 修正）：有刚体就发最新位置，
     // 但只发"新模拟时刻"——物理循环每墙钟帧调本函数，模拟 tick 却只有 25Hz，
     // 同一模拟时刻重复发会淹没业务双槽（插值窗口退化，实测 1647 条回执大量同戳）。
-    // 每个刚体各发一条（生物进容器后不能再只发 bodies_.front()）。
-    if (!bodies_.empty()) {
+    // 每个刚体各发一条（生物进容器后不能再只发第一个刚体）。
+    if (!state_.bodies().empty()) {
         const double st = simTime_.load(std::memory_order_relaxed);
         if (st != lastPosSentSimT_) { // 模拟时刻已推进 → 每个刚体各发一条新位置快照
             lastPosSentSimT_ = st;
-            for (const RigidBody& b : bodies_) {
+            for (const RigidBody& b : state_.bodies()) {
                 engine::shared::PhysicsResult pos;
                 pos.type = engine::shared::PhysicsResult::Type::RigidBodyPos;
                 pos.contraptionId = b.id;
@@ -290,7 +290,7 @@ void PhysicsWorld::pushResultsToBusiness(
     {
         engine::shared::PhysicsResult set;
         set.type = engine::shared::PhysicsResult::Type::BlockSetSize;
-        set.blockSetSize = static_cast<long long>(colliders_.size());
+        set.blockSetSize = static_cast<long long>(state_.colliders().size());
         set.simTime = simTime_.load(std::memory_order_relaxed);
         q.push(set); // 满则丢：快照合并语义，旧值丢弃可接受
     }
@@ -323,8 +323,8 @@ long long PhysicsWorld::bodyCount() const {
     return bodyCount_.load(std::memory_order_relaxed);
 }
 long long PhysicsWorld::colliderCount() const {
-    // main 在物理线程停止后读取，colliders_ 无并发写。
-    return static_cast<long long>(colliders_.size());
+    // main 在物理线程停止后读取，碰撞体集合此时无并发写。
+    return static_cast<long long>(state_.colliders().size());
 }
 long long PhysicsWorld::collisionCount() const {
     return collisionCount_.load(std::memory_order_relaxed);
@@ -356,12 +356,12 @@ void PhysicsWorld::maybeLog() {
            << " 残差acc=" << accumulator_
            << " 处理指令=" << processedCommandCount()
            << " 刚体=" << bodyCount()
-           << " 碰撞体=" << colliders_.size()
+           << " 碰撞体=" << state_.colliders().size()
            << " 碰撞=" << collisionCount()
            << " 方块=(" << blockX() << "," << blockY() << "," << blockZ() << ")"
            << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Physics);
-        // 各物理体位置（物理线程内遍历 bodies_ 安全）：动态体与生物分开标名
-        for (const auto& b : bodies_) {
+        // 各物理体位置（物理线程内遍历刚体表安全）：动态体与生物分开标名
+        for (const auto& b : state_.bodies()) {
             if (b.motion == MotionType::Dynamic) {
                 os << " 刚体" << b.id << "=(" << b.x << "," << b.y << "," << b.z << ")";
             } else if (b.motion == MotionType::Kinematic) {
