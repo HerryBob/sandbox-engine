@@ -61,6 +61,10 @@ std::vector<ModLoader::LoadedMod> ModLoader::s_mods_;
 // ============================================================================
 namespace {
 
+// 按来源清掉模组注册的内容（定义在文件后部的同名匿名命名空间里）。
+// 这里先声明：loadOne 的 onLoad 失败回滚要用它（B7 修复后回滚范围=噪声+实体类型）。
+void cleanupOwnedContent(const std::string& owner);
+
 // 一个候选模组：目录内唯一的 DLL + 目录名 + 已校验的清单
 struct Candidate {
     fs::path    dll;          // 目录内唯一的 DLL
@@ -264,13 +268,11 @@ bool ModLoader::loadOne(fs::path dllPath,
     // 阶段④：初始化。模组在这里校验 api->version 并注册内容。
     if (vtbl->onLoad(self, &g_api) != 0) {
         ENGINE_LOG_ERROR("Mod", "onLoad 返回 false，放弃该模组：" + shown);
-        // 失败回滚：把这个模组已经注册进去的内容按来源清掉，避免残留
-        // （噪声表里存的是它的函数指针，随后的 FreeLibrary 会让它们悬垂）。
-        const std::size_t rolledBack = engine::worldgen::NoiseRegistry::eraseByOwner(
-            g_host.currentMod.c_str());
-        if (rolledBack > 0) {
-            ENGINE_LOG_INFO("Mod", "回滚噪声注册 " + std::to_string(rolledBack) + " 个（" + shown + "）");
-        }
+        // B7：回滚必须覆盖**所有**能按来源清的内容（噪声 + 实体类型）。
+        // 原来只清噪声 → 实体类型残留，而它的 onAnimate 指向随后被 FreeLibrary 的
+        // DLL 代码段（悬垂函数指针）。方块按策略保留（id 可能已进 chunk 数据），
+        // 与正常卸载路径一致。
+        cleanupOwnedContent(g_host.currentMod);
         vtbl->destroy(self);
         g_host.currentMod.clear();
         failedIds.insert(modId);
@@ -356,19 +358,21 @@ void ModLoader::unloadAll() {
     logRegistryState();
 }
 
-// 卸载单个模组：① onUnload + 销毁实例 ② 按来源清注册 ③ 卸库 ④ 日志。
-// 顺序照搬拆分前（destroy 在 eraseByOwner 之前）—— 本次只搬位置不改顺序，
-// B1「应先断注册再销毁」修正留给 B 阶段。
+// 卸载单个模组：① onUnload ② 按来源清注册 ③ 销毁实例 ④ 卸库 ⑤ 日志。
+// B1：② 必须在 ③ 之前 —— 反过来（先 destroy 再断注册）会留一个窗口：
+// 注册表里 ModEntityDef::animUser / 噪声 provider 仍指向刚被销毁的对象，可被调到。
 void ModLoader::unloadOne(LoadedMod& m) {
-    if (m.self != nullptr) {
-        if (m.vtbl != nullptr) {
-            m.vtbl->onUnload(m.self);
-            m.vtbl->destroy(m.self);   // 谁创建谁销毁：delete 在 DLL 内
-        }
-        m.self = nullptr;
+    if (m.self != nullptr && m.vtbl != nullptr) {
+        m.vtbl->onUnload(m.self);
     }
 
+    // 先断注册（此时实例还活着，注册表里的指针尚未悬垂）
     cleanupOwnedContent(m.name);
+
+    if (m.self != nullptr && m.vtbl != nullptr) {
+        m.vtbl->destroy(m.self);   // 谁创建谁销毁：delete 在 DLL 内
+    }
+    m.self = nullptr;
 
     if (m.handle != nullptr) {
         ::FreeLibrary(static_cast<HMODULE>(m.handle));
