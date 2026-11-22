@@ -40,15 +40,15 @@ bool InputSampler::consumeModeToggles() {
     // 模式切换请求（F4 按下时由键盘回调置位，本线程取走）：自由相机 ↔ 玩家跟随。
     if (clickOut_ != nullptr &&
         clickOut_->togglePlayerMode.exchange(false, std::memory_order_relaxed)) {
-        playerMode_ = !playerMode_;
+        state_.playerMode_ = !state_.playerMode_;
         modeChanged = true;
     }
 
     // 第一/第三人称切换（F5）：只在玩家模式下有意义，自由相机时忽略请求。
     if (clickOut_ != nullptr &&
         clickOut_->toggleThirdPerson.exchange(false, std::memory_order_relaxed)) {
-        if (playerMode_) {
-            thirdPerson_ = !thirdPerson_;
+        if (state_.playerMode_) {
+            state_.thirdPerson_ = !state_.thirdPerson_;
             modeChanged = true;
         }
     }
@@ -57,8 +57,8 @@ bool InputSampler::consumeModeToggles() {
 
 void InputSampler::updateLook() {
     // 消费视角增量（回调累加 / 本线程取走），clamp 俯仰防翻跟头。
-    yaw_   += yawDelta_.exchange(0.0, std::memory_order_relaxed);
-    pitch_ += pitchDelta_.exchange(0.0, std::memory_order_relaxed);
+    yaw_   += state_.yawDelta_.exchange(0.0, std::memory_order_relaxed);
+    pitch_ += state_.pitchDelta_.exchange(0.0, std::memory_order_relaxed);
     pitch_ = std::clamp(pitch_, -1.45, 1.45); // ±83°
 }
 
@@ -71,7 +71,7 @@ InputSampler::LookBasis InputSampler::lookBasis() const {
 }
 
 bool InputSampler::spaceDown() const {
-    return keySpace_.load(std::memory_order_relaxed);
+    return state_.keySpace_.load(std::memory_order_relaxed);
 }
 
 void InputSampler::updatePlayerCamera(const LookBasis& b) {
@@ -82,7 +82,7 @@ void InputSampler::updatePlayerCamera(const LookBasis& b) {
         // 采进相机位置，渲染线程再怎么高频采样也只是在采同一段阶梯。
         double px = 0.0, py = 0.0, pz = 0.0;
         playerOut_->readInterpolated(px, py, pz);
-        if (thirdPerson_) {
+        if (state_.thirdPerson_) {
             // 第三人称：相机 = 瞄准点沿视线反方向后退固定距离。
             // 因为相机位置是从瞄准点沿 lookDir 反向推出来的，视线正好穿过瞄准点，
             // 玩家始终在画面中心，view 矩阵不用改（yaw/pitch 语义保持不变）。
@@ -94,11 +94,11 @@ void InputSampler::updatePlayerCamera(const LookBasis& b) {
         } else {
             // 第一人称：相机就在眼位。自身模型要由渲染侧隐藏，否则在头/躯干内部。
             camX_ = px;
-            camY_ = py + eyeHeight_;
+            camY_ = py + state_.eyeHeight_;
             camZ_ = pz;
         }
     }
-    if (keyR_.load(std::memory_order_relaxed)) { // R：只重置朝向（位置归玩家体）
+    if (state_.keyR_.load(std::memory_order_relaxed)) { // R：只重置朝向（位置归玩家体）
         yaw_ = spawnYaw_; pitch_ = spawnPitch_;
     }
 }
@@ -109,16 +109,16 @@ void InputSampler::writeControlIntent(const LookBasis& b, bool space) {
 
     // WASD 先合成方向再归一化：斜向走不会比直走快。
     double dx = 0.0, dz = 0.0;
-    if (keyW_.load(std::memory_order_relaxed)) { dx += b.fwdX; dz += b.fwdZ; }
-    if (keyS_.load(std::memory_order_relaxed)) { dx -= b.fwdX; dz -= b.fwdZ; }
-    if (keyD_.load(std::memory_order_relaxed)) { dx += b.rgtX; dz += b.rgtZ; }
-    if (keyA_.load(std::memory_order_relaxed)) { dx -= b.rgtX; dz -= b.rgtZ; }
+    if (state_.keyW_.load(std::memory_order_relaxed)) { dx += b.fwdX; dz += b.fwdZ; }
+    if (state_.keyS_.load(std::memory_order_relaxed)) { dx -= b.fwdX; dz -= b.fwdZ; }
+    if (state_.keyD_.load(std::memory_order_relaxed)) { dx += b.rgtX; dz += b.rgtZ; }
+    if (state_.keyA_.load(std::memory_order_relaxed)) { dx -= b.rgtX; dz -= b.rgtZ; }
     const double len = std::sqrt(dx * dx + dz * dz);
     if (len > 1e-9) { dx /= len; dz /= len; }
-    controlOut_->vx.store(dx * walkSpeed_, std::memory_order_relaxed);
-    controlOut_->vz.store(dz * walkSpeed_, std::memory_order_relaxed);
+    controlOut_->vx.store(dx * state_.walkSpeed_, std::memory_order_relaxed);
+    controlOut_->vz.store(dz * state_.walkSpeed_, std::memory_order_relaxed);
     // 空格取按下边沿：按住不连跳。
-    if (space && !spaceHeldPrev_) {
+    if (space && !state_.spaceHeldPrev_) {
         controlOut_->jumpRequested.store(true, std::memory_order_relaxed);
     }
 }
@@ -135,21 +135,21 @@ void InputSampler::updateFreeCamera(const LookBasis& b, bool space) {
         controlOut_->vz.store(0.0, std::memory_order_relaxed);
     }
 
-    if (keyW_.load(std::memory_order_relaxed)) {
+    if (state_.keyW_.load(std::memory_order_relaxed)) {
         camX_ += b.fwdX * speed; camZ_ += b.fwdZ * speed;
     }
-    if (keyS_.load(std::memory_order_relaxed)) {
+    if (state_.keyS_.load(std::memory_order_relaxed)) {
         camX_ -= b.fwdX * speed; camZ_ -= b.fwdZ * speed;
     }
-    if (keyD_.load(std::memory_order_relaxed)) {
+    if (state_.keyD_.load(std::memory_order_relaxed)) {
         camX_ += b.rgtX * speed; camZ_ += b.rgtZ * speed;
     }
-    if (keyA_.load(std::memory_order_relaxed)) {
+    if (state_.keyA_.load(std::memory_order_relaxed)) {
         camX_ -= b.rgtX * speed; camZ_ -= b.rgtZ * speed;
     }
     if (space) camY_ += speed;
-    if (keyShift_.load(std::memory_order_relaxed)) camY_ -= speed;
-    if (keyR_.load(std::memory_order_relaxed)) { // 重置视角（回出生点：生成地形的地表上方）
+    if (state_.keyShift_.load(std::memory_order_relaxed)) camY_ -= speed;
+    if (state_.keyR_.load(std::memory_order_relaxed)) { // 重置视角（回出生点：生成地形的地表上方）
         camX_ = spawnX_; camY_ = spawnY_; camZ_ = spawnZ_;
         yaw_ = spawnYaw_; pitch_ = spawnPitch_;
     }
@@ -158,9 +158,9 @@ void InputSampler::updateFreeCamera(const LookBasis& b, bool space) {
 void InputSampler::logModeChange(bool modeChanged) {
     if (!modeChanged) return;
     std::ostringstream os;
-    if (playerMode_) {
-        os << "相机模式：玩家跟随 " << (thirdPerson_ ? "第三人称" : "第一人称")
-           << " 眼高=" << eyeHeight_ << " 距离=" << (thirdPerson_ ? kThirdPersonDist_ : 0.0)
+    if (state_.playerMode_) {
+        os << "相机模式：玩家跟随 " << (state_.thirdPerson_ ? "第三人称" : "第一人称")
+           << " 眼高=" << state_.eyeHeight_ << " 距离=" << (state_.thirdPerson_ ? kThirdPersonDist_ : 0.0)
            << " 相机=(" << camX_ << "," << camY_ << "," << camZ_ << ")";
     } else {
         os << "相机模式：自由相机 相机=(" << camX_ << "," << camY_ << "," << camZ_ << ")";
@@ -175,7 +175,7 @@ void InputSampler::tick() {
     const LookBasis b = lookBasis();                 // ③ 朝向基向量
     const bool space = spaceDown();
 
-    if (playerMode_) {
+    if (state_.playerMode_) {
         updatePlayerCamera(b);                       // ④a 相机跟随玩家体
 
         // 朝向同步给玩家体：物理线程不写这个字段（朝向由鼠标驱动，不是物理量），
@@ -190,7 +190,7 @@ void InputSampler::tick() {
     }
 
     writeCameraState();
-    spaceHeldPrev_ = space;
+    state_.spaceHeldPrev_ = space;
     logModeChange(modeChanged);
 }
 
@@ -203,10 +203,10 @@ void InputSampler::setSpawn(double x, double y, double z, double yawRad, double 
 }
 
 void InputSampler::setBodyMetrics(double eyeHeight, double walkSpeed) {
-    if (eyeHeight > 0.0) eyeHeight_ = eyeHeight;
-    if (walkSpeed > 0.0) walkSpeed_ = walkSpeed;
-    ENGINE_LOG_INFO("Input", "体型数值注入：眼高=" + std::to_string(eyeHeight_)
-        + " 步速=" + std::to_string(walkSpeed_));
+    if (eyeHeight > 0.0) state_.eyeHeight_ = eyeHeight;
+    if (walkSpeed > 0.0) state_.walkSpeed_ = walkSpeed;
+    ENGINE_LOG_INFO("Input", "体型数值注入：眼高=" + std::to_string(state_.eyeHeight_)
+        + " 步速=" + std::to_string(state_.walkSpeed_));
 }
 
 void InputSampler::writeCameraState() {
@@ -217,7 +217,7 @@ void InputSampler::writeCameraState() {
     cameraOut_->yaw.store(yaw_, std::memory_order_relaxed);
     cameraOut_->pitch.store(pitch_, std::memory_order_relaxed);
     // 渲染线程据此决定要不要画自身模型（第一人称必须隐藏）。
-    const int mode = !playerMode_ ? 0 : (thirdPerson_ ? 2 : 1);
+    const int mode = !state_.playerMode_ ? 0 : (state_.thirdPerson_ ? 2 : 1);
     cameraOut_->viewMode.store(mode, std::memory_order_relaxed);
 }
 
@@ -262,13 +262,13 @@ void InputSampler::keyboardCb(GLFWwindow* w, int key, int scancode, int action, 
     if (action == GLFW_REPEAT) return; // 其它键：重复事件不改变状态
     const bool pressed = (action == GLFW_PRESS);
     switch (key) {
-    case GLFW_KEY_W:        self->keyW_.store(pressed, std::memory_order_relaxed); break;
-    case GLFW_KEY_S:        self->keyS_.store(pressed, std::memory_order_relaxed); break;
-    case GLFW_KEY_A:        self->keyA_.store(pressed, std::memory_order_relaxed); break;
-    case GLFW_KEY_D:        self->keyD_.store(pressed, std::memory_order_relaxed); break;
-    case GLFW_KEY_SPACE:    self->keySpace_.store(pressed, std::memory_order_relaxed); break;
-    case GLFW_KEY_LEFT_SHIFT: self->keyShift_.store(pressed, std::memory_order_relaxed); break;
-    case GLFW_KEY_R:        self->keyR_.store(pressed, std::memory_order_relaxed); break;
+    case GLFW_KEY_W:        self->state_.keyW_.store(pressed, std::memory_order_relaxed); break;
+    case GLFW_KEY_S:        self->state_.keyS_.store(pressed, std::memory_order_relaxed); break;
+    case GLFW_KEY_A:        self->state_.keyA_.store(pressed, std::memory_order_relaxed); break;
+    case GLFW_KEY_D:        self->state_.keyD_.store(pressed, std::memory_order_relaxed); break;
+    case GLFW_KEY_SPACE:    self->state_.keySpace_.store(pressed, std::memory_order_relaxed); break;
+    case GLFW_KEY_LEFT_SHIFT: self->state_.keyShift_.store(pressed, std::memory_order_relaxed); break;
+    case GLFW_KEY_R:        self->state_.keyR_.store(pressed, std::memory_order_relaxed); break;
     default: break;
     }
 }
@@ -299,8 +299,8 @@ void InputSampler::cursorPosCb(GLFWwindow* w, double x, double y) {
     // 只重设基准、不转视角，否则画面会突然甩到别处。
     constexpr double kJumpPx = 200.0;
     if (std::abs(dx) > kJumpPx || std::abs(dy) > kJumpPx) return;
-    self->yawDelta_.fetch_add(dx * kSens, std::memory_order_relaxed);
-    self->pitchDelta_.fetch_add(-dy * kSens, std::memory_order_relaxed);
+    self->state_.yawDelta_.fetch_add(dx * kSens, std::memory_order_relaxed);
+    self->state_.pitchDelta_.fetch_add(-dy * kSens, std::memory_order_relaxed);
 }
 
 } // namespace engine::input

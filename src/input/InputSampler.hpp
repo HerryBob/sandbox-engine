@@ -1,4 +1,5 @@
 #pragma once
+#include "input/InputState.hpp"
 #include "shared/state/CameraState.hpp"
 #include "shared/state/PlayerBodyState.hpp"
 #include "shared/state/PlayerControlState.hpp"
@@ -75,35 +76,13 @@ private:
     engine::shared::PlayerControlState* controlOut_ = nullptr; // 玩家操控意图槽（可空）
     GLFWwindow* window_ = nullptr;
 
-    // 相机模式：false = 自由相机（WASD 飞行），true = 玩家模式（位置跟随玩家体）。
-    // 输入线程独占（sample 里翻转，写 cameraState 时按它分支）。
-    bool playerMode_ = false;
+    // 数据层（InputState）：键盘原子 + 待消费视角增量 + 模式位 + 玩家体尺寸/速度。
+    // GLFW 回调只写 state_，tick 只读 state_ —— 回调与逻辑之间不再直接耦合。
+    InputState state_;
 
-    // 玩家模式下的视角：false = 第一人称（相机在眼位），true = 第三人称（沿视线后退）。
-    // 只在 playerMode_ 为 true 时有意义；F5 翻转。
-    bool thirdPerson_ = false;
-
-    // 玩家眼高（脚底到眼睛）与步行速度（格/秒）。
-    // 默认值是 MC 口径（1.62 / 4.3），装配期由 setBodyMetrics 按实体类型定义覆盖。
-    // 用成员而非 constexpr：同一套输入采样要能服务不同体型的实体。
-    double eyeHeight_ = 1.62;
-    double walkSpeed_ = 4.3;
-
-    // 第三人称相机距离（格）：相机沿视线反方向后退这么多，视线仍穿过瞄准点。
+    // 第三人称相机的后退距离（格）与瞄准点抬高（格）—— 属**逻辑层调参**，不是世界状态。
     static constexpr double kThirdPersonDist_ = 4.0;
-
-    // 第三人称瞄准点高度（相对脚底）：比眼位略低，让角色落在画面偏下、前方露出更多。
     static constexpr double kThirdPersonAim_ = 1.35;
-
-    // 空格的上一帧按住状态：玩家模式下空格改成"跳跃"（需要按下边沿），
-    // 自由相机模式下仍是"按住上升"，所以两种语义各判各的。
-    bool spaceHeldPrev_ = false;
-
-    // ---- 回调写 / 输入线程读（原子）----
-    std::atomic<bool> keyW_{false}, keyS_{false}, keyA_{false}, keyD_{false};
-    std::atomic<bool> keySpace_{false}, keyShift_{false}, keyR_{false};
-    std::atomic<double> yawDelta_{0.0};    // 待消费视角增量（cursorPosCb 累加）
-    std::atomic<double> pitchDelta_{0.0};
     std::atomic<double> lastCursorX_{0.0}; // 光标上次位置（增量计算基准）
     std::atomic<double> lastCursorY_{0.0};
 
