@@ -37,48 +37,79 @@ bool parsePhase(const std::string& s, ModPhase& out) {
     return false;
 }
 
-} // namespace
+// ============================================================================
+// 清单的五段解析（规则1：原 ManifestReader::load 的内联体按职责拆出）
+// 全部返回 false = 该段非法，调用方直接放弃（不产出半成品）。
+// ============================================================================
 
-bool ManifestReader::load(const std::string& path, ModManifest& out) {
-    // ---- 1. 读文件 ----
+// ① 读整个文件。text 的生命周期必须覆盖 doc 的使用期（RapidJSON 引用源缓冲）。
+bool readFileText(const std::string& path, std::string& text) {
     std::ifstream in(path);
     if (!in) return false;
-
     std::stringstream ss;
     ss << in.rdbuf();
-    const std::string text = ss.str();   // 生命周期须覆盖 doc 使用期（RapidJSON 引用源缓冲）
+    text = ss.str();
+    return true;
+}
 
-    // ---- 2. 解析 JSON ----
-    rapidjson::Document doc;
+// ② 解析 JSON 并要求顶层是对象；doc 由调用方持有（与 text 同生命周期）
+bool parseJsonObject(const std::string& text, rapidjson::Document& doc) {
     if (doc.Parse(text.c_str()).HasParseError()) return false;
-    if (!doc.IsObject()) return false;
+    return doc.IsObject();
+}
 
-    // ---- 3. id（必填）----
+// ③ id（必填）：存在、是字符串、符合 id 规则
+bool readId(const rapidjson::Value& doc, std::string& out) {
     if (!doc.HasMember("id")) return false;
     if (!doc["id"].IsString()) return false;
     std::string id = doc["id"].GetString();
     if (!isValidId(id)) return false;
+    out = std::move(id);
+    return true;
+}
 
-    // ---- 4. phase（可选，缺省 normal）----
+// ④ phase（可选，缺省 normal）
+bool readPhase(const rapidjson::Value& doc, ModPhase& out) {
+    if (!doc.HasMember("phase")) return true;   // 缺省值由调用方给
+    if (!doc["phase"].IsString()) return false;
+    return parsePhase(doc["phase"].GetString(), out);
+}
+
+// ⑤ dependencies（可选，缺省空）：必须是数组，每项都是合法 id
+bool readDependencies(const rapidjson::Value& doc, std::vector<std::string>& out) {
+    if (!doc.HasMember("dependencies")) return true;
+    if (!doc["dependencies"].IsArray()) return false;
+
+    const auto& arr = doc["dependencies"];
+    for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
+        if (!arr[i].IsString()) return false;
+        if (!isValidId(arr[i].GetString())) return false;
+        out.push_back(arr[i].GetString());
+    }
+    return true;
+}
+
+} // namespace
+
+bool ManifestReader::load(const std::string& path, ModManifest& out) {
+    // ① 读文件
+    std::string text;
+    if (!readFileText(path, text)) return false;
+
+    // ② JSON（doc 与 text 同作用域：RapidJSON 引用 text 的缓冲）
+    rapidjson::Document doc;
+    if (!parseJsonObject(text, doc)) return false;
+
+    // ③④⑤ 逐段校验（任何一段失败都不写 out）
+    std::string id;
     ModPhase phase = ModPhase::Normal;
-    if (doc.HasMember("phase")) {
-        if (!doc["phase"].IsString()) return false;
-        if (!parsePhase(doc["phase"].GetString(), phase)) return false;
-    }
-
-    // ---- 5. dependencies（可选，缺省空）----
     std::vector<std::string> deps;
-    if (doc.HasMember("dependencies")) {
-        if (!doc["dependencies"].IsArray()) return false;
-        const auto& arr = doc["dependencies"];
-        for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
-            if (!arr[i].IsString()) return false;
-            if (!isValidId(arr[i].GetString())) return false;
-            deps.push_back(arr[i].GetString());
-        }
-    }
 
-    // ---- 6. 全部通过才写 out ----
+    if (!readId(doc, id)) return false;
+    if (!readPhase(doc, phase)) return false;
+    if (!readDependencies(doc, deps)) return false;
+
+    // ⑥ 全部通过才写 out（不产出半成品）
     out.id = std::move(id);
     out.phase = phase;
     out.dependencies = std::move(deps);
