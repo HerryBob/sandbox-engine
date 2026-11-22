@@ -13,7 +13,8 @@ enum class ModPhase : std::int32_t {
 };
 
 // 模组清单（mod.json）：加载前读入，用于排序与拒绝。
-// 排序、拒绝、依赖解析以清单为准；显示名以 IMod::name() 为准，两者不一致记警告但不拒绝。
+// 排序、拒绝、依赖解析以清单为准；显示名以 ModVtbl::name(self) 为准，
+// 两者不一致记警告但不拒绝。
 struct ModManifest {
     std::string id;                          // 唯一键（被其它模组的 dependencies 引用）
     ModPhase    phase = ModPhase::Normal;    // 加载批次，缺省 normal
