@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <unordered_set>
+#include <vector>
 
 namespace engine::business {
 class World;   // 前向声明：写入只经 World::applyGeneratedChunk，不展开其实现
@@ -74,6 +75,20 @@ public:
 
 private:
     void workerLoop();
+
+    // ---- tickUpdate 的四段（规则1 拆分）----
+    // ① 淘汰：走出 radius_ + kEvictMargin 的列进 pendingEvict_，并从 known_ 摘掉
+    void collectEvictions(int cx, int cz);
+    // ② 收集窗口内尚未请求的列（known_ 挡住已请求的）
+    std::vector<ColPos> collectWindowCandidates(int cx, int cz) const;
+    // ④ 入队（队列满即停；只记成功的，失败的不能记，否则永不重试）
+    void enqueueRequests(const std::vector<ColPos>& candidates);
+
+    // ---- drainResults 的两段（规则1 拆分）----
+    // ① 结算上一 tick 积攒的淘汰列
+    void applyPendingEvictions(engine::business::World& world, DrainOutcome& out);
+    // ② 应用生成结果（已被淘汰的列直接丢弃），返回写入列数
+    std::size_t applyGeneratedResults(engine::business::World& world, std::size_t maxApply);
 
     const ColumnGenerator& generator_;
     int radius_;
