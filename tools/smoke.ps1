@@ -76,6 +76,20 @@ if (-not (Test-Path $exe)) {
     exit 1
 }
 
+# -NoBuild 时必须确认可执行文件不比源码旧：否则跑的是旧 exe，指标"PASS"毫无意义。
+if ($NoBuild) {
+    $srcDirs = @((Join-Path $repo 'src'), (Join-Path $repo 'modapi'),
+                 (Join-Path $repo 'mods_src'), (Join-Path $repo 'shaders'))
+    $srcDirs = $srcDirs | Where-Object { Test-Path $_ }
+    $newest = Get-ChildItem $srcDirs -Recurse -File -Include *.cpp,*.hpp,*.h,*.vert,*.frag |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($newest -and (Get-Item $exe).LastWriteTime -lt $newest.LastWriteTime) {
+        Write-Host ("[smoke] FAIL：exe 比源码旧（最新源：{0}，{1}）——先构建，或去掉 -NoBuild" -f `
+                    $newest.Name, $newest.LastWriteTime) -ForegroundColor Red
+        exit 1
+    }
+}
+
 # ---- 2. 运行 ----
 $log = Join-Path $env:TEMP ('smoke_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
 $err = $log + '.err'
