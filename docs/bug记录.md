@@ -22,10 +22,10 @@
 
 | # | 类型 | 位置 | 现象 | 影响 | 严重度 | 核实 |
 |---|---|---|---|---|---|---|
-| B9 | 重复启动 | `ThreadLoop.hpp:25` `start` | 未拦 joinable，直接 `thread_ = std::thread(...)` | **terminate** | 🔴 | ✅ |
-| B10 | 空回调 | `ThreadLoop.hpp:27` | `body` 为空仍启动 → `body()` 抛 `bad_function_call` | **terminate** | 🔴 | ✅ |
-| B11 | noexcept 误用 | `ThreadLoop.hpp:31-34` `stop` | `noexcept` 内 `join()`（可抛） | self-join/失败 → **terminate** | 🔴 | ✅ |
-| B12 | 异常未捕获 | `ThreadLoop.hpp:25-28` | 线程入口无 try/catch | body 抛异常 → **terminate** | 🔴 | ✅ |
+| B9 | 重复启动 | `ThreadLoop.hpp:25` `start` | 未拦 joinable，直接 `thread_ = std::thread(...)` | **terminate** | 🔴 | ✅已修 |
+| B10 | 空回调 | `ThreadLoop.hpp:27` | `body` 为空仍启动 → `body()` 抛 `bad_function_call` | **terminate** | 🔴 | ✅已修 |
+| B11 | noexcept 误用 | `ThreadLoop.hpp:31-34` `stop` | `noexcept` 内 `join()`（可抛） | self-join/失败 → **terminate** | 🔴 | ✅已修 |
+| B12 | 异常未捕获 | `ThreadLoop.hpp:25-28` | 线程入口无 try/catch | body 抛异常 → **terminate** | 🔴 | ✅已修 |
 | B13 | 状态残留 | `ThreadLoop.hpp:22` | 先置 `running_=true` 再构造 `thread_`；构造抛则状态不一致 | 之后 `stop`/`shouldStop` 行为异常 | 🟡 | ✅ |
 | B14 | 并发无约定 | `ThreadLoop.hpp` | `start/stop` 未注明非线程安全 | 并发调用 UB | 🟡 | ✅ |
 | B15 | self-join | `ThreadLoop.hpp` | body 内调 `stop()` | 见 B11 | 🟡 | ✅ |
