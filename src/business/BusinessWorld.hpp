@@ -82,7 +82,7 @@ public:
 
     // 玩家输入消费：逐条弹出点击事件 → DDA 射线检测 → 命中则放置/破坏。
     // clicks 不是 const：pop 会消费事件（队列是"事件流"，读即取走）。
-    void processPlayerInput(const engine::shared::CameraState& cam,
+    void handlePlayerInput(const engine::shared::CameraState& cam,
                             engine::shared::PlayerInput& clicks);
 
     // 请求下一次同步下发全量方块集（区块卸载等"批量增删"之后调用）。

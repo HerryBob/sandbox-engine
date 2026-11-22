@@ -39,15 +39,15 @@ void BusinessWorld::tick(double scale) {
 bool BusinessWorld::syncAll() {
     // 请求全量同步：委托桥排队一条 SyncBlockSet（初始世界/世界重建时用）。
     // 返回 false 表示已有待发指令（原型：一次只排一条，防止覆盖）。
-    return physicsBridge_.queueSync();
+    return physicsBridge_.pushSyncCommand();
 }
 
 void BusinessWorld::syncWorldToPhysics() {
     // 区块卸载等批量变更后需要重发全量：指令槽位是单槽位状态机，
-    // queueSync 在"已有待发指令"时返回 false —— 保留标志，下 tick 继续重试，
+    // pushSyncCommand 在"已有待发指令"时返回 false —— 保留标志，下 tick 继续重试，
     // 否则物理侧会一直留着已卸载区域的幽灵碰撞体。
     if (resyncPending_) {
-        if (physicsBridge_.queueSync()) resyncPending_ = false;
+        if (physicsBridge_.pushSyncCommand()) resyncPending_ = false;
     }
     // tick 边界：委托 PhysicsBridge 发指令（全量同步需现场生成世界快照）。
     physicsBridge_.syncWorldToPhysics(world_.renderSnapshot());
@@ -117,7 +117,7 @@ bool BusinessWorld::placeBlock(const engine::shared::BlockPos& p,
         return false;
     }
     // 裁决通过 → 委托桥排队 PlaceBlock 指令（下次 syncWorldToPhysics 发出）。
-    physicsBridge_.queuePlace(p, static_cast<int>(type));
+    physicsBridge_.pushPlaceCommand(p, static_cast<int>(type));
     placedBlockCount_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -128,14 +128,14 @@ bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p) {
         return false;
     }
     // 裁决通过 → 委托桥排队 RemoveBlock 指令（下次 syncWorldToPhysics 发出）。
-    physicsBridge_.queueRemove(p);
+    physicsBridge_.pushRemoveCommand(p);
     removedBlockCount_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
 //// 玩家输入：逐条消费点击队列 → DDA 射线检测 → 放置/破坏
 // 相机来自 CameraState（输入线程写），点击来自 PlayerInput 的 SPSC 队列（鼠标回调 push）。
-void BusinessWorld::processPlayerInput(const engine::shared::CameraState& cam,
+void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
                                        engine::shared::PlayerInput& clicks){
     // 相机槽（输入线程写）在本次 tick 内只读一次：同一 tick 的多次点击共享同一视角。
     const double cx = cam.camX.load(std::memory_order_relaxed);

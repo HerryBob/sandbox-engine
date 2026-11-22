@@ -26,9 +26,9 @@ public:
     // ---- 业务侧（业务线程调用）----
     // 排队待发指令（裁决通过后调用；业务线程私有状态，无需原子）：
     // 全量同步（已有待发指令则返回 false，防覆盖）。
-    bool queueSync();
-    void queuePlace(const engine::shared::BlockPos& p, int type);
-    void queueRemove(const engine::shared::BlockPos& p);
+    bool pushSyncCommand();
+    void pushPlaceCommand(const engine::shared::BlockPos& p, int type);
+    void pushRemoveCommand(const engine::shared::BlockPos& p);
 
     // 业务 Tick 边界：组装一条指令发出（优先级 全量同步→放置→破坏）。
     // fullSnapshot = 业务世界全量方块（SyncBlockSet 用；业务线程现场生成）。

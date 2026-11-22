@@ -398,7 +398,7 @@ static int run(const std::string& presetName) {
         auto next = std::chrono::steady_clock::now();
         while (!businessLoop.shouldStop()) {
             businessWorld.tick(tm.effectiveScale(core::Domain::Business));
-            businessWorld.processPlayerInput(cameraState, playerInput);  // 玩家点击 → DDA → 放置/破坏
+            businessWorld.handlePlayerInput(cameraState, playerInput);  // 玩家点击 → DDA → 放置/破坏
             // 1b 流式：请求窗口内未加载的列 + 应用后台已算好的结果。
             // 必须在 flushChangesToRender 之前——新到货 chunk 的脏标记要进本 tick 的变更事件，
             // 否则渲染端要等下一个 tick 才看到它。

@@ -6,7 +6,7 @@ namespace engine::business {
 
 PhysicsBridge::PhysicsBridge() = default;
 
-bool PhysicsBridge::queueSync() {
+bool PhysicsBridge::pushSyncCommand() {
     // 请求全量同步：排队一条 SyncBlockSet（初始世界/世界重建时用）。
     // 返回 false 表示已有待发指令（原型：一次只排一条，防止覆盖）。
     if (wantSync_ || wantPlace_ || wantRemove_) return false;
@@ -14,13 +14,13 @@ bool PhysicsBridge::queueSync() {
     return true;
 }
 
-void PhysicsBridge::queuePlace(const engine::shared::BlockPos& p, int type) {
+void PhysicsBridge::pushPlaceCommand(const engine::shared::BlockPos& p, int type) {
     wantPlace_ = true;
     placePos_ = p;
     placeType_ = type;
 }
 
-void PhysicsBridge::queueRemove(const engine::shared::BlockPos& p) {
+void PhysicsBridge::pushRemoveCommand(const engine::shared::BlockPos& p) {
     wantRemove_ = true;
     removePos_ = p;
 }
