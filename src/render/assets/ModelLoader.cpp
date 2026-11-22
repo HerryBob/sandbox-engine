@@ -37,6 +37,51 @@ glm::vec3 parseVec3(const rapidjson::Value& v, const char* what, const std::stri
     return { v[0].GetFloat(), v[1].GetFloat(), v[2].GetFloat() };
 }
 
+// ---- 一段模型 JSON 的分段解码（规则1 拆分）----
+
+// textures 变量表："side" → "log_side"（模型面用 "#side" 引用）
+void decodeModelTextures(const rapidjson::Value& doc, ModelDef& def) {
+    if (!doc.HasMember("textures") || !doc["textures"].IsObject()) return;
+    for (auto it = doc["textures"].MemberBegin(); it != doc["textures"].MemberEnd(); ++it)
+        if (it->value.IsString())
+            def.textures.emplace(it->name.GetString(), it->value.GetString());
+}
+
+// rotation：元素级旋转（origin 16 单位 / axis x.y.z / angle 度 / rescale）
+void decodeModelRotation(const rapidjson::Value& el, ModelElement& me, const std::string& rel) {
+    if (!el.HasMember("rotation") || !el["rotation"].IsObject()) return;
+    const auto& rv = el["rotation"];
+    if (rv.HasMember("origin")) me.rotation.origin = parseVec3(rv["origin"], "rotation.origin", rel);
+    if (rv.HasMember("axis") && rv["axis"].IsString()) {
+        const std::string a = rv["axis"].GetString();
+        if (!a.empty() && (a[0] == 'x' || a[0] == 'y' || a[0] == 'z')) me.rotation.axis = a[0];
+        else ENGINE_LOG_WARN("Model", rel + " rotation.axis 须为 x/y/z");
+    }
+    if (rv.HasMember("angle") && rv["angle"].IsNumber())
+        me.rotation.angle = rv["angle"].GetFloat();
+    if (rv.HasMember("rescale") && rv["rescale"].IsBool())
+        me.rotation.rescale = rv["rescale"].GetBool();
+}
+
+// faces：六个方向的纹理名（"#变量"原样保留，烘焙阶段统一展开）与 cullface
+void decodeModelFaces(const rapidjson::Value& el, ModelElement& me) {
+    if (!el.HasMember("faces") || !el["faces"].IsObject()) return;
+    for (auto fit = el["faces"].MemberBegin(); fit != el["faces"].MemberEnd(); ++fit) {
+        const std::uint8_t idx = faceIndexOf(fit->name.GetString());
+        if (idx == 0xFF || !fit->value.IsObject()) continue;
+        ModelFace& face = me.faces[idx];
+        const auto& fv = fit->value;
+        // texture：原样保留（"#top" 或直接纹理名），烘焙阶段用合并后的表统一展开
+        if (fv.HasMember("texture") && fv["texture"].IsString())
+            face.texture = fv["texture"].GetString();
+        // cullface：该方向邻块不透明则剔（编码 1..6 = 面索引+1；0 = 永不剔）
+        if (fv.HasMember("cullface") && fv["cullface"].IsString()) {
+            const std::uint8_t cf = faceIndexOf(fv["cullface"].GetString());
+            face.cullFace = (cf == 0xFF) ? 0u : static_cast<std::uint8_t>(cf + 1);
+        }
+    }
+}
+
 // 一段模型 JSON → ModelDef。允许只写 parent + textures（几何由父模型提供）。
 // 面纹理的 "#变量" 此处保留原样，等 parent 链合并完成后统一展开。
 bool decodeModelDef(const rapidjson::Value& doc, ModelDef& def, const std::string& rel) {
@@ -44,12 +89,7 @@ bool decodeModelDef(const rapidjson::Value& doc, ModelDef& def, const std::strin
     if (doc.HasMember("parent") && doc["parent"].IsString())
         def.parent = doc["parent"].GetString();
 
-    // textures 变量表："side" → "log_side"（模型面用 "#side" 引用）
-    if (doc.HasMember("textures") && doc["textures"].IsObject()) {
-        for (auto it = doc["textures"].MemberBegin(); it != doc["textures"].MemberEnd(); ++it)
-            if (it->value.IsString())
-                def.textures.emplace(it->name.GetString(), it->value.GetString());
-    }
+    decodeModelTextures(doc, def);
 
     // elements：盒子列表（可以没有——几何来自 parent）
     if (!doc.HasMember("elements") || !doc["elements"].IsArray()) {
@@ -68,38 +108,8 @@ bool decodeModelDef(const rapidjson::Value& doc, ModelDef& def, const std::strin
         }
         me.from = parseVec3(el["from"], "from", rel);
         me.to   = parseVec3(el["to"],   "to",   rel);
-
-        // rotation：元素级旋转（origin 16 单位 / axis x.y.z / angle 度 / rescale）
-        if (el.HasMember("rotation") && el["rotation"].IsObject()) {
-            const auto& rv = el["rotation"];
-            if (rv.HasMember("origin")) me.rotation.origin = parseVec3(rv["origin"], "rotation.origin", rel);
-            if (rv.HasMember("axis") && rv["axis"].IsString()) {
-                const std::string a = rv["axis"].GetString();
-                if (!a.empty() && (a[0] == 'x' || a[0] == 'y' || a[0] == 'z')) me.rotation.axis = a[0];
-                else ENGINE_LOG_WARN("Model", rel + " rotation.axis 须为 x/y/z");
-            }
-            if (rv.HasMember("angle") && rv["angle"].IsNumber())
-                me.rotation.angle = rv["angle"].GetFloat();
-            if (rv.HasMember("rescale") && rv["rescale"].IsBool())
-                me.rotation.rescale = rv["rescale"].GetBool();
-        }
-
-        if (el.HasMember("faces") && el["faces"].IsObject()) {
-            for (auto fit = el["faces"].MemberBegin(); fit != el["faces"].MemberEnd(); ++fit) {
-                const std::uint8_t idx = faceIndexOf(fit->name.GetString());
-                if (idx == 0xFF || !fit->value.IsObject()) continue;
-                ModelFace& face = me.faces[idx];
-                const auto& fv = fit->value;
-                // texture：原样保留（"#top" 或直接纹理名），烘焙阶段用合并后的表统一展开
-                if (fv.HasMember("texture") && fv["texture"].IsString())
-                    face.texture = fv["texture"].GetString();
-                // cullface：该方向邻块不透明则剔（编码 1..6 = 面索引+1；0 = 永不剔）
-                if (fv.HasMember("cullface") && fv["cullface"].IsString()) {
-                    const std::uint8_t cf = faceIndexOf(fv["cullface"].GetString());
-                    face.cullFace = (cf == 0xFF) ? 0u : static_cast<std::uint8_t>(cf + 1);
-                }
-            }
-        }
+        decodeModelRotation(el, me, rel);
+        decodeModelFaces(el, me);
         def.elements.push_back(std::move(me));
     }
 
