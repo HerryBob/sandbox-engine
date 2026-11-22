@@ -40,6 +40,13 @@ public:
     void releaseNoise();
 
 private:
+    // ---- prepare() 的五段（规则1 拆分；顺序即校验顺序，失败不留半成品）----
+    bool validatePreset();                        // 1. 预设前置校验
+    bool resolveStrata();                         // 2. 地层表解析（注册名 → BlockType）
+    bool validateStrataContinuity(int& maxDepthOut);  // 3. 覆盖连续性（无重叠/断档）
+    void computeSurfaceParams(int maxDepth);      // 4. 高度映射参数预计算
+    bool createHeightProvider();                  // 5. 创建高度场句柄（最后做）
+
     // 地层：方块类型 + 相对地表深度区间（0 = 地表）。
     struct Layer {
         std::uint16_t type = 0;  // BlockType 值

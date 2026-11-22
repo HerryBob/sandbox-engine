@@ -26,12 +26,15 @@ bool fail(const char* msg) {
 ColumnGenerator::ColumnGenerator(WorldPreset preset)
     : preset_(std::move(preset)) {}
 
-bool ColumnGenerator::prepare() {
+bool ColumnGenerator::validatePreset() {
     // ---- 1. 预设前置校验 ----
     if (preset_.heightType.empty())
         return fail("高度场 provider 未指定（heightmap.noise.type）");
     if (preset_.strata.empty()) return fail("地层表为空");
+    return true;
+}
 
+bool ColumnGenerator::resolveStrata() {
     // ---- 2. 地层表解析：注册名 → BlockType（数据驱动，走方块注册表名字查询）----
     layers_.clear();
     layers_.reserve(preset_.strata.size());
@@ -48,7 +51,10 @@ bool ColumnGenerator::prepare() {
         }
         layers_.push_back(Layer{id, s.depthMin, s.depthMax});
     }
+    return true;
+}
 
+bool ColumnGenerator::validateStrataContinuity(int& maxDepthOut) {
     // ---- 3. 覆盖连续性校验：从深度 0 起逐层衔接、无重叠/断档 ----
     std::sort(layers_.begin(), layers_.end(),
               [](const Layer& a, const Layer& b) { return a.depthMin < b.depthMin; });
@@ -59,15 +65,19 @@ bool ColumnGenerator::prepare() {
             return false;
         }
     }
-    const int maxDepth = layers_.back().depthMax;
+    maxDepthOut = layers_.back().depthMax;
+    return true;
+}
 
+void ColumnGenerator::computeSurfaceParams(int maxDepth) {
     // ---- 4. 高度映射参数预计算 ----
     surfaceBase_ = static_cast<int>(std::lround(preset_.baseHeight));
     amplitude_   = static_cast<int>(std::lround(preset_.amplitude));
     // 地表可用上限：y ≤ 63 且 depth = surfaceY - y 必须落进地层表（≤ maxDepth）
     surfaceMax_ = std::min(kGenMaxY, maxDepth);
-    if (surfaceMax_ < kGenMinY) return fail("地层表深度范围无法容纳任何地表高度");
+}
 
+bool ColumnGenerator::createHeightProvider() {
     // ---- 5. 创建高度场句柄（所有校验通过后最后做，失败不留半成品）----
     // 参数数组只在 make 调用期间有效：key / str 都指向 preset_ 内的 string，
     // provider 必须自己拷贝需要长期保留的值（契约见 modapi/noise_api.h）。
@@ -90,6 +100,21 @@ bool ColumnGenerator::prepare() {
         return false;
     }
     height_ = std::move(created);
+    return true;
+}
+
+bool ColumnGenerator::prepare() {
+    // 顺序即校验顺序：任何一段失败都直接返回，且此前不留可用的半成品状态。
+    if (!validatePreset()) return false;
+    if (!resolveStrata()) return false;
+
+    int maxDepth = 0;
+    if (!validateStrataContinuity(maxDepth)) return false;
+
+    computeSurfaceParams(maxDepth);
+    if (surfaceMax_ < kGenMinY) return fail("地层表深度范围无法容纳任何地表高度");
+
+    if (!createHeightProvider()) return false;
 
     prepared_ = true;
     return true;
