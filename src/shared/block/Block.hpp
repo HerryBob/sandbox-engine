@@ -58,6 +58,6 @@ struct hash<engine::shared::BlockPos> {
         h = h * 31 + static_cast<size_t>(p.y);
         h = h * 31 + static_cast<size_t>(p.z);
         return h;
-    };
+    }
 };
 } // namespace std

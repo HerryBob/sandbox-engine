@@ -32,6 +32,8 @@ struct PhysicsCommand {
     // 目标域语义：contraptionId == -1 → 主世界（x/y/z 世界坐标，静态碰撞体）；
     //             contraptionId >= 0 → 刚体（x/y/z 为刚体局部坐标，飞船参考系）。
     int dx = 0, dy = 0, dz = 0; // 移动增量（MoveBlock）
+    // B57：MoveBlock 只带增量、不带起点 —— 指令不可重放（丢了就丢了）。
+    //      当前 MoveBlock 已是遗留路径（演示方块改用放置/破坏驱动），保持原样。
     int blockType = 0;          // 放置的方块类型（PlaceBlock，BlockType 底层值）
 
     // Contraption 字段（打包/解包用）：
@@ -45,6 +47,10 @@ struct PhysicsCommand {
 // 原型结果：BlockMoved（演示方块位置快照）+ ContraptionPacked/Unpacked（打包回执）
 //           + RigidBodyPos（刚体位置快照）+ BlockSetSize（碰撞体数量快照）
 //           + CollisionEvent（刚体撞上静态方块的碰撞事件）。
+//
+// B58（已评估，本轮不改）：整个结构约 200B、20+ 字段，承载 6 种消息，队列 64 深
+//   → 常驻约 13KB。原型阶段用"一个胖结构 + type 分支"换简单；将来按消息类型拆分
+//   可省一个数量级带宽（已记入 性能问题记录 P12）。
 struct PhysicsResult {
     enum class Type {
         BlockMoved, ContraptionPacked, ContraptionUnpacked, RigidBodyPos,

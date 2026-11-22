@@ -21,7 +21,17 @@ struct ClickEvent {
 // 玩家点击输入：输入线程（GLFW 鼠标回调）push，业务线程 pop 逐条消费。
 // 相机状态已拆到 CameraState（输入线程写，渲染/业务只读）。
 struct PlayerInput {
-    core::SPSCQueue<ClickEvent> clicks{ 32 };  // 容量 32：远大于一个 tick 可能积压的点击数
+    // B40：容量 32 是"32 个事件"，底层的 SPSCQueue 内部还会多留一个哨兵槽，
+    // 所以实际占用是 33 项 —— 不要按 32 去算内存或边界。
+    core::SPSCQueue<ClickEvent> clicks{ 32 };  // 远大于一个 tick 可能积压的点击数
+
+    // B41：显式禁止拷贝（SPSCQueue + 原子本来就不让拷，写出来是为了读者不用推）。
+    PlayerInput() = default;
+    PlayerInput(const PlayerInput&) = delete;
+    PlayerInput& operator=(const PlayerInput&) = delete;
+
+    // B42：三个 toggle* 同在一条缓存行，键盘回调（main 线程）写、输入线程读，
+    // 写频率是"按键次数"，伪共享代价可忽略，不加 padding。
 
     // F3 调试浮层开关请求：键盘回调在"按下"瞬间置 true，渲染线程 exchange(false) 消费。
     // 用请求位而不是共享 bool：输入线程只管发事件，可见性状态归渲染线程独占。

@@ -2,6 +2,8 @@
 #include "shared/block/Block.hpp"
 #include "shared/chunk/ChunkPos.hpp"
 
+#include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -24,6 +26,9 @@ namespace engine::shared {
 // 读取 = 一次字典查表；写入时条目不在字典里就追加，超出当前位宽容量则扩宽一次。
 class ChunkData {
 public:
+    // B35：拷贝/移动都保留默认行为 —— applyGeneratedChunk 需要整体拷贝一个 16³ chunk
+    // （生成器产出后交给 World 存表）。不要去 delete 拷贝，否则那条路径就得改成移动，
+    // 而生成结果是 const 的，移动不了。
     ChunkData();
 
     // 块内读写：坐标是块内坐标（0..15），越界由 &15 落到块内，与 chunkIndexOf 一致。
@@ -57,7 +62,9 @@ public:
         return (z & 15) * 256 + (y & 15) * 16 + (x & 15);
     }
     // 数组索引 → 块内偏移（x/y/z ∈ 0..15）。快照遍历用的唯一解码点。
+    // B34：调用方保证 i ∈ [0, 4096)；越界不设防（调试期用断言暴露）。
     static BlockPos chunkLocalOf(std::int32_t i) {
+        assert(i >= 0 && i < CHUNK_VOLUME);
         return BlockPos{i & 15, (i >> 4) & 15, i >> 8};
     }
 
@@ -174,7 +181,7 @@ inline void ChunkData::chunkChangeIndexBits(std::uint8_t newBits) {
         }
         bits_ = newBits;
         packed_.swap(next);
-        std::vector<std::uint16_t>().swap(wide_);
+        wide_ = {};   // B32：等价于 swap 空容器，更易读
     }
     else if (newBits == 8) {
         std::vector<std::uint8_t> next(static_cast<std::size_t>(CHUNK_VOLUME), 0);
@@ -183,14 +190,14 @@ inline void ChunkData::chunkChangeIndexBits(std::uint8_t newBits) {
                 static_cast<std::uint8_t>(tmp[static_cast<std::size_t>(i)]);
         bits_ = newBits;
         packed_.swap(next);
-        std::vector<std::uint16_t>().swap(wide_);
+        wide_ = {};   // B32：等价于 swap 空容器，更易读
     } else {
         std::vector<std::uint16_t> next(static_cast<std::size_t>(CHUNK_VOLUME), 0);
         for (std::int32_t i = 0; i < CHUNK_VOLUME; ++i)
             next[static_cast<std::size_t>(i)] = tmp[static_cast<std::size_t>(i)];
         bits_ = newBits;
         wide_.swap(next);
-        std::vector<std::uint8_t>().swap(packed_);
+        packed_ = {};   // B32：同上
     }
 }
 
@@ -205,6 +212,11 @@ inline void ChunkData::chunkCompact() {
         const std::uint16_t k = paletteIndexAt(i);
         if (k < n) used[k] = 1;
     }
+    // B33：提前返回要在**分配 remap/nextPal 之前** —— 先数一下有没有无用项，
+    // 全都有用时直接走人，不为"什么都不用做"付两个容器的分配。
+    std::size_t usedCount = 0;
+    for (std::size_t k = 0; k < n; ++k) usedCount += used[k];
+    if (usedCount == n) return;   // 一项都没丢，不用动
 
     // ② 重建字典，同时建立旧下标 → 新下标映射
     std::vector<std::uint16_t> remap(n, 0);
@@ -215,7 +227,7 @@ inline void ChunkData::chunkCompact() {
         remap[k] = static_cast<std::uint16_t>(nextPal.size());
         nextPal.push_back(palette_[k]);
     }
-    if (nextPal.size() == n) return;   // 一项都没丢，不用动
+    // （B33：原来的"一项都没丢"提前返回已上移到分配之前，这里不需要了）
 
     // ③ 先按旧字典重写索引，再换字典，最后按新字典能容纳的最小位宽重建索引数组
     for (std::int32_t i = 0; i < CHUNK_VOLUME; ++i) {

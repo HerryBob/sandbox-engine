@@ -5,7 +5,9 @@
 
 namespace engine::registry {
 
-	//负责渲染管线分桶
+	// 负责渲染管线分桶。
+	// B63：分桶顺序固定为 Solid → Cutout → Translucent（先画不透明，最后画半透明），
+	//      枚举值就是桶下标，改顺序等于改渲染顺序，不要重排。
 	enum class RenderType :std::uint8_t {
 		Solid = 0,
 		Cutout = 1,
@@ -14,6 +16,8 @@ namespace engine::registry {
 
 	// 方块定义：注册表自己持字符串副本（std::string），不留模组 DLL 里的指针 ——
 	// DLL 卸载后定义仍自洽可读，这是"注册内容跨 DLL 生命周期"的底线。
+	// B64：本类型是 `Registry<BlockInfo>` 的**值类型**（引擎内部），不是模组 ABI 结构 ——
+	//      模组看到的是 modapi 的 ModBlockDef，两者字段含义对齐但生命周期与布局无关。
 	struct BlockInfo{
 		std::string name;
 		// B59：原有一个 bool opaque，与 renderType 表达同一件事（是否遮挡剔除），
@@ -38,5 +42,9 @@ namespace engine::registry {
 		float mass = 1.0f;        // 质量（相对单位：1.0 = 一个基准方块，约 1 m³ 的土）
 		bool solid = true;        // 是否参与碰撞（实体阻挡、可站立）
 		float friction = 0.6f;    // 摩擦系数（0 = 冰面，1 = 完全不滑）
+
+		// B62：默认逐成员比较（C++20）。用途：诊断/单测里比对两次注册是否一致；
+		// 不用于作为 key（BlockInfo 含 std::string，没有 hash）。
+		bool operator==(const BlockInfo&) const = default;
 	};
 }

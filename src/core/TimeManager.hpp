@@ -101,6 +101,9 @@ namespace engine::core {
         std::atomic<double> global_{ 1.0 };
         std::atomic<double> business_{ 1.0 };
         std::atomic<double> physics_{ 1.0 };
+        // B23：三个原子挤在同一条缓存行 —— 它们由业务/物理两个线程各写一个，
+        // 理论上会互相让缓存行失效。但写入只在调时间缩放时发生（交互级频率），
+        // 加 padding 反而把对象撑大，故不改。
     };
 
 } // namespace engine::core

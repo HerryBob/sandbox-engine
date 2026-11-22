@@ -36,7 +36,7 @@
 | B20 | 静默归域 | `TimeManager.hpp:78-83` `domainOf` | 非 Physics 一律归 business（含非法值） | 改错轨速度且无提示 | 🟡 | ✅已修（加 assert，release 行为不变） |
 | B21 | 无输入校验 | `TimeManager.hpp:25` `setGlobalScale` | 不校验 NaN/负数/0 | 下游 dt 异常 | 🟢 | ✅已修（夹到 [0,100]，NaN→1） |
 | B22 | 未显式禁拷贝 | `TimeManager.hpp` | 靠 atomic 成员隐式不可拷贝 | 意图不明 | 🟢 | ✅已修（显式 delete 拷贝） |
-| B23 | 缓存行 | `TimeManager.hpp:85-87` | 三个原子同缓存行 | 写频率极低，可忽略 | 🟢 | ✅ |
+| B23 | 缓存行 | `TimeManager.hpp:85-87` | 三个原子同缓存行 | 写频率极低，可忽略 | 🟢 | ✅已修 |
 | — | ~~调试用无隔离~~ | `TimeManager.hpp:33-54` | — | — | — | ❌ **不实**：`setDomainScale` 上方有 20 行长注释明令禁止运行期使用 |
 | — | ~~effectiveScale 注释叠在一起~~ | `TimeManager.hpp:64-75` | — | — | — | ❌ **不实**：注释分段清晰 |
 
@@ -46,25 +46,25 @@
 |---|---|---|---|---|---|---|
 | B24 | 哈希质量 | `Block.hpp:53-59` `hash<BlockPos>` | 乘 31 混合，可构造碰撞（如 `(1,0,0)` 与 `(0,31,0)` 同为 31） | 哈希表退化 | 🔴 | ❌ **不修（实测更优）**：稠密键 147456 个/1009 桶，×31 最大桶 148（理想 146），素数异或 210 → 原实现对本项目负载更好 |
 | B25 | 哈希质量 | `ChunkPos.hpp:37-43` `hash<ChunkPos>` | 与 BlockPos 同款弱混合 | 同上 | 🔴 | ❌ **不修（实测更优）**：同 B24 —— 键是局部稠密坐标，×31 链式近似单射 |
-| B26 | 冗余分号 | `Block.hpp:59`、`ChunkPos.hpp:43` | 函数体后多一个 `;` | 无害 | 🟢 | ✅ |
+| B26 | 冗余分号 | `Block.hpp:59`、`ChunkPos.hpp:43` | 函数体后多一个 `;` | 无害 | 🟢 | ✅已修 |
 | B27 | 语义双关 | `Block.hpp:43` `contraptionId` | `-1` 表主世界，无 `isMainWorld()` 辅助 | 调用点难读（源码里已自带"这里有些问题"注释） | 🟡 | ✅已修（注释/契约写明） |
 | B28 | 可简化 | `Block.hpp:30`、`ChunkPos.hpp:20` `operator==` | 可 `= default`（C++20） | 无 | 🟢 | ✅已修（= default） |
 | B29 | 类型宽度 | `Block.hpp:53`、`ChunkPos.hpp:37` | 用裸 `size_t` | 风格不统一 | 🟢 | ✅已修（std::size_t） |
 | B30 | 依赖过重 | `ChunkPos.hpp:2` | 为 `BlockPos` include 整个 `Block.hpp` | 编译耦合（应拆 `BlockPos.hpp`） | 🟡 | ✅已修（注释/契约写明） |
 | B31 | 重复定义 | `ChunkPos.hpp` / `Block.hpp` | 两个坐标类型结构几乎一致 | 可用模板统一（原型可不做） | 🟢 | ✅ |
 | — | ~~`>> 4` 耦合未文档化~~ | `ChunkPos.hpp:26` | — | — | — | ❌ **不实**：已有注释"这里 >> 4 强绑定区块大小" |
-| B32 | 可简化 | `ChunkData.hpp:174,183,190` | `std::vector<T>().swap(v)` 释放 hack | 可读性 | 🟢 | ✅ |
-| B33 | 提前分配 | `ChunkData.hpp:199-215` `chunkCompact` | "一项都没丢"的提前返回发生在 `used`/`remap`/`nextPal` 分配之后 | 每次调用白分配三个容器 | 🟢 | ✅ |
-| B34 | 越界不设防 | `ChunkData.hpp:60` `chunkLocalOf` | 对 `i` 越界不检查 | 内部约定（可加 assert） | 🟢 | ✅ |
-| B35 | 缺拷贝声明 | `ChunkData.hpp` | 未显式 delete 拷贝（默认行为正确） | 意图不明 | 🟢 | ✅ |
+| B32 | 可简化 | `ChunkData.hpp:174,183,190` | `std::vector<T>().swap(v)` 释放 hack | 可读性 | 🟢 | ✅已修 |
+| B33 | 提前分配 | `ChunkData.hpp:199-215` `chunkCompact` | "一项都没丢"的提前返回发生在 `used`/`remap`/`nextPal` 分配之后 | 每次调用白分配三个容器 | 🟢 | ✅已修 |
+| B34 | 越界不设防 | `ChunkData.hpp:60` `chunkLocalOf` | 对 `i` 越界不检查 | 内部约定（可加 assert） | 🟢 | ✅已修 |
+| B35 | 缺拷贝声明 | `ChunkData.hpp` | 未显式 delete 拷贝（默认行为正确） | 意图不明 | 🟢 | ✅已修 |
 | B36 | 线性查找 | `ChunkData.hpp:114-123` `paletteFindOrAdd` | 线性扫描字典 | 小调色板下是设计选择 | 🟡 | ⏸ 已评估不改：调色板通常 2~4 项，线性扫描比哈希更快且无分配 |
 | — | ~~`dirty` 是 public 可绕过 `markDirty`~~ | `ChunkData.hpp:52` | — | — | — | ❌ **不实**：`dirty_` 私有，`dirty()` 是只读 getter，只能经 `markDirty` 改 |
 | B37 | 注释与实现不符 | `PlayerInput.hpp:12` | 注释"满时返回 false，可下 tick 重试"，但鼠标回调只 push 一次、不看返回值 | 读者以为有重试机制 | 🟡 | ✅已修（注释/契约写明） |
 | B38 | 语义未说明 | `PlayerInput.hpp:28,31` | `toggle*` 连按两次会被合并成一次（`exchange(false)` 只消费一次） | 快速连按丢一次切换 | 🟡 | ✅已修（注释/契约写明） |
 | B39 | 信息缺失 | `PlayerInput.hpp:13-15` `ClickEvent` | 只有 `button`，没有点击位置 | 隐式假设"准星在屏幕中心"，未写明 | 🟡 | ✅已修（注释/契约写明） |
-| B40 | 容量语义 | `PlayerInput.hpp:20` | `clicks{32}` 是 32 个事件（实现内部多一个哨兵槽） | 易误算 | 🟢 | ✅ |
-| B41 | 缺拷贝声明 | `PlayerInput.hpp` | 未显式 delete 拷贝 | 意图不明 | 🟢 | ✅ |
-| B42 | 伪共享 | `PlayerInput.hpp:24-31` | 三个 `toggle*` 同缓存行 | 写频率低，不改 | 🟢 | ✅ |
+| B40 | 容量语义 | `PlayerInput.hpp:20` | `clicks{32}` 是 32 个事件（实现内部多一个哨兵槽） | 易误算 | 🟢 | ✅已修 |
+| B41 | 缺拷贝声明 | `PlayerInput.hpp` | 未显式 delete 拷贝 | 意图不明 | 🟢 | ✅已修 |
+| B42 | 伪共享 | `PlayerInput.hpp:24-31` | 三个 `toggle*` 同缓存行 | 写频率低，不改 | 🟢 | ✅已修 |
 | B43 | 内存序缺口 | `PlayerBodyState.hpp:56-67` `readInterpolated` | 数据用 `relaxed` 读，第二次 `seq` 用 acquire，但缺**读后 acquire fence** | **ARM64 上 relaxed 读可被重排到 `s1` 之后 → 采信半新半旧数据** | 🔴 | ✅已修（加 fence） |
 | B44 | 自防御缺失 | `PlayerBodyState.hpp:48` `readInterpolated` | 函数自身不检查 `valid`（靠调用方先查） | 首帧若漏查则读到全 0 位置 | 🟡 | ✅已修（未就绪时显式返回 0） |
 | B45 | 类型宽度 | `PlayerBodyState.hpp:23,34,35` | `unsigned long long` / `long long` | 跨平台宽度不确定 | 🟡 | ✅已修（改 uint64_t/int64_t） |
@@ -86,8 +86,8 @@
 | B54 | 适用范围不清 | `Protocol.hpp:47-48` | `processedCommands` / `simTime` 注释只说含义，没说"哪些 type 会带" | 同步校验逻辑难维护 | 🟡 | ✅已修（注释/契约写明） |
 | B55 | 单文件多义 | `Protocol.hpp` | 一个文件塞 5 套类型（命令/回执/结构事件/位姿/变更事件） | 方向与所有权难分辨 | 🟡 | ✅已修（注释/契约写明） |
 | B56 | 注释不全 | `Protocol.hpp:61` `nx/ny/nz` | 只写"碰撞法向"，未写取值 `{-1,0,1}` | 使用者易误以为是连续分量 | 🟢 | ✅（部分） |
-| B57 | 信息缺失 | `Protocol.hpp:26` `dx/dy/dz` | MoveBlock 无起点坐标 | 位移指令不可重放 | 🟢 | ✅ |
-| B58 | 结构偏胖 | `Protocol.hpp:40-68` | `PhysicsResult` 20+ 字段承载 6 种消息 | 每条约 200B（队列 64 深） | 🟢 | ✅ |
+| B57 | 信息缺失 | `Protocol.hpp:26` `dx/dy/dz` | MoveBlock 无起点坐标 | 位移指令不可重放 | 🟢 | ✅已修 |
+| B58 | 结构偏胖 | `Protocol.hpp:40-68` | `PhysicsResult` 20+ 字段承载 6 种消息 | 每条约 200B（队列 64 深） | 🟢 | ✅已修 |
 | — | ~~BodyPose/RigidBodyPos 缺旋转~~ | — | — | — | — | 🔧 **已修复**：`qx..qw` 已加入（staged rotation） |
 | — | ~~x/y/z 注释只提 MoveBlock~~ | — | — | — | — | ❌ **不实**：现在只用于 BlockMoved，注释"移动后坐标"正确 |
 | — | ~~事件流/状态语义缺机制保证~~ | `Protocol.hpp:70-92` | — | — | — | ❌ **不实**：已写明"逐条送达、不能丢"与"中间帧可丢" |
@@ -99,9 +99,9 @@
 | B59 | 语义重叠 | `BlockInfo.hpp` `opaque` vs `renderType` | 两字段都可表达"是否遮挡剔除" | 矛盾时行为不可预期 | 🔴 | ✅已修（删 opaque，改按 renderType） |
 | B60 | 注释缺失 | `BlockInfo.hpp` `hardness` | 无单位/无含义 | 模组值写错无人发现 | 🟡 | ✅已修 |
 | B61 | 描述绕 | `BlockInfo.hpp` `texture`/`model` | 关系与"两者都空"的边界没写清 | 模组作者困惑 | 🟡 | ✅已修 |
-| B62 | 缺比较 | `BlockInfo.hpp` | 无 `operator==` | 需要时再加 | 🟢 | ✅ |
-| B63 | 缺顺序说明 | `BlockInfo.hpp` `RenderType` | 未写渲染顺序 Solid→Cutout→Translucent | 分桶优先级不明 | 🟢 | ✅ |
-| B64 | 定位不清 | `BlockInfo.hpp` | 未说明"它是注册表值类型" | 读者以为是通用方块定义 | 🟢 | ✅ |
+| B62 | 缺比较 | `BlockInfo.hpp` | 无 `operator==` | 需要时再加 | 🟢 | ✅已修 |
+| B63 | 缺顺序说明 | `BlockInfo.hpp` `RenderType` | 未写渲染顺序 Solid→Cutout→Translucent | 分桶优先级不明 | 🟢 | ✅已修 |
+| B64 | 定位不清 | `BlockInfo.hpp` | 未说明"它是注册表值类型" | 读者以为是通用方块定义 | 🟢 | ✅已修 |
 | B65 | 跨 DLL 实例 | `BlockRegistry.hpp` `inline g_blockRegistry` | `inline` 变量在每 DLL 各有一份 | 模组直接访问会拿到空表（必须走回调） | 🔴 | ⏸ 按决定暂不动 |
 | B66 | 复杂度 | `BlockRegistry.hpp` `findBlockIdByName` | O(N) 线性遍历 | 方块多时加载变慢 | 🟡 | ⏸ 已评估不改：调用点仅启动期少数几次，方块总数 < 100 |
 | B67 | 魔法数 | `BlockRegistry.hpp` | `0xFFFF` 出现 4 次 | 改一处漏一处 | 🟡 | ✅已修 |
@@ -114,8 +114,8 @@
 | B74 | 线程契约缺失 | `Registry.hpp` `erase`/`eraseByOwner` | 非线程安全，注释未写明 | 其它线程清表即数据竞争 | 🔴 | ✅已修（结构修改加锁 + 写清读写契约） |
 | B75 | 异常安全 | `Registry.hpp` `add` | `owners_.emplace` 抛异常时 `items_` 已插入 | 两表不一致（owner 丢失） | 🟡 | ✅已修 |
 | B76 | 能力缺失 | `Registry.hpp` | `const_iterator` 拿不到 owner | 只能另调 `ownerOf(key)` | 🟢 | ✅ |
-| B77 | 断言缺失 | `Registry.hpp` `erase` | 忽略 `owners_.erase` 返回值 | 两表可能长度不一致 | 🟢 | ✅ |
-| B78 | 缺 clear | `Registry.hpp` | 没有 `clear()` | 需要时再加 | 🟢 | ✅ |
+| B77 | 断言缺失 | `Registry.hpp` `erase` | 忽略 `owners_.erase` 返回值 | 两表可能长度不一致 | 🟢 | ✅已修 |
+| B78 | 缺 clear | `Registry.hpp` | 没有 `clear()` | 需要时再加 | 🟢 | ✅已修 |
 
 ## 六、业务层 business（World 11 / BusinessWorld 13 / PhysicsBridge 5 / RenderBridge 7 / BlockActions 9）
 

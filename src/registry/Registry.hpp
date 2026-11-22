@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -52,10 +53,15 @@ namespace engine::registry {
         // 刻意不提供 get()（引用返回）。历史版本是 assert(p) + return *p：
         // Release 下 assert 被编译掉，未注册 key 直接空指针解引用，崩溃且无信息。
         // 全工程调用方一律用 find() + 判空，语义更明确，故直接删除该接口。
+        // B77：两表必须同进同退 —— erase 时 owners_ 若有而 items_ 没有（或反之），
+        // 说明历史上有过不一致，用断言在调试期暴露。
         bool erase(Key key) {
             std::lock_guard<std::mutex> lock(mutex_);
-            owners_.erase(key);
-            return items_.erase(key) > 0U;
+            const std::size_t removedOwners = owners_.erase(key);
+            const std::size_t removedItems  = items_.erase(key);
+            assert(removedOwners == removedItems && "Registry：items_ 与 owners_ 不一致");
+            (void)removedOwners;
+            return removedItems > 0U;
         }
 
         // 按来源批量移除，返回移除条数（卸载闭环用）。
@@ -76,6 +82,14 @@ namespace engine::registry {
         }
 
         // 按来源计数（卸载前后自检用）。
+        // B78：清空全部（测试/重启装配用）。
+        void clear() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            items_.clear();
+            owners_.clear();
+            frozen_ = false;
+        }
+
         std::size_t countByOwner(const char* owner) const {
             const std::string name = (owner != nullptr) ? std::string(owner) : std::string();
             std::size_t count = 0;
