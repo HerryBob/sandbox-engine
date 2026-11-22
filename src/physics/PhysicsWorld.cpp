@@ -62,7 +62,7 @@ void PhysicsWorld::advance(double scale, double wallDt,
         simTime_.store(simTime_.load(std::memory_order_relaxed) + 0.04,
                        std::memory_order_relaxed);
         accumulator_ -= 0.04;
-        ticks_.fetch_add(1, std::memory_order_relaxed);
+        tickCount_.fetch_add(1, std::memory_order_relaxed);
         ++steps;
         maybeLog();
     }
@@ -314,7 +314,7 @@ double PhysicsWorld::simTime() const {
     return simTime_.load(std::memory_order_relaxed);
 }
 long long PhysicsWorld::tickCount() const {
-    return ticks_.load(std::memory_order_relaxed);
+    return tickCount_.load(std::memory_order_relaxed);
 }
 long long PhysicsWorld::processedCommands() const {
     return processedCommands_.load(std::memory_order_relaxed);

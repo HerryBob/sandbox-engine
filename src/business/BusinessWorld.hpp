@@ -109,7 +109,7 @@ private:
 
     engine::core::TimeManager& tm_;
     std::atomic<double>        simTime_{ 0.0 };
-    std::atomic<long long>     ticks_{0};
+    std::atomic<long long>     tickCount_{0};
 
     std::atomic<long long> playerActions_{ 0 };  // 已处理玩家点击计数
     bool resyncPending_ = false;                 // 待重下发全量方块集（业务线程独占）

@@ -117,7 +117,7 @@ private:
     engine::core::TimeManager& tm_;
     double                     accumulator_{0.0};
     std::atomic<double>        simTime_{0.0};
-    std::atomic<long long>     ticks_{0};
+    std::atomic<long long>     tickCount_{0};
     std::atomic<long long>     processedCommands_{0};
     std::atomic<int>           blockX_{0};
     std::atomic<int>           blockY_{0};

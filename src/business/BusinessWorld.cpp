@@ -32,7 +32,7 @@ void BusinessWorld::advanceTick(double scale) {
     // 本类只负责世界状态推进与裁决；事件由调用方在 tick 边界自行驱动。
     simTime_.store(simTime_.load(std::memory_order_relaxed) + 0.04 * scale,
                    std::memory_order_relaxed);
-    ticks_.fetch_add(1, std::memory_order_relaxed);
+    tickCount_.fetch_add(1, std::memory_order_relaxed);
     maybeLog();
 }
 
@@ -67,7 +67,7 @@ void BusinessWorld::receiveFromPhysics() {
 
 void BusinessWorld::flushChanges() {
     // tick 边界：委托 RenderBridge 发变更事件（事件源 = World 脏集合）。
-    renderBridge_.flushChanges(world_, ticks_.load(std::memory_order_relaxed));
+    renderBridge_.flushChanges(world_, tickCount_.load(std::memory_order_relaxed));
 }
 long long BusinessWorld::changeEventsSent() const {
     return renderBridge_.changeEventsSent();
@@ -77,7 +77,7 @@ double BusinessWorld::simTime() const {
     return simTime_.load(std::memory_order_relaxed);
 }
 long long BusinessWorld::tickCount() const {
-    return ticks_.load(std::memory_order_relaxed);
+    return tickCount_.load(std::memory_order_relaxed);
 }
 long long BusinessWorld::commandsSent() const {
     return physicsBridge_.commandsSent();

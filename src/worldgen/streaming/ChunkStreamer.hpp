@@ -103,9 +103,9 @@ private:
     // 待卸载的列（tickUpdate 收集，drainResults 结算；业务线程独占）
     std::unordered_set<ColPos> pendingEvict_;
 
-    std::atomic<std::size_t> requested_{0};
-    std::atomic<std::size_t> generated_{0};
-    std::atomic<std::size_t> applied_{0};
+    std::atomic<std::size_t> requestedColumnCount_{0};
+    std::atomic<std::size_t> generatedColumnCount_{0};
+    std::atomic<std::size_t> appliedColumnCount_{0};
     std::atomic<bool> started_{false};
 
     // 已应用列的聚合统计：只在 drainResults 所在线程（唯一 World 写者）读写，

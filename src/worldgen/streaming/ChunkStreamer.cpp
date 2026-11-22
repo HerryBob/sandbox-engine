@@ -65,7 +65,7 @@ void ChunkStreamer::workerLoop() {
 
         auto blocks = std::make_shared<ColumnBlocks>();
         generator_.generateColumn(req.pos, *blocks);
-        generated_.fetch_add(1, std::memory_order_relaxed);
+        generatedColumnCount_.fetch_add(1, std::memory_order_relaxed);
 
         // 结果队列满 = 业务线程还没消费完：等它（有界等待，不丢结果）
         const GenResult res{req.pos, std::move(blocks)};
@@ -130,7 +130,7 @@ void ChunkStreamer::enqueueRequests(const std::vector<ColPos>& candidates) {
     for (const ColPos& p : candidates) {
         if (!businessToGenRequests_.push(GenRequest{p})) break;   // 队列满：剩下的下 tick 再推
         known_.insert(p);                            // 只记成功的；失败的不能记，否则永不重试
-        requested_.fetch_add(1, std::memory_order_relaxed);
+        requestedColumnCount_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -176,7 +176,7 @@ std::size_t ChunkStreamer::applyGeneratedResults(engine::business::World& world,
                 res.pos.z};
             world.applyGeneratedChunk(cp, res.blocks->chunks[level]);
         }
-        applied_.fetch_add(1, std::memory_order_relaxed);
+        appliedColumnCount_.fetch_add(1, std::memory_order_relaxed);
         // 聚合统计（本线程独占，无并发）
         appliedBlocks_ += res.blocks->blockCount;
         minSurfaceY_ = std::min(minSurfaceY_, res.blocks->minSurfaceY);
@@ -188,9 +188,9 @@ std::size_t ChunkStreamer::applyGeneratedResults(engine::business::World& world,
 
 GenStats ChunkStreamer::stats() const {
     return GenStats{
-        requested_.load(std::memory_order_relaxed),
-        generated_.load(std::memory_order_relaxed),
-        applied_.load(std::memory_order_relaxed),
+        requestedColumnCount_.load(std::memory_order_relaxed),
+        generatedColumnCount_.load(std::memory_order_relaxed),
+        appliedColumnCount_.load(std::memory_order_relaxed),
         appliedBlocks_,
         minSurfaceY_,
         maxSurfaceY_};
