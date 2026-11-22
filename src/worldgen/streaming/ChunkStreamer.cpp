@@ -31,8 +31,8 @@ ChunkStreamer::ChunkStreamer(const ColumnGenerator& generator, int radius,
                              std::size_t requestCapacity, std::size_t resultCapacity)
     : generator_(generator),
       radius_(radius > 0 ? radius : 1),
-      requests_(requestCapacity),
-      results_(resultCapacity) {}
+      businessToGenRequests_(requestCapacity),
+      genToBusinessResults_(resultCapacity) {}
 
 ChunkStreamer::~ChunkStreamer() {
     stop();
@@ -58,7 +58,7 @@ void ChunkStreamer::workerLoop() {
     // 生成线程：只做纯计算，不持有、不访问 World（8.4 条准则的硬边界）
     while (!loop_.shouldStop()) {
         GenRequest req;
-        if (!requests_.pop(req)) {
+        if (!businessToGenRequests_.pop(req)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2)); // 无请求：让出 CPU
             continue;
         }
@@ -69,7 +69,7 @@ void ChunkStreamer::workerLoop() {
 
         // 结果队列满 = 业务线程还没消费完：等它（有界等待，不丢结果）
         const GenResult res{req.pos, std::move(blocks)};
-        while (!results_.push(res)) {
+        while (!genToBusinessResults_.push(res)) {
             if (loop_.shouldStop()) return;   // 收工：不再阻塞退出流程
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -128,7 +128,7 @@ std::vector<ColPos> ChunkStreamer::collectWindowCandidates(int cx, int cz) const
 
 void ChunkStreamer::enqueueRequests(const std::vector<ColPos>& candidates) {
     for (const ColPos& p : candidates) {
-        if (!requests_.push(GenRequest{p})) break;   // 队列满：剩下的下 tick 再推
+        if (!businessToGenRequests_.push(GenRequest{p})) break;   // 队列满：剩下的下 tick 再推
         known_.insert(p);                            // 只记成功的；失败的不能记，否则永不重试
         requested_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -166,7 +166,7 @@ std::size_t ChunkStreamer::applyGeneratedResults(engine::business::World& world,
     // （队列里可能还压着淘汰前排队/在算的请求，这是允许的浪费，但结果不能落地）。
     std::size_t applied = 0;
     GenResult res;
-    while (applied < maxApply && results_.pop(res)) {
+    while (applied < maxApply && genToBusinessResults_.pop(res)) {
         if (known_.find(res.pos) == known_.end()) continue;   // 在途结果属于已淘汰的列
         // 一列 = 4 个竖直堆叠的 16³ chunk：逐层写入（每个 chunk 一次锁 + 标脏自身与邻居）
         for (int level = 0; level < kGenChunkLevels; ++level) {

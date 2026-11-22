@@ -34,7 +34,7 @@ void PhysicsBridge::syncToPhysics(const std::vector<engine::shared::Block>& full
         // 区块化后从 chunks_ 现场生成全量列表（协议边界保持 vector<Block>）。
         cmd.type = engine::shared::PhysicsCommand::Type::SyncBlockSet;
         cmd.blocks = fullSnapshot;
-        if (commandQueue_.push(cmd)) {
+        if (businessToPhysicsCommands_.push(cmd)) {
             commandsSent_.fetch_add(1, std::memory_order_relaxed);
             wantSync_ = false;
         }
@@ -44,7 +44,7 @@ void PhysicsBridge::syncToPhysics(const std::vector<engine::shared::Block>& full
         cmd.x = placePos_.x; cmd.y = placePos_.y; cmd.z = placePos_.z;
         cmd.blockType = placeType_;
         cmd.contraptionId = -1; // 主世界静态方块（无刚体域）
-        if (commandQueue_.push(cmd)) {
+        if (businessToPhysicsCommands_.push(cmd)) {
             commandsSent_.fetch_add(1, std::memory_order_relaxed);
             wantPlace_ = false;
         }
@@ -53,7 +53,7 @@ void PhysicsBridge::syncToPhysics(const std::vector<engine::shared::Block>& full
         cmd.type = engine::shared::PhysicsCommand::Type::RemoveBlock;
         cmd.x = removePos_.x; cmd.y = removePos_.y; cmd.z = removePos_.z;
         cmd.contraptionId = -1; // 主世界静态方块（无刚体域）
-        if (commandQueue_.push(cmd)) {
+        if (businessToPhysicsCommands_.push(cmd)) {
             commandsSent_.fetch_add(1, std::memory_order_relaxed);
             wantRemove_ = false;
         }
@@ -66,7 +66,7 @@ void PhysicsBridge::receiveFromPhysics(
     std::optional<engine::shared::BodyPose>* bodyPose) {
     // 业务 Tick 边界：收物理结果（位置快照/碰撞体数量/刚体结构/位姿）。
     engine::shared::PhysicsResult res;
-    while (resultQueue_.pop(res)) {
+    while (physicsToBusinessResults_.pop(res)) {
         resultsReceived_.fetch_add(1, std::memory_order_relaxed);
         switch (res.type) {
         case engine::shared::PhysicsResult::Type::BlockMoved:
@@ -118,12 +118,12 @@ void PhysicsBridge::receiveFromPhysics(
     }
 }
 
-engine::core::SPSCQueue<engine::shared::PhysicsCommand>& PhysicsBridge::commandQueue() {
-    return commandQueue_;
+engine::core::SPSCQueue<engine::shared::PhysicsCommand>& PhysicsBridge::businessToPhysicsCommands() {
+    return businessToPhysicsCommands_;
 }
 
-engine::core::SPSCQueue<engine::shared::PhysicsResult>& PhysicsBridge::resultQueue() {
-    return resultQueue_;
+engine::core::SPSCQueue<engine::shared::PhysicsResult>& PhysicsBridge::physicsToBusinessResults() {
+    return physicsToBusinessResults_;
 }
 
 long long PhysicsBridge::commandsSent() const {

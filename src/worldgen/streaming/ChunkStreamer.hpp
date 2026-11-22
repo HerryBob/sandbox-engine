@@ -93,8 +93,8 @@ private:
     const ColumnGenerator& generator_;
     int radius_;
 
-    core::SPSCQueue<GenRequest> requests_;   // 业务 → 生成
-    core::SPSCQueue<GenResult>  results_;    // 生成 → 业务
+    core::SPSCQueue<GenRequest> businessToGenRequests_;   // 业务 → 生成
+    core::SPSCQueue<GenResult>  genToBusinessResults_;    // 生成 → 业务
     core::ThreadLoop loop_{"worldgen-stream"};
 
     // 已请求过的列（业务线程独占）。1b 起支持卸载：走出窗口的列从 known_ 移除，

@@ -378,7 +378,7 @@ static int run(const std::string& presetName) {
     }
 
     // 渲染线程（第 4 轨只读观众）：消费变更事件流 + 绘制。
-    engine::render::Renderer renderer(businessWorld, renderBridge.changeEventQueue(), vkCtx, playerInput);
+    engine::render::Renderer renderer(businessWorld, renderBridge.businessToRenderChanges(), vkCtx, playerInput);
 
     // 初始世界统计：生成后快照（诊断/验收用）。
     std::cout << "初始世界：方块=" << businessWorld.blockCount() << "\n";
@@ -442,7 +442,7 @@ static int run(const std::string& presetName) {
                                 static_cast<engine::shared::BlockType>(stoneId),
                                 engine::shared::BlockPos{x, y, z}, -1}); // -1 = 主世界坐标
                 pack.blockCount = static_cast<int>(pack.blocks.size());
-                if (physicsBridge.commandQueue().push(pack))
+                if (physicsBridge.businessToPhysicsCommands().push(pack))
                     std::cout << "演示刚体：打包指令已发 方块=" << pack.blockCount << "\n";
                 else
                     std::cout << "演示刚体：指令队列满，未发出\n";
@@ -462,8 +462,8 @@ static int run(const std::string& presetName) {
                 std::chrono::duration<double>(now - prev).count();
             prev = now;
             physicsWorld.advance(tm.effectiveScale(core::Domain::Physics), wallDt,
-                                 physicsBridge.commandQueue());
-            physicsWorld.syncToBusiness(physicsBridge.resultQueue());
+                                 physicsBridge.businessToPhysicsCommands());
+            physicsWorld.syncToBusiness(physicsBridge.physicsToBusinessResults());
             std::this_thread::sleep_for(std::chrono::milliseconds(1)); // 避免忙等
         }
     });
@@ -484,7 +484,7 @@ static int run(const std::string& presetName) {
 
             // 刚体结构事件（打包建网格 / 解包销毁）：事件流，逐条处理。
             engine::shared::BodyStructureEvent bodyEv;
-            while (renderBridge.bodyStructureQueue().pop(bodyEv)) {
+            while (renderBridge.businessToRenderStructure().pop(bodyEv)) {
                 if (bodyEv.destroy) {
                     vkCtx.destroyBodyMesh(bodyEv.contraptionId);
                 } else if (!vkCtx.uploadBodyMesh(bodyEv.contraptionId, bodyEv.blocks)) {
@@ -495,7 +495,7 @@ static int run(const std::string& presetName) {
             // 刚体位姿：状态语义，逐条应用——同 id 的后一条覆盖前一条，
             // 不同 id 各自留最新（多刚体后不能再只取全局最后一条）。
             engine::shared::BodyPose bodyPose;
-            while (renderBridge.bodyPoseQueue().pop(bodyPose)) {
+            while (renderBridge.businessToRenderPoses().pop(bodyPose)) {
                 vkCtx.setBodyPose(bodyPose.contraptionId,
                                   bodyPose.x, bodyPose.y, bodyPose.z,
                                   bodyPose.qx, bodyPose.qy, bodyPose.qz, bodyPose.qw);

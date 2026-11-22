@@ -16,9 +16,9 @@ namespace engine::business {
 // 桥外零共享：任何跨线程方块数据必须走这里。
 //
 // 生产者/消费者分布（SPSC 约束）：
-//   B1 commandQueue_：生产者=业务线程（syncToPhysics），消费者=物理线程（advance）
-//   B2 resultQueue_ ：生产者=物理线程（syncToBusiness），消费者=业务线程（receiveFromPhysics）
-// 物理线程通过 commandQueue()/resultQueue() 引用读写自己的端点。
+//   B1 businessToPhysicsCommands_：生产者=业务线程（syncToPhysics），消费者=物理线程（advance）
+//   B2 physicsToBusinessResults_ ：生产者=物理线程（syncToBusiness），消费者=业务线程（receiveFromPhysics）
+// 物理线程通过 businessToPhysicsCommands()/physicsToBusinessResults() 引用读写自己的端点。
 class PhysicsBridge {
 public:
     PhysicsBridge();
@@ -43,8 +43,8 @@ public:
                             std::optional<engine::shared::BodyPose>* bodyPose);
 
     // ---- 物理侧访问（装配层分发给物理线程）----
-    engine::core::SPSCQueue<engine::shared::PhysicsCommand>& commandQueue();
-    engine::core::SPSCQueue<engine::shared::PhysicsResult>&  resultQueue();
+    engine::core::SPSCQueue<engine::shared::PhysicsCommand>& businessToPhysicsCommands();
+    engine::core::SPSCQueue<engine::shared::PhysicsResult>&  physicsToBusinessResults();
 
     // ---- 统计（main 只读）----
     long long commandsSent() const;     // 已发出指令数
@@ -56,8 +56,8 @@ public:
 
 private:
     // B1 业务→物理（指令）；B2 物理→业务（回执）。容量对齐原装配（512）。
-    engine::core::SPSCQueue<engine::shared::PhysicsCommand> commandQueue_{512};
-    engine::core::SPSCQueue<engine::shared::PhysicsResult>  resultQueue_{512};
+    engine::core::SPSCQueue<engine::shared::PhysicsCommand> businessToPhysicsCommands_{512};
+    engine::core::SPSCQueue<engine::shared::PhysicsResult>  physicsToBusinessResults_{512};
 
     // 待发指令状态机（业务线程私有，无需原子）：
     bool wantSync_ = false; // 待发全量同步指令（syncAll）

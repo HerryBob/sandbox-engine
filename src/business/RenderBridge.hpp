@@ -30,19 +30,19 @@ public:
     void pushBodyPose(const engine::shared::BodyPose& pose);
 
     // 渲染侧访问（装配层分发给渲染线程）。
-    engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& changeEventQueue();
-    engine::core::SPSCQueue<engine::shared::BodyStructureEvent>& bodyStructureQueue();
-    engine::core::SPSCQueue<engine::shared::BodyPose>& bodyPoseQueue();
+    engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& businessToRenderChanges();
+    engine::core::SPSCQueue<engine::shared::BodyStructureEvent>& businessToRenderStructure();
+    engine::core::SPSCQueue<engine::shared::BodyPose>& businessToRenderPoses();
 
     // 统计（main 只读）。
     long long changeEventsSent() const; // 已发变更事件数
 
 private:
     // B3 业务→渲染（变更事件）。容量对齐原装配（256）。
-    engine::core::SPSCQueue<engine::shared::BlockChangeEvent> changeEventQueue_{256};
+    engine::core::SPSCQueue<engine::shared::BlockChangeEvent> businessToRenderChanges_{256};
     // B6 业务→渲染（刚体结构事件 / 位姿）。刚体数量少，容量给 16 足够。
-    engine::core::SPSCQueue<engine::shared::BodyStructureEvent> bodyStructureQueue_{16};
-    engine::core::SPSCQueue<engine::shared::BodyPose>           bodyPoseQueue_{16};
+    engine::core::SPSCQueue<engine::shared::BodyStructureEvent> businessToRenderStructure_{16};
+    engine::core::SPSCQueue<engine::shared::BodyPose>           businessToRenderPoses_{16};
 
     std::atomic<long long> changeEventsSent_{0}; // 已发变更事件数
 };
