@@ -5,6 +5,7 @@
 #include "shared/chunk/ChunkPos.hpp"
 #include "worldgen/generator/ColumnGenerator.hpp"
 #include "worldgen/streaming/GenTypes.hpp"
+#include "worldgen/streaming/StreamState.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -90,7 +91,7 @@ public:
     // B134：stats() 里的聚合字段（appliedBlocks_ / minSurfaceY_ / maxSurfaceY_）是**普通成员**，
     //         只在业务线程（takeBatch 调用方）读写 —— 从 main 线程调 stats() 读它们是数据竞争。
     //         计数字段（requested/generated/applied）是原子，任意线程可读。
-    std::size_t knownColumns() const { return known_.size(); }
+    std::size_t knownColumns() const { return state_.known_.size(); }
 
 private:
     void workerLoop();
@@ -108,26 +109,14 @@ private:
     const ColumnGenerator& generator_;
     int radius_;
 
-    core::SPSCQueue<GenRequest> businessToGenRequests_;   // 业务 → 生成
-    core::SPSCQueue<GenResult>  genToBusinessResults_;    // 生成 → 业务
+    // 生成线程本体（逻辑层：线程生命周期归这里）
     core::ThreadLoop loop_{"worldgen-stream"};
-
-    // 已请求过的列（业务线程独占）。1b 起支持卸载：走出窗口的列从 known_ 移除，
-    // 这样玩家走回来时会重新请求生成（否则这些列"永不加载"）。
-    std::unordered_set<ColPos> known_;
-    // 待卸载的列（tick 收集，receiveResults 结算；业务线程独占）
-    std::unordered_set<ColPos> pendingEvict_;
-
-    std::atomic<std::size_t> requestedColumnCount_{0};
-    std::atomic<std::size_t> generatedColumnCount_{0};
-    std::atomic<std::size_t> appliedColumnCount_{0};
     std::atomic<bool> started_{false};
 
-    // 已应用列的聚合统计：只在业务线程（takeBatch 调用方）读写，
-    // 与后台线程的生成计数分开，避免为三个普通字段引入锁/CAS。
-    std::size_t appliedBlocks_ = 0;
-    int minSurfaceY_ = kGenMaxY;
-    int maxSurfaceY_ = kGenMinY;
+    // 数据层（StreamState）：两条队列 + 窗口记账 + 统计。
+    // 逻辑层只通过它读写，不直接碰容器 —— 将来把"流式窗口"换成别的实现时，
+    // 只改这里的类型，tick/takeBatch 的决策逻辑不用动。
+    StreamState state_;
 };
 
 } // namespace engine::worldgen
