@@ -42,7 +42,7 @@ bool BusinessWorld::syncAll() {
     return physicsBridge_.queueSync();
 }
 
-void BusinessWorld::syncToPhysics() {
+void BusinessWorld::syncWorldToPhysics() {
     // 区块卸载等批量变更后需要重发全量：指令槽位是单槽位状态机，
     // queueSync 在"已有待发指令"时返回 false —— 保留标志，下 tick 继续重试，
     // 否则物理侧会一直留着已卸载区域的幽灵碰撞体。
@@ -50,14 +50,14 @@ void BusinessWorld::syncToPhysics() {
         if (physicsBridge_.queueSync()) resyncPending_ = false;
     }
     // tick 边界：委托 PhysicsBridge 发指令（全量同步需现场生成世界快照）。
-    physicsBridge_.syncToPhysics(world_.renderSnapshot());
+    physicsBridge_.syncWorldToPhysics(world_.renderSnapshot());
 }
 
-void BusinessWorld::receiveFromPhysics() {
+void BusinessWorld::receiveResultsFromPhysics() {
     // tick 边界：委托 PhysicsBridge 收物理回执（位置快照/碰撞体数量/刚体数据）。
     std::vector<engine::shared::BodyStructureEvent> bodyEvents;
     std::optional<engine::shared::BodyPose> bodyPose;
-    physicsBridge_.receiveFromPhysics(&bodyEvents, &bodyPose);
+    physicsBridge_.receiveResultsFromPhysics(&bodyEvents, &bodyPose);
     // 刚体数据转给渲染桥：结构事件逐条送（事件流），位姿只送最新（状态）。
     // 结构事件队列深度 16，远高于实际事件速率（每次打包/解包一条），
     // push 失败即逻辑异常，不在此处重试。
@@ -65,9 +65,9 @@ void BusinessWorld::receiveFromPhysics() {
     if (bodyPose) renderBridge_.pushBodyPose(*bodyPose);
 }
 
-void BusinessWorld::flushChanges() {
+void BusinessWorld::flushChangesToRender() {
     // tick 边界：委托 RenderBridge 发变更事件（事件源 = World 脏集合）。
-    renderBridge_.flushChanges(world_, tickCount_.load(std::memory_order_relaxed));
+    renderBridge_.flushChangesToRender(world_, tickCount_.load(std::memory_order_relaxed));
 }
 long long BusinessWorld::sentChangeEventCount() const {
     return renderBridge_.sentChangeEventCount();
@@ -116,7 +116,7 @@ bool BusinessWorld::placeBlock(const engine::shared::BlockPos& p,
         rejectedPlacementCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    // 裁决通过 → 委托桥排队 PlaceBlock 指令（下次 syncToPhysics 发出）。
+    // 裁决通过 → 委托桥排队 PlaceBlock 指令（下次 syncWorldToPhysics 发出）。
     physicsBridge_.queuePlace(p, static_cast<int>(type));
     placedBlockCount_.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -127,7 +127,7 @@ bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p) {
         rejectedRemovalCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    // 裁决通过 → 委托桥排队 RemoveBlock 指令（下次 syncToPhysics 发出）。
+    // 裁决通过 → 委托桥排队 RemoveBlock 指令（下次 syncWorldToPhysics 发出）。
     physicsBridge_.queueRemove(p);
     removedBlockCount_.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -208,7 +208,7 @@ void BusinessWorld::processPlayerInput(const engine::shared::CameraState& cam,
 }
 
 void BusinessWorld::requestPhysicsResync() {
-    // 只置标志；真正的下发在 syncToPhysics（那里才有世界快照，且每 tick 会重试）。
+    // 只置标志；真正的下发在 syncWorldToPhysics（那里才有世界快照，且每 tick 会重试）。
     resyncPending_ = true;
 }
 

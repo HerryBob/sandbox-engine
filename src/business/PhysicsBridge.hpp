@@ -16,8 +16,8 @@ namespace engine::business {
 // 桥外零共享：任何跨线程方块数据必须走这里。
 //
 // 生产者/消费者分布（SPSC 约束）：
-//   B1 businessToPhysicsCommands_：生产者=业务线程（syncToPhysics），消费者=物理线程（advance）
-//   B2 physicsToBusinessResults_ ：生产者=物理线程（syncToBusiness），消费者=业务线程（receiveFromPhysics）
+//   B1 businessToPhysicsCommands_：生产者=业务线程（syncWorldToPhysics），消费者=物理线程（advance）
+//   B2 physicsToBusinessResults_ ：生产者=物理线程（pushResultsToBusiness），消费者=业务线程（receiveResultsFromPhysics）
 // 物理线程通过 businessToPhysicsCommands()/physicsToBusinessResults() 引用读写自己的端点。
 class PhysicsBridge {
 public:
@@ -33,13 +33,13 @@ public:
     // 业务 Tick 边界：组装一条指令发出（优先级 全量同步→放置→破坏）。
     // fullSnapshot = 业务世界全量方块（SyncBlockSet 用；业务线程现场生成）。
     // push 成功才清对应待发位；失败（队列满）保留下 tick 重试（指令可延迟）。
-    void syncToPhysics(const std::vector<engine::shared::Block>& fullSnapshot);
+    void syncWorldToPhysics(const std::vector<engine::shared::Block>& fullSnapshot);
 
     // 业务 Tick 边界：收光回执并消化。
     // 位置快照/碰撞体数量 → 原子投影（本类自留）；
     // 刚体结构事件/位姿 → 输出参数，由调用方（BusinessWorld）转给 RenderBridge。
     // 两个输出参数都可传 nullptr（调用方不关心时）。
-    void receiveFromPhysics(std::vector<engine::shared::BodyStructureEvent>* bodyEvents,
+    void receiveResultsFromPhysics(std::vector<engine::shared::BodyStructureEvent>* bodyEvents,
                             std::optional<engine::shared::BodyPose>* bodyPose);
 
     // ---- 物理侧访问（装配层分发给物理线程）----

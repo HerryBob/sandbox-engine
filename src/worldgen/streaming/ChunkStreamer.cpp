@@ -83,7 +83,7 @@ void ChunkStreamer::tick(double playerX, double playerZ) {
 
     // ① 淘汰：走出"加载半径 + 1"的列进入待卸载集合。
     // 比加载半径多留一圈 = 滞回，避免玩家站在窗口边界时同一列反复卸载/重建。
-    // 这里只摘 known_、收集坐标；真正删 chunk 在 drainResults（那里才持有 World）。
+    // 这里只摘 known_、收集坐标；真正删 chunk 在 receiveResults（那里才持有 World）。
     collectEvictions(cx, cz);
 
     // ② 收集窗口内尚未请求的列。窗口固定 (2r+1)×(2r+1) 格，每 tick 全扫一遍；
@@ -134,7 +134,7 @@ void ChunkStreamer::enqueueRequests(const std::vector<ColPos>& candidates) {
     }
 }
 
-ChunkStreamer::DrainOutcome ChunkStreamer::drainResults(engine::business::World& world,
+ChunkStreamer::DrainOutcome ChunkStreamer::receiveResults(engine::business::World& world,
                                                         std::size_t maxApply) {
     DrainOutcome out;
     applyPendingEvictions(world, out);                            // ① 先结算淘汰

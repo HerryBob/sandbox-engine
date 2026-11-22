@@ -180,7 +180,7 @@ static void initNoiseAndRunSelfTests() {
 }
 
 // 同步预热：阻塞到窗口内 warmupColumns 列全部写入（装配期没有 25TPS 约束）。
-// 刻意走和运行期完全同一条路径（tick → 后台生成 → drainResults → World）。
+// 刻意走和运行期完全同一条路径（tick → 后台生成 → receiveResults → World）。
 static void warmupWindow(engine::worldgen::ChunkStreamer& streamer,
                          engine::business::World& world,
                          std::size_t warmupColumns) {
@@ -190,7 +190,7 @@ static void warmupWindow(engine::worldgen::ChunkStreamer& streamer,
     while (streamer.stats().applied < warmupColumns &&
            std::chrono::steady_clock::now() < deadline) {
         streamer.tick(spawnX, spawnZ);
-        streamer.drainResults(world, engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
+        streamer.receiveResults(world, engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
@@ -391,7 +391,7 @@ static int run(const std::string& presetName) {
 
     // ---- 业务线程 25TPS：固定 40ms 墙钟节奏 ----
     // 流式统计上报节流：每 25 个业务 tick（约 1 秒）打一行。
-    // 读 stats() 只能在业务线程做——appliedBlocks/minSurface 等聚合字段由 drainResults 独占写。
+    // 读 stats() 只能在业务线程做——appliedBlocks/minSurface 等聚合字段由 receiveResults 独占写。
     std::size_t streamReportCounter = 0;
     bool demoPackQueued = false;   // 演示打包只发一次（业务线程独占，无需原子）
     businessLoop.start([&] {
@@ -400,11 +400,11 @@ static int run(const std::string& presetName) {
             businessWorld.tick(tm.effectiveScale(core::Domain::Business));
             businessWorld.processPlayerInput(cameraState, playerInput);  // 玩家点击 → DDA → 放置/破坏
             // 1b 流式：请求窗口内未加载的列 + 应用后台已算好的结果。
-            // 必须在 flushChanges 之前——新到货 chunk 的脏标记要进本 tick 的变更事件，
+            // 必须在 flushChangesToRender 之前——新到货 chunk 的脏标记要进本 tick 的变更事件，
             // 否则渲染端要等下一个 tick 才看到它。
             if (streamer) {
                 streamer->tick(cameraState.camX.load(), cameraState.camZ.load());
-                const auto drained = streamer->drainResults(
+                const auto drained = streamer->receiveResults(
                     businessWorld.world(),
                     engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
                 // 世界 chunk 集合有变化（加载或卸载）→ 物理侧必须重下一次全量方块集。
@@ -422,9 +422,9 @@ static int run(const std::string& presetName) {
                               << " 世界chunk=" << businessWorld.world().chunkCount() << "\n";
                 }
             }
-            businessWorld.syncToPhysics();       // 发指令 → 物理（经 PhysicsBridge）
-            businessWorld.receiveFromPhysics();  // 收结果 ← 物理（经 PhysicsBridge）
-            businessWorld.flushChanges();        // 变更事件 → 渲染（经 RenderBridge）
+            businessWorld.syncWorldToPhysics();       // 发指令 → 物理（经 PhysicsBridge）
+            businessWorld.receiveResultsFromPhysics();  // 收结果 ← 物理（经 PhysicsBridge）
+            businessWorld.flushChangesToRender();        // 变更事件 → 渲染（经 RenderBridge）
 
             // 演示刚体（第 4 步）：世界出第一列后打包一组 3×3×3 石头并给水平初速度，
             // 物理线程积分位置，渲染端跟着移动。方块不经 World——本步只验"物理→渲染"链路。
@@ -463,7 +463,7 @@ static int run(const std::string& presetName) {
             prev = now;
             physicsWorld.tick(tm.effectiveScale(core::Domain::Physics), wallDt,
                                  physicsBridge.businessToPhysicsCommands());
-            physicsWorld.syncToBusiness(physicsBridge.physicsToBusinessResults());
+            physicsWorld.pushResultsToBusiness(physicsBridge.physicsToBusinessResults());
             std::this_thread::sleep_for(std::chrono::milliseconds(1)); // 避免忙等
         }
     });
@@ -538,7 +538,7 @@ static int run(const std::string& presetName) {
 
     // 优雅停止：模拟三轨先停，渲染线程最后停（第 4 轨只读，不阻塞模拟停止）。
     businessLoop.stop();
-    if (streamer) streamer->stop();   // 业务线程已停（不再 drainResults），再停生成线程
+    if (streamer) streamer->stop();   // 业务线程已停（不再 receiveResults），再停生成线程
     physicsLoop.stop();
     inputLoop.stop();
     renderLoop.stop();

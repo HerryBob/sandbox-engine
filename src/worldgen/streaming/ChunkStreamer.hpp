@@ -67,7 +67,7 @@ public:
     // 业务线程每 tick 调用：最多 maxApply 列写进 world，并先结算上一 tick 积攒的淘汰列。
     // 必须由"唯一 World 写者"线程调用（内部会写 dirtyChunksThisTick_）。
     // 返回本次实际写入的列数与卸载的 chunk 数。
-    DrainOutcome drainResults(engine::business::World& world,
+    DrainOutcome receiveResults(engine::business::World& world,
                               std::size_t maxApply = kMaxApplyPerTick);
 
     GenStats stats() const;
@@ -84,7 +84,7 @@ private:
     // ④ 入队（队列满即停；只记成功的，失败的不能记，否则永不重试）
     void enqueueRequests(const std::vector<ColPos>& candidates);
 
-    // ---- drainResults 的两段（规则1 拆分）----
+    // ---- receiveResults 的两段（规则1 拆分）----
     // ① 结算上一 tick 积攒的淘汰列
     void applyPendingEvictions(engine::business::World& world, DrainOutcome& out);
     // ② 应用生成结果（已被淘汰的列直接丢弃），返回写入列数
@@ -100,7 +100,7 @@ private:
     // 已请求过的列（业务线程独占）。1b 起支持卸载：走出窗口的列从 known_ 移除，
     // 这样玩家走回来时会重新请求生成（否则这些列"永不加载"）。
     std::unordered_set<ColPos> known_;
-    // 待卸载的列（tick 收集，drainResults 结算；业务线程独占）
+    // 待卸载的列（tick 收集，receiveResults 结算；业务线程独占）
     std::unordered_set<ColPos> pendingEvict_;
 
     std::atomic<std::size_t> requestedColumnCount_{0};
@@ -108,7 +108,7 @@ private:
     std::atomic<std::size_t> appliedColumnCount_{0};
     std::atomic<bool> started_{false};
 
-    // 已应用列的聚合统计：只在 drainResults 所在线程（唯一 World 写者）读写，
+    // 已应用列的聚合统计：只在 receiveResults 所在线程（唯一 World 写者）读写，
     // 与后台线程的生成计数分开，避免为三个普通字段引入锁/CAS。
     std::size_t appliedBlocks_ = 0;
     int minSurfaceY_ = kGenMaxY;

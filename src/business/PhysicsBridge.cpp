@@ -25,7 +25,7 @@ void PhysicsBridge::queueRemove(const engine::shared::BlockPos& p) {
     removePos_ = p;
 }
 
-void PhysicsBridge::syncToPhysics(const std::vector<engine::shared::Block>& fullSnapshot) {
+void PhysicsBridge::syncWorldToPhysics(const std::vector<engine::shared::Block>& fullSnapshot) {
     // 业务 Tick 边界：下发指令。一次只发一条（原型节奏），
     // 优先级：全量同步 → 放置 → 破坏（MoveBlock 演示已移除，物理不再收到移动指令）。
     engine::shared::PhysicsCommand cmd;
@@ -61,7 +61,7 @@ void PhysicsBridge::syncToPhysics(const std::vector<engine::shared::Block>& full
     // push 失败（队列满）不清待发位：下 tick 重试。指令可延迟送达（最终一致）。
 }
 
-void PhysicsBridge::receiveFromPhysics(
+void PhysicsBridge::receiveResultsFromPhysics(
     std::vector<engine::shared::BodyStructureEvent>* bodyEvents,
     std::optional<engine::shared::BodyPose>* bodyPose) {
     // 业务 Tick 边界：收物理结果（位置快照/碰撞体数量/刚体结构/位姿）。

@@ -31,14 +31,14 @@ public:
     void tick(double scale);
 
     // tick 边界：委托 PhysicsBridge 把待发指令（全量同步/放置/破坏）发给物理线程。
-    void syncToPhysics();
+    void syncWorldToPhysics();
 
     // tick 边界：委托 PhysicsBridge 收取物理回执（位置快照/碰撞体数量）。
-    void receiveFromPhysics();
+    void receiveResultsFromPhysics();
 
     // tick 边界：委托 RenderBridge 把本 tick 变脏的 chunk 聚合为一条变更事件
     // 发给渲染端（第 4 轨只读）。渲染端消费后只重建变过的 chunk mesh。
-    void flushChanges();
+    void flushChangesToRender();
     long long sentChangeEventCount() const; // 已发变更事件数（断言/诊断）
 
     // ---- 命令式接口（演示/玩家/脚本事件源共用）----
@@ -76,7 +76,7 @@ public:
     // ---- 方块放置/破坏（业务裁决，主世界静态方块）----
     // 裁决规则：①位置已占用 → 拒绝放置；②破坏不存在的方块 → 拒绝。
     // 裁决通过后修改方块表并自动排队 PlaceBlock/RemoveBlock 指令
-    // （下次 syncToPhysics 发出）。
+    // （下次 syncWorldToPhysics 发出）。
     bool placeBlock(const engine::shared::BlockPos& p, engine::shared::BlockType type);
     bool removeBlock(const engine::shared::BlockPos& p);
 
@@ -87,7 +87,7 @@ public:
 
     // 请求下一次同步下发全量方块集（区块卸载等"批量增删"之后调用）。
     // 物理侧只认 SyncBlockSet 才能建立集合，逐条 RemoveBlock 卸载 4096 格不现实。
-    // 只置标志：真正的下发与重试在 syncToPhysics 里（指令槽位被占用时下 tick 再试）。
+    // 只置标志：真正的下发与重试在 syncWorldToPhysics 里（指令槽位被占用时下 tick 再试）。
     void requestPhysicsResync();
 
     long long playerActionsProcessed() const;  // 已处理玩家点击次数（断言/诊断）
@@ -103,7 +103,7 @@ private:
     // 世界（状态层）：方块数据 + 锁 + 查询 + 动作入口（World 内部加锁）。
     engine::business::World world_;
     // 桥（通信层）：跨线程数据唯一通道。由装配层（main）创建并注入，
-    // 本类只负责在 tick 边界委托调用（syncToPhysics/receiveFromPhysics/flushChanges）。
+    // 本类只负责在 tick 边界委托调用（syncWorldToPhysics/receiveResultsFromPhysics/flushChangesToRender）。
     engine::business::PhysicsBridge& physicsBridge_;
     engine::business::RenderBridge&  renderBridge_;
 

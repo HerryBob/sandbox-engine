@@ -254,7 +254,7 @@ void PhysicsWorld::snapshotPlayerBody(double wallDt) {
     }
 }
 
-void PhysicsWorld::syncToBusiness(
+void PhysicsWorld::pushResultsToBusiness(
     engine::core::SPSCQueue<engine::shared::PhysicsResult>& q) {
     // ① 回执优先：打包/解包确认必须逐条送达（回执是事件，不能合并丢弃）。
     for (const auto& r : pendingReceipts_) q.push(r);

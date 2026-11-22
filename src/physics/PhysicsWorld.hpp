@@ -58,7 +58,7 @@ public:
                  engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness);
 
     // 物理 → 业务：先发打包回执（逐条，不合并），再发位置快照（合并语义）。
-    void syncToBusiness(engine::core::SPSCQueue<engine::shared::PhysicsResult>& q);
+    void pushResultsToBusiness(engine::core::SPSCQueue<engine::shared::PhysicsResult>& q);
 
     double     simTime() const;
     long long  tickCount() const;
@@ -139,7 +139,7 @@ private:
     std::vector<engine::shared::PhysicsResult> pendingCollisions_; // 待发碰撞事件（纯物理线程）
     std::atomic<long long> collisionCount_{0};  // 累计碰撞次数（main 读）
     double lastPosSentSimT_ = -1.0; // 纯物理线程：上次已发位置快照的模拟时刻。
-                                    // 物理循环每墙钟帧调 syncToBusiness，但模拟 tick 只
+                                    // 物理循环每墙钟帧调 pushResultsToBusiness，但模拟 tick 只
                                     // 25Hz——同一模拟时刻的位置被重复发 ~15 次（旧行为）。
                                     // 位置快照语义：只发"新模拟时刻"的位置（数据层②修正）。
 

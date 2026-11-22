@@ -22,7 +22,7 @@ public:
 
     // 业务 Tick 边界：把本 tick 变脏的 chunk 聚合为一条变更事件发出。
     // 事件源 = World 的脏集合（动作写入，自动去重）；push 成功才清空。
-    void flushChanges(World& world, long long tick);
+    void flushChangesToRender(World& world, long long tick);
 
     // 刚体结构事件：push 失败返回 false，调用方保留下次重试。
     bool pushBodyStructure(const engine::shared::BodyStructureEvent& ev);
