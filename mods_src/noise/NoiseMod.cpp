@@ -17,7 +17,8 @@
 //             破坏"引擎侧删掉全部噪声实现也能编译"这一前提。
 // ============================================================================
 
-#include "modapi/IMod.hpp"
+#include "modapi/mod_api.h"
+#include "modapi/mod_c_api.h"
 #include "modapi/noise_api.h"
 
 #include "FbmNoise.hpp"
@@ -37,7 +38,7 @@ void setError(const char** errOut, const char* msg) {
 }
 
 // 从参数数组里取数值参数（找不到返回 fallback）。count<=0 时 params 可为 nullptr。
-double findNumber(const modapi::NoiseParamC* params, std::int32_t count,
+double findNumber(const NoiseParamC* params, std::int32_t count,
                   const char* key, double fallback) {
     for (std::int32_t i = 0; i < count; ++i) {
         if (params[i].key != nullptr && std::strcmp(params[i].key, key) == 0) {
@@ -48,7 +49,7 @@ double findNumber(const modapi::NoiseParamC* params, std::int32_t count,
 }
 
 // 取字符串参数（找不到或该参数是数值时返回 nullptr）。
-const char* findString(const modapi::NoiseParamC* params, std::int32_t count,
+const char* findString(const NoiseParamC* params, std::int32_t count,
                        const char* key) {
     for (std::int32_t i = 0; i < count; ++i) {
         if (params[i].key != nullptr && std::strcmp(params[i].key, key) == 0) {
@@ -59,7 +60,7 @@ const char* findString(const modapi::NoiseParamC* params, std::int32_t count,
 }
 
 // ---- perlin -------------------------------------------------------------
-void* createPerlin(const modapi::NoiseParamC* params, std::int32_t count,
+void* createPerlin(const NoiseParamC* params, std::int32_t count,
                    const char** errOut) {
     const double scale = findNumber(params, count, "scale", 1.0);
     // !(x > 0) 同时挡住 NaN —— 否则 NaN 会一路渗进高度计算
@@ -71,7 +72,7 @@ void* createPerlin(const modapi::NoiseParamC* params, std::int32_t count,
 }
 
 // ---- fbm ----------------------------------------------------------------
-void* createFbm(const modapi::NoiseParamC* params, std::int32_t count,
+void* createFbm(const NoiseParamC* params, std::int32_t count,
                 const char** errOut) {
     // 缺省值与原内置实现一致：基底 perlin、4 层、lacunarity 2、gain 0.5。
     const char* baseName = findString(params, count, "base");
@@ -124,48 +125,48 @@ void destroyAny(void* self) {
 }
 
 // ---- provider 描述：必须是静态存储（引擎注册时会读 type 字符串指针）----
-const modapi::NoiseProviderDef kPerlin{
+const NoiseProviderDef kPerlin{
     "perlin", &createPerlin, &sampleAny<PerlinNoise>, &destroyAny<PerlinNoise>,
 };
-const modapi::NoiseProviderDef kFbm{
+const NoiseProviderDef kFbm{
     "fbm", &createFbm, &sampleAny<FbmNoise>, &destroyAny<FbmNoise>,
 };
 
 // ============================================================================
 // 模组本体
 // ============================================================================
-class NoiseMod : public modapi::IMod {
+class NoiseMod {
 public:
-    const char* name() const override { return "mod_noise"; }
-    const char* version() const override { return "0.1"; }
+    const char* name() const { return "mod_noise"; }
+    const char* version() const { return "0.1"; }
 
-    bool onLoad(const modapi::ModApi* api) override {
+    bool onLoad(const ModApi* api) {
         if (api == nullptr) return false;
 
         // 版本校验：接口一旦改版就拒绝加载，而不是带着错位布局继续跑。
-        if (api->noise.version != modapi::kEngineApiVersion) {
-            api->noise.log(modapi::kLogError, "接口版本不匹配，拒绝加载");
+        if (api->noise.version != kEngineApiVersion) {
+            api->noise.log(kLogError, "接口版本不匹配，拒绝加载");
             return false;
         }
         if (api->noise.registerNoise == nullptr) {
-            api->noise.log(modapi::kLogError, "引擎未提供 registerNoise 回调（版本过旧）");
+            api->noise.log(kLogError, "引擎未提供 registerNoise 回调（版本过旧）");
             return false;
         }
 
-        const modapi::NoiseProviderDef* defs[] = {&kPerlin, &kFbm};
-        for (const modapi::NoiseProviderDef* def : defs) {
+        const NoiseProviderDef* defs[] = {&kPerlin, &kFbm};
+        for (const NoiseProviderDef* def : defs) {
             if (api->noise.registerNoise(api->noise.host, def) != 0) {
-                api->noise.log(modapi::kLogError,
+                api->noise.log(kLogError,
                                (std::string("注册噪声 provider 失败：") + def->type).c_str());
                 return false;
             }
         }
 
-        api->noise.log(modapi::kLogInfo, "mod_noise 已注册 2 个噪声 provider（perlin/fbm）");
+        api->noise.log(kLogInfo, "mod_noise 已注册 2 个噪声 provider（perlin/fbm）");
         return true;
     }
 
-    void onUnload() override {
+    void onUnload() {
         // 三个 provider 的 def 是静态常量，引擎只拷贝了函数指针与 type 字符串。
         // 实例的销毁走各自的 destroy（引擎侧在句柄析构时调用），本模组无需清理。
     }
@@ -173,13 +174,44 @@ public:
 
 } // namespace mod
 
-// ---- DLL 导出入口（C 链接，名字不修饰，host 用 GetProcAddress 精确查找）----
+// ---- DLL 导出入口（纯 C 契约：ModVtbl + CreateModC，见 modapi/mod_c_api.h）----
 
-extern "C" __declspec(dllexport) modapi::IMod* CreateMod(const modapi::ModApi* api) {
-    return new (std::nothrow) mod::NoiseMod();
+static const char* noiseModName(ModSelf self) {
+    return static_cast<mod::NoiseMod*>(self)->name();
 }
 
-extern "C" __declspec(dllexport) void DestroyMod(modapi::IMod* mod) {
-    // 谁 new 谁 delete：这个 delete 必须发生在本 DLL 内，否则跨运行库释放会崩。
-    delete mod;
+static const char* noiseModVersion(ModSelf self) {
+    return static_cast<mod::NoiseMod*>(self)->version();
+}
+
+static int32_t noiseModOnLoad(ModSelf self, const void* api) {
+    return static_cast<mod::NoiseMod*>(self)->onLoad(static_cast<const ModApi*>(api))
+               ? 0 : -1;
+}
+
+static void noiseModOnUnload(ModSelf self) {
+    static_cast<mod::NoiseMod*>(self)->onUnload();
+}
+
+static void noiseModDestroy(ModSelf self) {
+    delete static_cast<mod::NoiseMod*>(self);   // 谁 new 谁 delete：释放走本 DLL 的 CRT
+}
+
+static const ModVtbl kNoiseModVtbl{
+    MODAPI_MOD_ABI_VERSION,
+    &noiseModName,
+    &noiseModVersion,
+    &noiseModOnLoad,
+    &noiseModOnUnload,
+    &noiseModDestroy,
+};
+
+extern "C" __declspec(dllexport) int32_t CreateModC(const void* api, ModSelf* outSelf,
+                                                    const ModVtbl** outVtbl) {
+    auto* instance = new (std::nothrow) mod::NoiseMod();
+    if (instance == nullptr) return -1;
+    *outSelf = static_cast<ModSelf>(instance);
+    *outVtbl = &kNoiseModVtbl;
+    (void)api;   // Create 阶段不需要引擎能力：注册一律放 onLoad
+    return 0;
 }

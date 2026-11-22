@@ -14,7 +14,6 @@ class World;   // 前向声明：写入只经 World::applyGeneratedChunk，不�
 }
 
 namespace engine::worldgen {
-
 // 流式区块生成器（1b）：把一个"按玩家位置动态请求 + 后台生成 + 结果回传"的闭环装进一个对象。
 //
 // 线程模型（8.4 条准则"线程跟着数据是否共享走"）：

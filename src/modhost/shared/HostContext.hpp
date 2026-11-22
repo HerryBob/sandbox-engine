@@ -1,6 +1,6 @@
 #pragma once
 
-#include "modapi/IMod.hpp"
+#include "modapi/mod_api.h"
 
 #include <cstdint>
 #include <string>
@@ -24,6 +24,6 @@ struct HostContext {
 
 // 全局唯一的加载上下文与 API 表。
 extern HostContext g_host;
-extern modapi::ModApi g_api;
+extern ModApi g_api;
 
 } // namespace engine::modhost

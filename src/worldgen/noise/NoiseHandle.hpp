@@ -20,7 +20,7 @@ class NoiseHandle {
 public:
     NoiseHandle() {}
 
-    NoiseHandle(void* self, modapi::NoiseSampleFn sample, modapi::NoiseDestroyFn destroy)
+    NoiseHandle(void* self, NoiseSampleFn sample, NoiseDestroyFn destroy)
         : self_(self), sample_(sample), destroy_(destroy) {}
 
     ~NoiseHandle() { reset(); }
@@ -65,8 +65,8 @@ public:
 
 private:
     void*                  self_ = nullptr;
-    modapi::NoiseSampleFn  sample_ = nullptr;
-    modapi::NoiseDestroyFn destroy_ = nullptr;
+    NoiseSampleFn  sample_ = nullptr;
+    NoiseDestroyFn destroy_ = nullptr;
 };
 
 } // namespace engine::worldgen

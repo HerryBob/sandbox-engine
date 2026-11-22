@@ -65,7 +65,7 @@ void ChunkStreamer::workerLoop() {
 void ChunkStreamer::tickUpdate(double playerX, double playerZ) {
     // 世界坐标 → 列坐标：先 floor 再 >>4（对负数也正确：-0.5 属列 -1）
     const int cx = static_cast<int>(std::floor(playerX)) >> 4;
-    const int cz = static_cast<int>(std::floor(playerZ)) >> 4;
+    const int cz = static_cast<int>(std::floor(playerZ)) >> 4 ;
 
     // ① 淘汰：走出"加载半径 + 1"的列进入待卸载集合。
     // 比加载半径多留一圈 = 滞回，避免玩家站在窗口边界时同一列反复卸载/重建。

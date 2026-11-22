@@ -62,26 +62,26 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
         return 0;
     }
 
-    g_api = modapi::ModApi{};
+    g_api = ModApi{};
     // 共用基类字段在三个子结构各填一份（继承布局：每个子结构自带 version/host/log）
-    g_api.block.version       = modapi::kEngineApiVersion;
+    g_api.block.version       = kEngineApiVersion;
     g_api.block.host          = &g_host;
     g_api.block.log           = &logImpl;
     g_api.block.registerBlock = &registerBlockImpl;
 
-    g_api.noise.version       = modapi::kEngineApiVersion;
+    g_api.noise.version       = kEngineApiVersion;
     g_api.noise.host          = &g_host;
     g_api.noise.log           = &logImpl;
     g_api.noise.registerNoise = &registerNoiseImpl;
 
-    g_api.world.version            = modapi::kEngineApiVersion;
+    g_api.world.version            = kEngineApiVersion;
     g_api.world.host               = &g_host;
     g_api.world.log                = &logImpl;
     g_api.world.getBlock           = &getBlockImpl;
     g_api.world.forEachBlockInAABB = &forEachBlockInAABBImpl;
     g_api.world.getWorldInfo       = &getWorldInfoImpl;
 
-    g_api.entity.version        = modapi::kEngineApiVersion;
+    g_api.entity.version        = kEngineApiVersion;
     g_api.entity.host           = &g_host;
     g_api.entity.log            = &logImpl;
     g_api.entity.registerEntity = &registerEntityImpl;
@@ -121,7 +121,6 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
                        std::to_string(c.manifest.dependencies.size()) + " 个）");
         candidates.push_back(c);
     }
-
     // 排序：先 phase 升序，同 phase 按 id。
     // 这一步只固定"同层节点"的先后，真正的前后关系由依赖排序决定。
     std::sort(candidates.begin(), candidates.end(),
@@ -177,39 +176,48 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
 
         // GetProcAddress 返回 FARPROC，必须先转 void* 再转目标函数指针类型：
         // 直接 FARPROC → 函数指针在 MSVC 下会触发 C4191（不安全类型转换）。
-        modapi::CreateModFn create = reinterpret_cast<modapi::CreateModFn>(
-            reinterpret_cast<void*>(::GetProcAddress(h, modapi::kCreateModSymbol)));
-        modapi::DestroyModFn destroy = reinterpret_cast<modapi::DestroyModFn>(
-            reinterpret_cast<void*>(::GetProcAddress(h, modapi::kDestroyModSymbol)));
+        CreateModCFn createC = reinterpret_cast<CreateModCFn>(
+            reinterpret_cast<void*>(::GetProcAddress(h, kCreateModCSymbol)));
 
-        if (create == nullptr || destroy == nullptr) {
-            ENGINE_LOG_ERROR("Mod", "拒绝加载 " + shown + "：缺少 CreateMod / DestroyMod 导出符号");
+        if (createC == nullptr) {
+            ENGINE_LOG_ERROR("Mod", "拒绝加载 " + shown + "：缺少 CreateModC 导出符号");
             failedIds.insert(modId);
             ::FreeLibrary(h);
             continue;
         }
 
         // 阶段③：实例化。构造函数里不做注册（注册一律放 onLoad，方便失败回滚）
-        modapi::IMod* mod = create(&g_api);
-        if (mod == nullptr) {
-            ENGINE_LOG_ERROR("Mod", "CreateMod 返回空指针：" + shown);
+        ModSelf self = nullptr;
+        const ModVtbl* vtbl = nullptr;
+        if (createC(&g_api, &self, &vtbl) != 0 || self == nullptr || vtbl == nullptr) {
+            ENGINE_LOG_ERROR("Mod", "CreateModC 失败（实例或函数表为空）：" + shown);
+            failedIds.insert(modId);
+            ::FreeLibrary(h);
+            continue;
+        }
+        // 入口表 ABI 必须严格相等：布局不同的话，之后每次函数表调用都会错位。
+        if (vtbl->abiVersion != MODAPI_MOD_ABI_VERSION) {
+            ENGINE_LOG_ERROR("Mod", "拒绝加载 " + shown + "：模组入口 ABI=" +
+                             std::to_string(vtbl->abiVersion) + "，引擎要求 " +
+                             std::to_string(MODAPI_MOD_ABI_VERSION));
+            vtbl->destroy(self);   // 先让模组销毁实例，再卸库
             failedIds.insert(modId);
             ::FreeLibrary(h);
             continue;
         }
 
         // 来源标记：onLoad 里注册内容时要记到这本模组名下，必须在 onLoad 之前设置。
-        // 拷成 std::string —— mod->name() 指向 DLL 静态区，卸载后即失效。
-        g_host.currentMod = mod->name();
+        // 拷成 std::string —— name(self) 返回 DLL 静态区的字符串，卸载后即失效。
+        g_host.currentMod = vtbl->name(self);
 
         // 清单 id 与 DLL 自报名字不一致：只警告，不拒绝（排序与拒绝以清单为准）
-        if (c.manifest.id != mod->name()) {
-            ENGINE_LOG_WARN("Mod", "清单 id 与 IMod::name() 不一致：" + c.manifest.id +
-                             " vs " + mod->name() + "（" + shown + "）");
+        if (c.manifest.id != vtbl->name(self)) {
+            ENGINE_LOG_WARN("Mod", "清单 id 与 ModVtbl::name() 不一致：" + c.manifest.id +
+                             " vs " + vtbl->name(self) + "（" + shown + "）");
         }
 
         // 阶段④：初始化。模组在这里校验 api->version 并注册内容。
-        if (!mod->onLoad(&g_api)) {
+        if (vtbl->onLoad(self, &g_api) != 0) {
             ENGINE_LOG_ERROR("Mod", "onLoad 返回 false，放弃该模组：" + shown);
             // 失败回滚：把这个模组已经注册进去的内容按来源清掉，避免残留
             // （噪声表里存的是它的函数指针，随后的 FreeLibrary 会让它们悬垂）。
@@ -218,7 +226,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
             if (rolledBack > 0) {
                 ENGINE_LOG_INFO("Mod", "回滚噪声注册 " + std::to_string(rolledBack) + " 个（" + shown + "）");
             }
-            destroy(mod);
+            vtbl->destroy(self);
             g_host.currentMod.clear();
             failedIds.insert(modId);
             ::FreeLibrary(h);
@@ -226,7 +234,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
         }
 
         std::ostringstream oss;
-        oss << "加载成功：" << mod->name() << " v" << mod->version()
+        oss << "加载成功：" << vtbl->name(self) << " v" << vtbl->version(self)
             << "（" << shown << "）";
         ENGINE_LOG_INFO("Mod", oss.str());
 
@@ -238,7 +246,7 @@ std::size_t ModLoader::loadAll(const std::string& dir) {
         engine::resource::g_resourceIndex.addRoot(
             engine::resource::ResourceKind::Data, g_host.currentMod, modRoot / "data");
 
-        s_mods_.push_back(LoadedMod{c.dll.string(), g_host.currentMod, reinterpret_cast<void*>(h), mod, destroy});
+        s_mods_.push_back(LoadedMod{c.dll.string(), g_host.currentMod, reinterpret_cast<void*>(h), self, vtbl});
         g_host.currentMod.clear();
         ++okCount;
     }
@@ -255,10 +263,12 @@ void ModLoader::unloadAll() {
     // 逆序卸载：后加载的模组可能依赖先加载的模组注册的内容，先卸它对依赖方更安全。
     for (std::size_t i = s_mods_.size(); i > 0; --i) {
         LoadedMod& m = s_mods_[i - 1U];
-        if (m.instance != nullptr) {
-            m.instance->onUnload();
-            if (m.destroy != nullptr) m.destroy(m.instance);  // 谁创建谁销毁：delete 在 DLL 内
-            m.instance = nullptr;
+        if (m.self != nullptr) {
+            if (m.vtbl != nullptr) {
+                m.vtbl->onUnload(m.self);
+                m.vtbl->destroy(m.self);   // 谁创建谁销毁：delete 在 DLL 内
+            }
+            m.self = nullptr;
         }
         // 卸载闭环：把本模组注册的噪声 provider 按来源清掉。
         // 必须在 FreeLibrary 之前做 —— 表里的 create/sample/destroy 指向 DLL 代码段，

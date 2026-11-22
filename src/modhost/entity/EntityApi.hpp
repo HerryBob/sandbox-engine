@@ -10,6 +10,6 @@ namespace engine::modhost {
 // host：加载上下文（模组回传的 void*），用来取下一个可用 id 与当前模组名
 // def ：模组给出的实体类型定义
 // 返回：分配的类型 id（>=0）；拒绝时为 -1
-std::int32_t registerEntityImpl(void* host, const modapi::ModEntityDef* def);
+std::int32_t registerEntityImpl(void* host, const ModEntityDef* def);
 
 } // namespace engine::modhost

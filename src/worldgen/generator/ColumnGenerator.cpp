@@ -71,13 +71,13 @@ bool ColumnGenerator::prepare() {
     // ---- 5. 创建高度场句柄（所有校验通过后最后做，失败不留半成品）----
     // 参数数组只在 make 调用期间有效：key / str 都指向 preset_ 内的 string，
     // provider 必须自己拷贝需要长期保留的值（契约见 modapi/noise_api.h）。
-    std::vector<modapi::NoiseParamC> params;
+    std::vector<NoiseParamC> params;
     params.reserve(preset_.heightParams.size() + 1U);
     if (!preset_.heightBase.empty()) {
-        params.push_back(modapi::NoiseParamC{"base", preset_.heightBase.c_str(), 0.0});
+        params.push_back(NoiseParamC{"base", preset_.heightBase.c_str(), 0.0});
     }
     for (const HeightParam& p : preset_.heightParams) {
-        params.push_back(modapi::NoiseParamC{
+        params.push_back(NoiseParamC{
             p.key.c_str(), p.str.empty() ? nullptr : p.str.c_str(), p.num});
     }
 

@@ -10,7 +10,7 @@
 
 namespace engine::modhost {
 
-std::int32_t registerBlockImpl(void* host, const modapi::ModBlockDef* def) {
+std::int32_t registerBlockImpl(void* host, const ModBlockDef* def) {
     if (host == nullptr || def == nullptr) return -1;
     if (def->name == nullptr || def->texture == nullptr) {
         ENGINE_LOG_ERROR("Mod", "registerBlock 被拒绝：name / texture 为空");

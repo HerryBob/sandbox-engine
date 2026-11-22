@@ -12,7 +12,8 @@
 // 能力取用：只用到方块能力（api->block.*）。
 // ============================================================================
 
-#include "modapi/IMod.hpp"
+#include "modapi/mod_api.h"
+#include "modapi/mod_c_api.h"
 
 #include <cstdint>
 #include <new>
@@ -20,20 +21,20 @@
 namespace mod {
 
 // 注册一个方块；失败返回 false（引擎侧已打详细原因，这里只记数量）。
-static bool registerOne(const modapi::ModApi* api, const modapi::ModBlockDef& def) {
+static bool registerOne(const ModApi* api, const ModBlockDef& def) {
     const std::int32_t id = api->block.registerBlock(api->block.host, &def);
     return id >= 0;
 }
 
-class BuiltinBlocksMod : public modapi::IMod {
+class BuiltinBlocksMod {
 public:
-    const char* name() const override { return "builtin_blocks"; }
-    const char* version() const override { return "1.0"; }
+    const char* name() const { return "builtin_blocks"; }
+    const char* version() const { return "1.0"; }
 
-    bool onLoad(const modapi::ModApi* api) override {
+    bool onLoad(const ModApi* api) {
         if (api == nullptr) return false;
-        if (api->block.version != modapi::kEngineApiVersion) {
-            api->block.log(modapi::kLogError, "接口版本不匹配，拒绝加载");
+        if (api->block.version != kEngineApiVersion) {
+            api->block.log(kLogError, "接口版本不匹配，拒绝加载");
             return false;
         }
 
@@ -41,11 +42,11 @@ public:
 
         // ---- stone：石头（基准方块）----
         {
-            modapi::ModBlockDef def{};
+            ModBlockDef def{};
             def.name       = "stone";
             def.opaque     = 1U;
             def.hardness   = 1.5f;
-            def.renderType = modapi::kRenderSolid;
+            def.renderType = kRenderSolid;
             def.texture    = "stone";
             def.model      = nullptr;
             def.mass       = 2.5f;
@@ -56,11 +57,11 @@ public:
 
         // ---- wood：木头（模型化：顶/底 log_top，侧 log_side）----
         {
-            modapi::ModBlockDef def{};
+            ModBlockDef def{};
             def.name       = "wood";
             def.opaque     = 1U;
             def.hardness   = 2.0f;
-            def.renderType = modapi::kRenderSolid;
+            def.renderType = kRenderSolid;
             def.texture    = "log_side";
             def.model      = "wood";
             def.mass       = 1.2f;
@@ -71,11 +72,11 @@ public:
 
         // ---- dirt：泥土 ----
         {
-            modapi::ModBlockDef def{};
+            ModBlockDef def{};
             def.name       = "dirt";
             def.opaque     = 1U;
             def.hardness   = 0.5f;
-            def.renderType = modapi::kRenderSolid;
+            def.renderType = kRenderSolid;
             def.texture    = "dirt";
             def.model      = nullptr;
             def.mass       = 1.5f;
@@ -86,11 +87,11 @@ public:
 
         // ---- brick：砖块（注册表扩展性验收留下的方块）----
         {
-            modapi::ModBlockDef def{};
+            ModBlockDef def{};
             def.name       = "brick";
             def.opaque     = 1U;
             def.hardness   = 2.0f;
-            def.renderType = modapi::kRenderSolid;
+            def.renderType = kRenderSolid;
             def.texture    = "brick";
             def.model      = nullptr;
             def.mass       = 2.2f;
@@ -101,11 +102,11 @@ public:
 
         // ---- glass：玻璃（镂空渲染桶 + 不参与面剔除）----
         {
-            modapi::ModBlockDef def{};
+            ModBlockDef def{};
             def.name       = "glass";
             def.opaque     = 0U;
             def.hardness   = 0.5f;
-            def.renderType = modapi::kRenderCutout;
+            def.renderType = kRenderCutout;
             def.texture    = "glass";
             def.model      = nullptr;
             def.mass       = 1.0f;
@@ -116,11 +117,11 @@ public:
 
         // ---- grass：草地（地表层；顶 grass_top，侧 grass_side，底 dirt）----
         {
-            modapi::ModBlockDef def{};
+            ModBlockDef def{};
             def.name       = "grass";
             def.opaque     = 1U;
             def.hardness   = 0.6f;
-            def.renderType = modapi::kRenderSolid;
+            def.renderType = kRenderSolid;
             def.texture    = "grass_top";
             def.model      = "grass";
             def.mass       = 1.4f;
@@ -131,27 +132,62 @@ public:
 
         if (failed != 0) {
             // 不回滚：注册表没有 erase，已成功的方块保留，缺的由引擎侧 resolve 自检报出来。
-            api->block.log(modapi::kLogError, "builtin_blocks 有方块注册失败（详见引擎日志）");
+            api->block.log(kLogError, "builtin_blocks 有方块注册失败（详见引擎日志）");
             return false;
         }
 
-        api->block.log(modapi::kLogInfo, "builtin_blocks 已注册 6 个内置方块");
+        api->block.log(kLogInfo, "builtin_blocks 已注册 6 个内置方块");
         return true;
     }
 
-    void onUnload() override {
+    void onUnload() {
         // 方块定义归引擎注册表管，本模组不持有堆资源。
     }
 };
 
 } // namespace mod
 
-// ---- DLL 导出入口（C 链接，名字不修饰）----
+// ---- DLL 导出入口（纯 C 契约：ModVtbl + CreateModC，见 modapi/mod_c_api.h）----
+// 五个静态转发函数 = 把 C 函数表接到本类的成员函数上。
+// 它们在本 DLL 内编译，等价于 C++ 的静态分发，不跨模块。
 
-extern "C" __declspec(dllexport) modapi::IMod* CreateMod(const modapi::ModApi* api) {
-    return new (std::nothrow) mod::BuiltinBlocksMod();
+static const char* builtinBlocksName(ModSelf self) {
+    return static_cast<mod::BuiltinBlocksMod*>(self)->name();
 }
 
-extern "C" __declspec(dllexport) void DestroyMod(modapi::IMod* mod) {
-    delete mod;
+static const char* builtinBlocksVersion(ModSelf self) {
+    return static_cast<mod::BuiltinBlocksMod*>(self)->version();
+}
+
+static int32_t builtinBlocksOnLoad(ModSelf self, const void* api) {
+    return static_cast<mod::BuiltinBlocksMod*>(self)->onLoad(
+               static_cast<const ModApi*>(api))
+               ? 0 : -1;
+}
+
+static void builtinBlocksOnUnload(ModSelf self) {
+    static_cast<mod::BuiltinBlocksMod*>(self)->onUnload();
+}
+
+static void builtinBlocksDestroy(ModSelf self) {
+    delete static_cast<mod::BuiltinBlocksMod*>(self);   // 谁 new 谁 delete：释放走本 DLL 的 CRT
+}
+
+static const ModVtbl kBuiltinBlocksVtbl{
+    MODAPI_MOD_ABI_VERSION,
+    &builtinBlocksName,
+    &builtinBlocksVersion,
+    &builtinBlocksOnLoad,
+    &builtinBlocksOnUnload,
+    &builtinBlocksDestroy,
+};
+
+extern "C" __declspec(dllexport) int32_t CreateModC(const void* api, ModSelf* outSelf,
+                                                    const ModVtbl** outVtbl) {
+    auto* instance = new (std::nothrow) mod::BuiltinBlocksMod();
+    if (instance == nullptr) return -1;
+    *outSelf = static_cast<ModSelf>(instance);
+    *outVtbl = &kBuiltinBlocksVtbl;
+    (void)api;   // Create 阶段不需要引擎能力：注册一律放 onLoad
+    return 0;
 }

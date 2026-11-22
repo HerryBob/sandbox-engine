@@ -4,8 +4,8 @@
 
 namespace engine::worldgen {
 
-std::unordered_map<std::string, modapi::NoiseProviderDef>& NoiseRegistry::table() {
-    static std::unordered_map<std::string, modapi::NoiseProviderDef> entries;
+std::unordered_map<std::string, NoiseProviderDef>& NoiseRegistry::table() {
+    static std::unordered_map<std::string, NoiseProviderDef> entries;
     return entries;
 }
 
@@ -19,14 +19,14 @@ bool& NoiseRegistry::frozenFlag() {
     return frozen;
 }
 
-bool NoiseRegistry::registerType(const modapi::NoiseProviderDef& def, const char* owner) {
+bool NoiseRegistry::registerType(const NoiseProviderDef& def, const char* owner) {
     if (frozenFlag()) return false;
     if (def.type == nullptr || def.type[0] == '\0') return false;
     if (def.create == nullptr || def.sample == nullptr || def.destroy == nullptr) return false;
 
     // key 必须持有独立拷贝（DLL 卸载后原字符串会悬空）；
     // 表内也不再保存 def.type 指针（同样理由：它指向 DLL 的静态字符串）。
-    modapi::NoiseProviderDef stored = def;
+    NoiseProviderDef stored = def;
     stored.type = nullptr;
     const std::string typeName(def.type);
     if (!table().emplace(typeName, stored).second) return false;
@@ -64,7 +64,7 @@ std::size_t NoiseRegistry::countByOwner(const char* owner) {
     return count;
 }
 
-bool NoiseRegistry::make(const char* type, const modapi::NoiseParamC* params,
+bool NoiseRegistry::make(const char* type, const NoiseParamC* params,
                          std::int32_t count, NoiseHandle& out) {
     out.reset();
     if (type == nullptr) {

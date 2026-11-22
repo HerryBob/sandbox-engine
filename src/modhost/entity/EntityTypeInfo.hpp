@@ -24,7 +24,7 @@ struct EntityTypeInfo {
     // 动画回调（v5 字段，引擎当前不调用；程序化动画阶段再接）
     void*       animUser = nullptr;
     std::uint32_t (*onAnimate)(void* animUser, float dtSec, float speed,
-                               modapi::ModBonePose* out, std::uint32_t capacity) = nullptr;
+                               ModBonePose* out, std::uint32_t capacity) = nullptr;
 };
 
 } // namespace engine::modhost

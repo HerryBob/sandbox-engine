@@ -1,6 +1,7 @@
 #pragma once
 
-#include "modapi/IMod.hpp"
+#include "modapi/mod_api.h"
+#include "modapi/mod_c_api.h"
 
 #include <cstddef>
 #include <string>
@@ -25,11 +26,11 @@ public:
 private:
 
     struct LoadedMod {
-        std::string           path;      // 完整路径（日志用）
-        std::string           name;      // 模组名副本（注册来源标记用，绝不留 DLL 里的指针）
-        void*                 handle;    // HMODULE
-        modapi::IMod*         instance;  // 模组实例（归属 DLL）
-        modapi::DestroyModFn  destroy;   // 模组导出的销毁函数
+        std::string      path;    // 完整路径（日志用）
+        std::string      name;    // 模组名副本（注册来源标记用，绝不留 DLL 里的指针）
+        void*            handle;  // HMODULE
+        ModSelf          self;    // 模组实例（归属 DLL，destroy 由模组的函数表完成）
+        const ModVtbl*   vtbl;    // 模组导出的函数表（指向 DLL 的 .rdata，卸载前有效）
     };
 
     static std::vector<LoadedMod> s_mods_;

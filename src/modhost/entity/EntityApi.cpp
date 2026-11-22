@@ -21,7 +21,7 @@ static std::string resolveModResourcePath(const std::string& modName, const char
     return "mods/" + modName + "/" + p;
 }
 
-std::int32_t registerEntityImpl(void* host, const modapi::ModEntityDef* def) {
+std::int32_t registerEntityImpl(void* host, const ModEntityDef* def) {
     if (host == nullptr || def == nullptr) return -1;
     if (def->name == nullptr || def->model == nullptr) {
         ENGINE_LOG_ERROR("Mod", "registerEntity 被拒绝：name / model 为空");

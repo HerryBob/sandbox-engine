@@ -17,7 +17,7 @@ namespace {
 // 用一个 1 字节哨兵表示"实例存在"：create/destroy 必须配对，契约要求非空句柄。
 // ---------------------------------------------------------------------------
 
-void* createFlat(const modapi::NoiseParamC*, std::int32_t, const char**) {
+void* createFlat(const NoiseParamC*, std::int32_t, const char**) {
     return new (std::nothrow) char{0};
 }
 
@@ -32,7 +32,7 @@ void destroyFlat(void* self) {
 } // namespace
 
 void initBuiltinNoiseTypes() {
-    static const modapi::NoiseProviderDef kFlat{
+    static const NoiseProviderDef kFlat{
         "flat", &createFlat, &sampleFlat, &destroyFlat,
     };
     if (!NoiseRegistry::registerType(kFlat)) {

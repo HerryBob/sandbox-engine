@@ -9,7 +9,7 @@
 
 namespace engine::modhost {
 
-std::int32_t registerNoiseImpl(void* host, const modapi::NoiseProviderDef* def) {
+std::int32_t registerNoiseImpl(void* host, const NoiseProviderDef* def) {
     if (def == nullptr) {
         ENGINE_LOG_ERROR("Mod", "registerNoise 被拒绝：def 为空");
         return -1;
