@@ -9,6 +9,13 @@ namespace engine::shared {
 //   · 业务只需相机 5 字段 + 点击 → DDA 射线；
 //   · 点击事件（clickSeq/clickButton）单独归 PlayerInput（输入→业务专用通道）。
 struct CameraState {
+    // B47：与 TimeManager 保持一致的前提断言 —— 非 lock-free 平台上
+    // atomic<double> 会退化成内部锁，而这个槽在输入线程 125Hz 写入路径上，
+    // 还要求渲染线程无锁读取，必须是真正的无锁原子。
+    static_assert(std::atomic<double>::is_always_lock_free,
+                  "CameraState requires lock-free atomic<double>; "
+                  "this platform's atomic<double> is not lock-free");
+
     std::atomic<double> camX{ 0.0 };
     std::atomic<double> camY{ 0.0 };
     std::atomic<double> camZ{ 0.0 };

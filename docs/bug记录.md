@@ -65,12 +65,12 @@
 | B40 | 容量语义 | `PlayerInput.hpp:20` | `clicks{32}` 是 32 个事件（实现内部多一个哨兵槽） | 易误算 | 🟢 | ✅ |
 | B41 | 缺拷贝声明 | `PlayerInput.hpp` | 未显式 delete 拷贝 | 意图不明 | 🟢 | ✅ |
 | B42 | 伪共享 | `PlayerInput.hpp:24-31` | 三个 `toggle*` 同缓存行 | 写频率低，不改 | 🟢 | ✅ |
-| B43 | 内存序缺口 | `PlayerBodyState.hpp:56-67` `readInterpolated` | 数据用 `relaxed` 读，第二次 `seq` 用 acquire，但缺**读后 acquire fence** | **ARM64 上 relaxed 读可被重排到 `s1` 之后 → 采信半新半旧数据** | 🔴 | ✅ |
+| B43 | 内存序缺口 | `PlayerBodyState.hpp:56-67` `readInterpolated` | 数据用 `relaxed` 读，第二次 `seq` 用 acquire，但缺**读后 acquire fence** | **ARM64 上 relaxed 读可被重排到 `s1` 之后 → 采信半新半旧数据** | 🔴 | ✅已修（加 fence） |
 | B44 | 自防御缺失 | `PlayerBodyState.hpp:48` `readInterpolated` | 函数自身不检查 `valid`（靠调用方先查） | 首帧若漏查则读到全 0 位置 | 🟡 | ✅ |
 | B45 | 类型宽度 | `PlayerBodyState.hpp:23,34,35` | `unsigned long long` / `long long` | 跨平台宽度不确定 | 🟡 | ✅ |
 | B46 | lock-free 未断言 | `PlayerBodyState.hpp:23` | `atomic<uint64_t>` 未加 `static_assert(is_always_lock_free)` | 非 lock-free 平台上"原子"变锁 | 🟢 | ✅ |
 | — | ~~写侧 seqlock 规则没说明~~ | `PlayerBodyState.hpp:20` | — | — | — | ❌ **不实**：第 20 行已写明"奇数表示写者正在写，偶数且读前后一致才采信" |
-| B47 | 原子前提 | `CameraState.hpp:12-16` | `atomic<double>` 未断言 lock-free（`TimeManager` 有，这里没有） | 非 lock-free 平台无保证 | 🔴 | ✅ |
+| B47 | 原子前提 | `CameraState.hpp:12-16` | `atomic<double>` 未断言 lock-free（`TimeManager` 有，这里没有） | 非 lock-free 平台无保证 | 🔴 | ✅已修（加 static_assert） |
 | B48 | 非一致快照 | `CameraState.hpp` | 5 个字段各自读，无 seqlock | 可能读到"新位置 + 旧朝向"（一帧错位） | 🟡 | ✅ |
 | B49 | 裸 int 枚举 | `CameraState.hpp:21` `viewMode` | `atomic<int>` 而非 `enum class ViewMode` | 非法值无约束 | 🟡 | ✅ |
 | B50 | 内存序 | `CameraState.hpp` | 全默认 `seq_cst` | 可放宽（可选优化） | 🟢 | ✅ |

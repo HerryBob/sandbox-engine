@@ -62,6 +62,12 @@ struct PlayerBodyState {
             const long long startNs = tickStartNs.load(std::memory_order_relaxed);
             const long long durNs   = tickDurationNs.load(std::memory_order_relaxed);
 
+            // B43：数据读完之后必须插一道 acquire fence。
+            // 否则在弱内存序平台（ARM64）上，上面这些 relaxed 读可能被重排到
+            // 下面第二次 seq 读之后 —— 结果是"版本号前后一致，但数据半新半旧"，
+            // 正是 seqlock 要防的那种撕裂。x86 只是侥幸（load-load 不重排）。
+            std::atomic_thread_fence(std::memory_order_acquire);
+
             // 读完再验一次版本号：一致说明这组八个值来自同一个 tick。
             const unsigned long long s1 = seq.load(std::memory_order_acquire);
             if (s0 != s1) continue;
