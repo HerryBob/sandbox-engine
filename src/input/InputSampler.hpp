@@ -53,6 +53,19 @@ public:
 private:
     void writeCameraState(); // 相机状态 → CameraState 原子槽
 
+    // ---- sample() 的六段（规则1 拆分）----
+    // 朝向基向量（yaw = 0 时朝 -Z），两种模式共用
+    struct LookBasis { double fwdX, fwdZ, rgtX, rgtZ; };
+
+    bool consumeModeToggles();                      // ① F4/F5 请求（返回是否切换了模式）
+    void updateLook();                              // ② 消费视角增量 + 俯仰 clamp
+    LookBasis lookBasis() const;                    // ③ 由 yaw_ 算四个基向量
+    void updatePlayerCamera(const LookBasis& b);    // ④a 相机跟随玩家体（第一/第三人称）
+    void writeControlIntent(const LookBasis& b, bool space);  // ④c WASD → 操控意图 + 跳跃边沿
+    void updateFreeCamera(const LookBasis& b, bool space);    // ⑤ 自由相机移动
+    void logModeChange(bool modeChanged);           // 模式切换日志
+    bool spaceDown() const;                         // 空格当前是否按下
+
     // 回调经它找对象（单实例）。
     inline static InputSampler* s_self_ = nullptr;
 
