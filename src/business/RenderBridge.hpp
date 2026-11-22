@@ -35,7 +35,7 @@ public:
     engine::core::SPSCQueue<engine::shared::BodyPose>& businessToRenderPoses();
 
     // 统计（main 只读）。
-    long long changeEventsSent() const; // 已发变更事件数
+    long long sentChangeEventCount() const; // 已发变更事件数
 
 private:
     // B3 业务→渲染（变更事件）。容量对齐原装配（256）。
@@ -44,7 +44,7 @@ private:
     engine::core::SPSCQueue<engine::shared::BodyStructureEvent> businessToRenderStructure_{16};
     engine::core::SPSCQueue<engine::shared::BodyPose>           businessToRenderPoses_{16};
 
-    std::atomic<long long> changeEventsSent_{0}; // 已发变更事件数
+    std::atomic<long long> sentChangeEventCount_{0}; // 已发变更事件数
 };
 
 } // namespace engine::business

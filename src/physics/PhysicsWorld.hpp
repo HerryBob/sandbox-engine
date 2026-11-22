@@ -62,13 +62,13 @@ public:
 
     double     simTime() const;
     long long  tickCount() const;
-    long long  processedCommands() const;  // 累计处理的业务指令数
+    long long  processedCommandCount() const;  // 累计处理的业务指令数
     int        blockX() const;             // 演示用"方块"的最新坐标（指令驱动）
     int        blockY() const;
     int        blockZ() const;
     long long  bodyCount() const;          // 当前刚体数（打包/解包后变化）
     long long  colliderCount() const;      // 当前静态碰撞体数量（放置/破坏/打包转移后变化）
-    long long  collisions() const;         // 累计碰撞次数（求解器删除后恒为 0，待 ContactListener 接上）
+    long long  collisionCount() const;         // 累计碰撞次数（求解器删除后恒为 0，待 ContactListener 接上）
 
     // 注意：bodyBlockCount / bodyHalfExtentX / bodyCenterOffsetX 三个验证 getter 已删除
     // （数据源 recomputeAABB 已删；Jolt 接入后可改用 compound shape 的 GetLocalBounds）。
@@ -118,7 +118,7 @@ private:
     double                     accumulator_{0.0};
     std::atomic<double>        simTime_{0.0};
     std::atomic<long long>     tickCount_{0};
-    std::atomic<long long>     processedCommands_{0};
+    std::atomic<long long>     processedCommandCount_{0};
     std::atomic<int>           blockX_{0};
     std::atomic<int>           blockY_{0};
     std::atomic<int>           blockZ_{0};
@@ -137,7 +137,7 @@ private:
     std::atomic<long long>     bodyCount_{0};
     std::vector<engine::shared::PhysicsResult> pendingReceipts_; // 待发回执（纯物理线程）
     std::vector<engine::shared::PhysicsResult> pendingCollisions_; // 待发碰撞事件（纯物理线程）
-    std::atomic<long long> collisions_{0};  // 累计碰撞次数（main 读）
+    std::atomic<long long> collisionCount_{0};  // 累计碰撞次数（main 读）
     double lastPosSentSimT_ = -1.0; // 纯物理线程：上次已发位置快照的模拟时刻。
                                     // 物理循环每墙钟帧调 syncToBusiness，但模拟 tick 只
                                     // 25Hz——同一模拟时刻的位置被重复发 ~15 次（旧行为）。

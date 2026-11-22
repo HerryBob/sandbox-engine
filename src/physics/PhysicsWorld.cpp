@@ -100,7 +100,7 @@ void PhysicsWorld::applyCommands(engine::core::SPSCQueue<engine::shared::Physics
             onUnpackContraption(cmd);
             break;
         }
-        processedCommands_.fetch_add(1, std::memory_order_relaxed);
+        processedCommandCount_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -296,7 +296,7 @@ void PhysicsWorld::syncToBusiness(
     }
 
     // ④ 演示方块位置快照：只有本帧处理过新指令才发，避免每帧重复推快照塞满队列。
-    const long long processed = processedCommands_.load(std::memory_order_relaxed);
+    const long long processed = processedCommandCount_.load(std::memory_order_relaxed);
     if (processed == lastSentProcessed_) return;
     lastSentProcessed_ = processed;
 
@@ -305,7 +305,7 @@ void PhysicsWorld::syncToBusiness(
     res.x = blockX_.load(std::memory_order_relaxed);
     res.y = blockY_.load(std::memory_order_relaxed);
     res.z = blockZ_.load(std::memory_order_relaxed);
-    res.processedCommands = processed;
+    res.processedCommands = processed;   // 协议字段（shared/protocol，属附2 不改名）
     res.simTime = simTime_.load(std::memory_order_relaxed);
     q.push(res); // 满则丢：极端情况下业务消化不过来，丢弃快照可接受
 }
@@ -316,8 +316,8 @@ double PhysicsWorld::simTime() const {
 long long PhysicsWorld::tickCount() const {
     return tickCount_.load(std::memory_order_relaxed);
 }
-long long PhysicsWorld::processedCommands() const {
-    return processedCommands_.load(std::memory_order_relaxed);
+long long PhysicsWorld::processedCommandCount() const {
+    return processedCommandCount_.load(std::memory_order_relaxed);
 }
 long long PhysicsWorld::bodyCount() const {
     return bodyCount_.load(std::memory_order_relaxed);
@@ -326,8 +326,8 @@ long long PhysicsWorld::colliderCount() const {
     // main 在物理线程停止后读取，colliders_ 无并发写。
     return static_cast<long long>(colliders_.size());
 }
-long long PhysicsWorld::collisions() const {
-    return collisions_.load(std::memory_order_relaxed);
+long long PhysicsWorld::collisionCount() const {
+    return collisionCount_.load(std::memory_order_relaxed);
 }
 
 // moveKinematicAxis：已删除（原 65 行，分轴移动 + 分轴回退 + onGround）。
@@ -354,10 +354,10 @@ void PhysicsWorld::maybeLog() {
         os << "[物理] sim=" << sim << "s tick=" << t
            << " 平均tps=" << tps
            << " 残差acc=" << accumulator_
-           << " 处理指令=" << processedCommands()
+           << " 处理指令=" << processedCommandCount()
            << " 刚体=" << bodyCount()
            << " 碰撞体=" << colliders_.size()
-           << " 碰撞=" << collisions()
+           << " 碰撞=" << collisionCount()
            << " 方块=(" << blockX() << "," << blockY() << "," << blockZ() << ")"
            << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Physics);
         // 各物理体位置（物理线程内遍历 bodies_ 安全）：动态体与生物分开标名

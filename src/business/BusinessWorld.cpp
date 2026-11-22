@@ -69,8 +69,8 @@ void BusinessWorld::flushChanges() {
     // tick 边界：委托 RenderBridge 发变更事件（事件源 = World 脏集合）。
     renderBridge_.flushChanges(world_, tickCount_.load(std::memory_order_relaxed));
 }
-long long BusinessWorld::changeEventsSent() const {
-    return renderBridge_.changeEventsSent();
+long long BusinessWorld::sentChangeEventCount() const {
+    return renderBridge_.sentChangeEventCount();
 }
 
 double BusinessWorld::simTime() const {
@@ -79,11 +79,11 @@ double BusinessWorld::simTime() const {
 long long BusinessWorld::tickCount() const {
     return tickCount_.load(std::memory_order_relaxed);
 }
-long long BusinessWorld::commandsSent() const {
-    return physicsBridge_.commandsSent();
+long long BusinessWorld::sentCommandCount() const {
+    return physicsBridge_.sentCommandCount();
 }
-long long BusinessWorld::resultsReceived() const {
-    return physicsBridge_.resultsReceived();
+long long BusinessWorld::receivedResultCount() const {
+    return physicsBridge_.receivedResultCount();
 }
 int BusinessWorld::blockX() const { return physicsBridge_.blockX(); }
 int BusinessWorld::blockY() const { return physicsBridge_.blockY(); }
@@ -113,23 +113,23 @@ std::optional<engine::shared::Block> BusinessWorld::findBlock
 bool BusinessWorld::placeBlock(const engine::shared::BlockPos& p,
                                engine::shared::BlockType type) {
     if (!world_.placeBlock(p, type)) {
-        placementsRejected_.fetch_add(1, std::memory_order_relaxed);
+        rejectedPlacementCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     // 裁决通过 → 委托桥排队 PlaceBlock 指令（下次 syncToPhysics 发出）。
     physicsBridge_.queuePlace(p, static_cast<int>(type));
-    blocksPlaced_.fetch_add(1, std::memory_order_relaxed);
+    placedBlockCount_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
 bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p) {
     if (!world_.removeBlock(p)) {
-        removalsRejected_.fetch_add(1, std::memory_order_relaxed);
+        rejectedRemovalCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     // 裁决通过 → 委托桥排队 RemoveBlock 指令（下次 syncToPhysics 发出）。
     physicsBridge_.queueRemove(p);
-    blocksRemoved_.fetch_add(1, std::memory_order_relaxed);
+    removedBlockCount_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -212,17 +212,17 @@ void BusinessWorld::requestPhysicsResync() {
     resyncPending_ = true;
 }
 
-long long BusinessWorld::blocksPlaced() const {
-    return blocksPlaced_.load(std::memory_order_relaxed);
+long long BusinessWorld::placedBlockCount() const {
+    return placedBlockCount_.load(std::memory_order_relaxed);
 }
-long long BusinessWorld::blocksRemoved() const {
-    return blocksRemoved_.load(std::memory_order_relaxed);
+long long BusinessWorld::removedBlockCount() const {
+    return removedBlockCount_.load(std::memory_order_relaxed);
 }
-long long BusinessWorld::placementsRejected() const {
-    return placementsRejected_.load(std::memory_order_relaxed);
+long long BusinessWorld::rejectedPlacementCount() const {
+    return rejectedPlacementCount_.load(std::memory_order_relaxed);
 }
-long long BusinessWorld::removalsRejected() const {
-    return removalsRejected_.load(std::memory_order_relaxed);
+long long BusinessWorld::rejectedRemovalCount() const {
+    return rejectedRemovalCount_.load(std::memory_order_relaxed);
 }
 long long BusinessWorld::physicsBlockCount() const {
     return physicsBridge_.physicsBlockCount();
@@ -244,8 +244,8 @@ void BusinessWorld::maybeLog() {
            << " 平均tps=" << tps
            << " 世界方块=" << blockCount()
            << " 物理碰撞体=" << physicsBlockCount()
-           << " 放置/破坏=" << blocksPlaced() << "/" << blocksRemoved()
-           << "(拒" << placementsRejected() << "/" << removalsRejected() << ")"
+           << " 放置/破坏=" << placedBlockCount() << "/" << removedBlockCount()
+           << "(拒" << rejectedPlacementCount() << "/" << rejectedRemovalCount() << ")"
            << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Business);
         ENGINE_LOG_INFO("Business", os.str());
     }

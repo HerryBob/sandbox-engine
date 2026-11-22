@@ -35,7 +35,7 @@ void PhysicsBridge::syncToPhysics(const std::vector<engine::shared::Block>& full
         cmd.type = engine::shared::PhysicsCommand::Type::SyncBlockSet;
         cmd.blocks = fullSnapshot;
         if (businessToPhysicsCommands_.push(cmd)) {
-            commandsSent_.fetch_add(1, std::memory_order_relaxed);
+            sentCommandCount_.fetch_add(1, std::memory_order_relaxed);
             wantSync_ = false;
         }
     } else if (wantPlace_) {
@@ -45,7 +45,7 @@ void PhysicsBridge::syncToPhysics(const std::vector<engine::shared::Block>& full
         cmd.blockType = placeType_;
         cmd.contraptionId = -1; // 主世界静态方块（无刚体域）
         if (businessToPhysicsCommands_.push(cmd)) {
-            commandsSent_.fetch_add(1, std::memory_order_relaxed);
+            sentCommandCount_.fetch_add(1, std::memory_order_relaxed);
             wantPlace_ = false;
         }
     } else if (wantRemove_) {
@@ -54,7 +54,7 @@ void PhysicsBridge::syncToPhysics(const std::vector<engine::shared::Block>& full
         cmd.x = removePos_.x; cmd.y = removePos_.y; cmd.z = removePos_.z;
         cmd.contraptionId = -1; // 主世界静态方块（无刚体域）
         if (businessToPhysicsCommands_.push(cmd)) {
-            commandsSent_.fetch_add(1, std::memory_order_relaxed);
+            sentCommandCount_.fetch_add(1, std::memory_order_relaxed);
             wantRemove_ = false;
         }
     }
@@ -67,7 +67,7 @@ void PhysicsBridge::receiveFromPhysics(
     // 业务 Tick 边界：收物理结果（位置快照/碰撞体数量/刚体结构/位姿）。
     engine::shared::PhysicsResult res;
     while (physicsToBusinessResults_.pop(res)) {
-        resultsReceived_.fetch_add(1, std::memory_order_relaxed);
+        receivedResultCount_.fetch_add(1, std::memory_order_relaxed);
         switch (res.type) {
         case engine::shared::PhysicsResult::Type::BlockMoved:
             blockX_.store(res.x, std::memory_order_relaxed);
@@ -126,11 +126,11 @@ engine::core::SPSCQueue<engine::shared::PhysicsResult>& PhysicsBridge::physicsTo
     return physicsToBusinessResults_;
 }
 
-long long PhysicsBridge::commandsSent() const {
-    return commandsSent_.load(std::memory_order_relaxed);
+long long PhysicsBridge::sentCommandCount() const {
+    return sentCommandCount_.load(std::memory_order_relaxed);
 }
-long long PhysicsBridge::resultsReceived() const {
-    return resultsReceived_.load(std::memory_order_relaxed);
+long long PhysicsBridge::receivedResultCount() const {
+    return receivedResultCount_.load(std::memory_order_relaxed);
 }
 int PhysicsBridge::blockX() const { return blockX_.load(std::memory_order_relaxed); }
 int PhysicsBridge::blockY() const { return blockY_.load(std::memory_order_relaxed); }

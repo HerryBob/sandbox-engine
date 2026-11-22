@@ -39,7 +39,7 @@ public:
     // tick 边界：委托 RenderBridge 把本 tick 变脏的 chunk 聚合为一条变更事件
     // 发给渲染端（第 4 轨只读）。渲染端消费后只重建变过的 chunk mesh。
     void flushChanges();
-    long long changeEventsSent() const; // 已发变更事件数（断言/诊断）
+    long long sentChangeEventCount() const; // 已发变更事件数（断言/诊断）
 
     // ---- 命令式接口（演示/玩家/脚本事件源共用）----
     // 请求全量同步：把当前世界方块整体同步给物理（排队 SyncBlockSet，用于初始/重建）。
@@ -47,8 +47,8 @@ public:
 
     double     simTime() const;
     long long  tickCount() const;
-    long long  commandsSent() const;     // 已下发指令数
-    long long  resultsReceived() const;  // 已收到物理结果数
+    long long  sentCommandCount() const;     // 已下发指令数
+    long long  receivedResultCount() const;  // 已收到物理结果数
     int        blockX() const;           // 业务视角：物理回传的方块最新坐标
     int        blockY() const;
     int        blockZ() const;
@@ -91,10 +91,10 @@ public:
     void requestPhysicsResync();
 
     long long playerActionsProcessed() const;  // 已处理玩家点击次数（断言/诊断）
-    long long blocksPlaced() const;        // 成功放置次数
-    long long blocksRemoved() const;       // 成功破坏次数
-    long long placementsRejected() const;  // 放置被拒次数
-    long long removalsRejected() const;    // 破坏被拒次数
+    long long placedBlockCount() const;        // 成功放置次数
+    long long removedBlockCount() const;       // 成功破坏次数
+    long long rejectedPlacementCount() const;  // 放置被拒次数
+    long long rejectedRemovalCount() const;    // 破坏被拒次数
     long long physicsBlockCount() const;   // 物理侧静态碰撞体数量快照（回传）
 
 private:
@@ -115,10 +115,10 @@ private:
     bool resyncPending_ = false;                 // 待重下发全量方块集（业务线程独占）
     bool firstTick_ = true;                      // 首个业务 tick 强制全量同步：地形预热在主线程完成，业务线程无新列可触发
 
-    std::atomic<long long> blocksPlaced_{0};       // 成功放置（裁决通过）次数
-    std::atomic<long long> blocksRemoved_{0};      // 成功破坏次数
-    std::atomic<long long> placementsRejected_{0}; // 放置被拒次数
-    std::atomic<long long> removalsRejected_{0};   // 破坏被拒次数
+    std::atomic<long long> placedBlockCount_{0};       // 成功放置（裁决通过）次数
+    std::atomic<long long> removedBlockCount_{0};      // 成功破坏次数
+    std::atomic<long long> rejectedPlacementCount_{0}; // 放置被拒次数
+    std::atomic<long long> rejectedRemovalCount_{0};   // 破坏被拒次数
     std::chrono::steady_clock::time_point startWall_; // 墙钟起点（tps 墙钟口径用）
     std::chrono::steady_clock::time_point lastLog_;
 };

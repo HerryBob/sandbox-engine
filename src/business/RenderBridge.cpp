@@ -14,7 +14,7 @@ void RenderBridge::flushChanges(World& world, long long tick) {
     ev.dirtyChunks.assign(dirty.begin(), dirty.end());
     if (businessToRenderChanges_.push(ev)) {
         world.clearDirtyChunks();
-        changeEventsSent_.fetch_add(1, std::memory_order_relaxed);
+        sentChangeEventCount_.fetch_add(1, std::memory_order_relaxed);
     }
     // push 失败（队列满）不清空：下 tick 重试。变更事件可延迟送达，
     // 渲染端最终一致（与位置快照"满则丢"不同：丢变更 = 渲染端漏重建）。
@@ -42,8 +42,8 @@ engine::core::SPSCQueue<engine::shared::BodyPose>& RenderBridge::businessToRende
     return businessToRenderPoses_;
 }
 
-long long RenderBridge::changeEventsSent() const {
-    return changeEventsSent_.load(std::memory_order_relaxed);
+long long RenderBridge::sentChangeEventCount() const {
+    return sentChangeEventCount_.load(std::memory_order_relaxed);
 }
 
 } // namespace engine::business

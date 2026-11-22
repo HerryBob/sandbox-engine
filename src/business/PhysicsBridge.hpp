@@ -47,8 +47,8 @@ public:
     engine::core::SPSCQueue<engine::shared::PhysicsResult>&  physicsToBusinessResults();
 
     // ---- 统计（main 只读）----
-    long long commandsSent() const;     // 已发出指令数
-    long long resultsReceived() const;  // 已收回执数
+    long long sentCommandCount() const;     // 已发出指令数
+    long long receivedResultCount() const;  // 已收回执数
     int  blockX() const;                // 演示方块坐标投影（BlockMoved 回执）
     int  blockY() const;
     int  blockZ() const;
@@ -68,8 +68,8 @@ private:
     engine::shared::BlockPos removePos_;      // 破坏坐标
 
     // 统计（跨线程原子；业务侧写、main 读）：
-    std::atomic<long long> commandsSent_{0};
-    std::atomic<long long> resultsReceived_{0};
+    std::atomic<long long> sentCommandCount_{0};
+    std::atomic<long long> receivedResultCount_{0};
     std::atomic<int>       blockX_{0};
     std::atomic<int>       blockY_{0};
     std::atomic<int>       blockZ_{0};
