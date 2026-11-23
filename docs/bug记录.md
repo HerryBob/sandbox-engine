@@ -284,6 +284,32 @@
 2. **给用户一个环境侧规避**：NVIDIA 控制面板 → 管理 3D 设置 → **Vulkan/OpenGL 呈现方式** 从"自动"改为"native（首选本机）"（社区实测可消除同类闪烁）。
    这是验证"是否属于呈现层"的最快实验，不花代码成本。
 
+### AMD 平台补充（2026-11-23，本机 RX 6750 GRE 12GB / 驱动 32.0.21045.16010，单显卡）
+
+**关键机制**（比"驱动 bug"更具体）：
+
+- wgpu 的 v26.0.6 提交里写明：**Windows 上 `Fifo` / `FifoRelaxed` 呈现模式是由驱动"隐式使用 DXGI（Direct3D）交换链"实现的**，
+  时序特性与原生差异很大 —— 参考 [wgpu v26.0.6](https://github.com/gfx-rs/wgpu/commit/6f8edda9b180efada6a24b6d40c567c57f59e9ea)。
+  → 这就解释了 MC-312375 的"Vulkan only 修好了、Vulkan + DXGI Present 又坏"：
+  **呈现路径不在应用手里，是驱动替我们选的**；NVIDIA 面板那个开关是少数能强制换路径的入口，AMD 面板没有等价项。
+- wgpu v26.0.2 修过一个 **AMD 专属 flicker**：驱动**复用 image view handle** 时，
+  应用缓存的 `VkFramebuffer` 失效（#7972）—— 说明"AMD + 交换链重建 + 句柄复用"这一类 bug 确实存在。
+
+**本机已排除的两条**（都查了代码，不是推测）：
+
+| 理论 | 核对 |
+|---|---|
+| "窗口能看穿"的经典成因：present 路径连 alpha 一起拷（[psxrecomp #412](https://github.com/RetroPortingToolKit/psxrecomp/pull/412) 在 RX 7900 XT 上复现过） | 本项目 `compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR`（`VulkanContext.cpp:246`）+ 清屏 alpha = 1.0（`:1465`）→ ❌ 排除 |
+| 混合显卡跨 GPU 呈现 | 本机单显卡（RX 6750 GRE）→ ❌ 排除 |
+
+**AMD 侧可做（零成本 → 低成本）**：
+
+1. **HAGS（硬件加速 GPU 计划）开/关各试一次**：设置 → 系统 → 显示 → 图形 → 默认图形设置。
+   注意"窗口化游戏优化"对 Vulkan **无效**（它只升级 DX10/11/12 的 swap effect）。
+2. **驱动版本**：社区有"新版坏、回退可用"的先例（如回退某一版）。
+3. **关掉 overlay 再测**（Afterburner / RTSS / Discord / AMD 自己的 overlay 都会再插一层呈现）。
+4. **我们自己的 1 行改动**：`VK_SUBOPTIMAL_KHR` 也触发重建交换链（见上节可操作点 1）。
+
 **下次的切入点**（按性价比）：
 
 1. **帧捕获**：加 `vkCmdCopyImageToBuffer` + 存 PNG，把出问题那一帧存下来看 ——
