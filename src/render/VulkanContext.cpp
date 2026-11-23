@@ -688,6 +688,7 @@ bool VulkanContext::rebuildChunkMeshes(
     const auto perfT1 = std::chrono::steady_clock::now();
     std::size_t perfCmp = 0;   // 逐 chunk 过滤时的边界比较次数
     double perfFilterMs = 0.0, perfVertMs = 0.0, perfUploadMs = 0.0;   // 三段细分
+    double perfLookupMs = 0.0, perfMaskMs = 0.0, perfBlockVertMs = 0.0; // 顶点段内的三小段
     // ===== 临时计时结束 =====
     //待重建集合
     std::unordered_set<engine::shared::ChunkPos> rebuildSet = dirtyChunks;
@@ -729,41 +730,71 @@ bool VulkanContext::rebuildChunkMeshes(
         std::vector<uint32_t> cutoutIndices;    // Cutout 组索引
         uint32_t vertexOffset = 0;
         uint32_t cutoutVertexOffset = 0;
+
+        // P14-2a：渲染属性只取决于方块**类型**，而图中只有少数几种。
+        // 原来每块查 3 次表（注册表 / 图集按字符串 / 模型注册表按字符串），实测 0.76 µs/块，
+        // 首帧 82,944 块共烧 63 ms。这里在本次重建内按类型缓存一次，之后每块 1 次哈希。
+        struct BlockRenderProps {
+            bool  isCutout = false;
+            glm::vec4 uvRect{0.0f};
+            const engine::assets::ModelDef* model = nullptr;
+        };
+        std::unordered_map<std::uint16_t, BlockRenderProps> renderPropsCache;
+        renderPropsCache.reserve(16);
+
         for (const auto& block : chunkBlocks) {
+            // 细插桩（P14-2 决策用）：① 三次查表  ② 面剔除  ③ 顶点生成+拷贝
+            const auto perfA0 = std::chrono::steady_clock::now();
             const glm::vec3 center{block.pos.x + 0.5f, block.pos.y + 0.5f, block.pos.z + 0.5f};
-            // 查注册表：renderType 决定进哪个桶（认属性不认方块身份）
-            const auto* info = engine::registry::g_blockRegistry.find(
-                static_cast<std::uint16_t>(block.type));
-            const bool isCutout = info && info->renderType == engine::registry::RenderType::Cutout;
+            // 类型 → 渲染属性（首次遇到该类型时查表，之后直接命中缓存）
+            const auto cacheSlot =
+                renderPropsCache.try_emplace(static_cast<std::uint16_t>(block.type));
+            if (cacheSlot.second) {
+                BlockRenderProps props;
+                const auto* info = engine::registry::g_blockRegistry.find(
+                    static_cast<std::uint16_t>(block.type));
+                // 查注册表：renderType 决定进哪个桶（认属性不认方块身份）
+                props.isCutout = info && info->renderType == engine::registry::RenderType::Cutout;
+                // 纹理 → UV：注册表纹理名 → 图集格 → UV 矩形（未注册 → default 兜底格）
+                props.uvRect = textureAtlas_.fallbackUV();
+                if (info && !info->texture.empty()) {
+                    engine::assets::AtlasSlot slot;
+                    if (textureAtlas_.slotOf(info->texture, slot))
+                        props.uvRect = textureAtlas_.slotUV(slot);
+                }
+                // 模型名查表（字符串键）
+                if (info && !info->model.empty())
+                    props.model = engine::assets::g_modelRegistry.find(info->model);
+                cacheSlot.first->second = props;
+            }
+            const BlockRenderProps& props = cacheSlot.first->second;
+            const bool isCutout = props.isCutout;
             auto& dstVerts   = isCutout ? cutoutVerts : vertices;
             auto& dstIndices = isCutout ? cutoutIndices : indices;
             auto& dstOffset  = isCutout ? cutoutVertexOffset : vertexOffset;
+            const auto perfA1 = std::chrono::steady_clock::now();
+            perfLookupMs += std::chrono::duration<double, std::milli>(perfA1 - perfA0).count();
             // 玻璃整体淡蓝；solid 不传 tint 用默认逐面色
             const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
-            // 纹理 → UV：注册表纹理名 → 图集格 → UV 矩形（未注册 → default 兜底格）
-            glm::vec4 uvRect = textureAtlas_.fallbackUV();
-            if (info && !info->texture.empty()) {
-                engine::assets::AtlasSlot slot;
-                if (textureAtlas_.slotOf(info->texture, slot))
-                    uvRect = textureAtlas_.slotUV(slot);
-            }
+            const auto perfA2 = std::chrono::steady_clock::now();
+            perfMaskMs += std::chrono::duration<double, std::milli>(perfA2 - perfA1).count();
             // 顶点生成：优先数据驱动模型（模型名注册且加载成功 → buildModelVertices；
             // 无 model / 模型缺失 → 立方体兜底，仍用注册表纹理）
-            std::vector<Vertex> vs;
-            if (info && !info->model.empty()) {
-                if (const auto* md = engine::assets::g_modelRegistry.find(info->model))
-                    vs = mesh::buildModelVertices(center, *md, faceMask, textureAtlas_);
-            }
-            if (vs.empty())
-                vs = mesh::buildCubeVertices(center, faceMask, uvRect);
-            dstVerts.insert(dstVerts.end(), vs.begin(), vs.end());
-            const uint32_t faceCount = static_cast<uint32_t>(vs.size() / 4);
+            // P14-2b：直接追加进 dstVerts，不再每块新建 vector 再拷贝
+            const std::size_t vertsBefore = dstVerts.size();
+            if (props.model)
+                mesh::buildModelVertices(dstVerts, center, *props.model, faceMask, textureAtlas_);
+            if (dstVerts.size() == vertsBefore)
+                mesh::buildCubeVertices(dstVerts, center, faceMask, props.uvRect);
+            const uint32_t faceCount = static_cast<uint32_t>((dstVerts.size() - vertsBefore) / 4);
             for (uint32_t f = 0; f < faceCount; ++f) {
                 const uint32_t b0 = dstOffset + f * 4;
                 dstIndices.push_back(b0 + 0); dstIndices.push_back(b0 + 1); dstIndices.push_back(b0 + 2);
                 dstIndices.push_back(b0 + 0); dstIndices.push_back(b0 + 2); dstIndices.push_back(b0 + 3);
             }
-            dstOffset += static_cast<uint32_t>(vs.size());
+            dstOffset += static_cast<uint32_t>(dstVerts.size() - vertsBefore);
+            const auto perfA3 = std::chrono::steady_clock::now();
+            perfBlockVertMs += std::chrono::duration<double, std::milli>(perfA3 - perfA2).count();
         }
         //无chunk 删除旧网格, 继续下一个
         const auto perfV1 = std::chrono::steady_clock::now();
@@ -835,6 +866,9 @@ bool VulkanContext::rebuildChunkMeshes(
            << " waitIdle=" << waitMs << "ms"
            << " 过滤=" << perfFilterMs << "ms"
            << " 顶点=" << perfVertMs << "ms"
+           << "[查表=" << perfLookupMs
+           << " 面剔除=" << perfMaskMs
+           << " 生成=" << perfBlockVertMs << "]"
            << " 上传=" << perfUploadMs << "ms"
            << " total=" << totalMs << "ms";
         ENGINE_LOG_INFO("Vulkan", os.str());

@@ -23,7 +23,7 @@ namespace engine::render::mesh {
         {0,1,0}, {0,1,0}, {0,0,-1}, {0,0,1}, {0,1,0}, {0,1,0}
     }; // 屏幕上
 
-    std::vector<Vertex> buildCubeVertices(const glm::vec3& offset, std::uint8_t faceMask,
+    void buildCubeVertices(std::vector<Vertex>& out, const glm::vec3& offset, std::uint8_t faceMask,
                                           const glm::vec4& atlasUV) {
         // 面 UV 由图集矩形展开（Vulkan v=0 在图像顶行 → 几何上方用 v0、下方用 v1，方向正确）：
         // 左下 {u0,v1} → 右下 {u1,v1} → 右上 {u1,v0} → 左上 {u0,v0}
@@ -37,8 +37,9 @@ namespace engine::render::mesh {
         // 顶点色保留 {1,1,1} 白色作为占位调制因子，未来光照/调色可复用。
         const glm::vec3 color{1.0f, 1.0f, 1.0f};
         const float h = 0.5f; // 半边长
-        std::vector<Vertex> verts;
-        verts.reserve(static_cast<size_t>(std::popcount(faceMask))*4);
+        // P14-2b：直接追加到调用方的 vector —— 原来每块新建一个 vector 再拷出去，
+        // 首帧 82,944 块 = 82,944 次堆分配 + 82,944 次拷贝（实测 147ms 的大头）。
+        out.reserve(out.size() + static_cast<std::size_t>(std::popcount(faceMask)) * 4);
         for (int f = 0; f < 6; ++f) {
             if (!(faceMask & (1u << f))) continue;
 
@@ -50,17 +51,15 @@ namespace engine::render::mesh {
                     center + (-kFaceU[f] + kFaceV[f]) * h,   // 左上
                 };
                 for (int i = 0; i < 4; ++i)
-                    verts.push_back(Vertex{ p[i], color, faceUV[i] });
+                    out.push_back(Vertex{ p[i], color, faceUV[i] });
             }
-        return verts;
     }
 
     // ---- 数据驱动模型：按 ModelDef 生成顶点（多元素 + 逐面纹理/剔除）----
-    std::vector<Vertex> buildModelVertices(const glm::vec3& offset,
+    void buildModelVertices(std::vector<Vertex>& out, const glm::vec3& offset,
                                            const engine::assets::ModelDef& model,
                                            std::uint8_t faceMask, const TextureAtlas& atlas) {
         const glm::vec3 color{1.0f, 1.0f, 1.0f};
-        std::vector<Vertex> verts;
         for (const auto& el : model.elements) {
             // 16 单位空间里的元素中心与每轴半长
             const glm::vec3 c16  = (el.from + el.to) * 0.5f;
@@ -127,11 +126,10 @@ namespace engine::render::mesh {
                     }
                     // 16 单位 → 世界：÷16 再平移半格（元素左下角对齐格角）
                     const glm::vec3 pw = offset + q16[i] * 0.0625f - 0.5f;
-                    verts.push_back(Vertex{ pw, color, faceUV[i] });
+                    out.push_back(Vertex{ pw, color, faceUV[i] });
                 }
             }
         }
-        return verts;
     }
 
     // ---- 刚体几何：局部坐标 + 仅刚体内部剔除 ----
@@ -184,17 +182,18 @@ namespace engine::render::mesh {
             }
 
             // 与 chunk 同一套降级顺序：模型 → 立方体兜底
-            std::vector<Vertex> vs;
+            // P14-2b：直接追加，不再每块新建 vector
+            const std::size_t before = out.vertices.size();
             if (info && !info->model.empty()) {
                 if (const auto* md = engine::assets::g_modelRegistry.find(info->model))
-                    vs = buildModelVertices(center, *md, faceMask, atlas);
+                    buildModelVertices(out.vertices, center, *md, faceMask, atlas);
             }
-            if (vs.empty())
-                vs = buildCubeVertices(center, faceMask, uvRect);
+            if (out.vertices.size() == before)
+                buildCubeVertices(out.vertices, center, faceMask, uvRect);
 
-            const std::uint32_t base = static_cast<std::uint32_t>(out.vertices.size());
-            out.vertices.insert(out.vertices.end(), vs.begin(), vs.end());
-            const std::uint32_t faceCount = static_cast<std::uint32_t>(vs.size() / 4);
+            const std::uint32_t base = static_cast<std::uint32_t>(before);
+            const std::uint32_t faceCount =
+                static_cast<std::uint32_t>((out.vertices.size() - before) / 4);
             for (std::uint32_t f = 0; f < faceCount; ++f) {
                 const std::uint32_t b0 = base + f * 4;
                 out.indices.push_back(b0 + 0); out.indices.push_back(b0 + 1); out.indices.push_back(b0 + 2);

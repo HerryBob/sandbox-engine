@@ -141,8 +141,8 @@ bool modelGeometry() {
     def.elements.push_back(el);
 
     engine::assets::TextureAtlas emptyAtlas;   // 空图集：纹理走兜底格，不影响位置
-    const std::vector<Vertex> verts =
-        engine::render::mesh::buildModelVertices(glm::vec3{0.0f, 0.0f, 0.0f}, def, 0u, emptyAtlas);
+    std::vector<Vertex> verts;
+    engine::render::mesh::buildModelVertices(verts, glm::vec3{0.0f, 0.0f, 0.0f}, def, 0u, emptyAtlas);
     if (verts.size() != 24) return false;      // 6 面 × 4 顶点
 
     // 绕 Z 转 45°：X/Y 跨度 16√2 ≈ 22.627，Z 跨度仍 16；÷16 后 → 1.414 / 1.0
@@ -160,8 +160,8 @@ bool modelGeometry() {
 
     // 同一元素不旋转：三轴跨度都应是 1.0（确认走的是同一条路径的恒等分支）
     def.elements.front().rotation.angle = 0.0f;
-    const std::vector<Vertex> plain =
-        engine::render::mesh::buildModelVertices(glm::vec3{0.0f, 0.0f, 0.0f}, def, 0u, emptyAtlas);
+    std::vector<Vertex> plain;
+    engine::render::mesh::buildModelVertices(plain, glm::vec3{0.0f, 0.0f, 0.0f}, def, 0u, emptyAtlas);
     if (plain.size() != 24) return false;
     glm::vec3 lo2{1e30f, 1e30f, 1e30f};
     glm::vec3 hi2{-1e30f, -1e30f, -1e30f};
