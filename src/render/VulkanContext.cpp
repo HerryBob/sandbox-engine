@@ -1363,7 +1363,10 @@ void VulkanContext::updateViewProj(double /*dt*/) {
     const float aspect = (swapchainExtent_.height > 0)
         ? static_cast<float>(swapchainExtent_.width) / static_cast<float>(swapchainExtent_.height)
         : 1.0f;
-    glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 100.0f);
+    // 远平面：流式窗口半径 4 列 = 64 格（对角 ~90 格），旧值 far=100 紧贴窗口边缘 →
+    // 刚在窗口边缘加载出来的区块正好被裁掉，表现为"远处区块变透明/只剩天空"。
+    // 放到 1000 给足余量（世界再大也不会被裁；深度精度由 ZERO_TO_ONE 约定保证）。
+    glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 1000.0f);
     proj[1][1] *= -1.0f; // Vulkan 的 NDC Y 轴向下；glm 按 OpenGL 设计，需翻转
 
     const glm::vec3 lookDir(

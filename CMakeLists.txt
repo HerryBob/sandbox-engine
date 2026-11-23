@@ -96,6 +96,11 @@ if(MSVC)
     target_compile_options(sandbox_engine PRIVATE /utf-8)
 endif()
 
+# glm 的深度约定必须与 Vulkan 一致：默认是 OpenGL 的 z∈[-1,1]，
+# 而 Vulkan 裁剪空间只接受 z∈[0,1] —— 不定义的话近一半深度范围被丢掉，
+# 远处出现 z-fighting（表现为远距离方块闪烁）。全工程统一定义，避免各 TU 不一致。
+target_compile_definitions(sandbox_engine PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
 set_target_properties(sandbox_engine PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
 )
