@@ -682,7 +682,9 @@ bool VulkanContext::rebuildChunkMeshes(
         
     // ===== 临时计时（P14 测量用，测完删除）=====
     const auto perfT0 = std::chrono::steady_clock::now();
-    vkDeviceWaitIdle(device_); // GPU 安全点：等所有在飞命令完成，才能安全销毁旧 buffer
+    // P14：原来这里有 vkDeviceWaitIdle（等整条 GPU 流水空闲，实测平均被拖 6.18ms）。
+    // 现在改为"按帧槽延迟销毁"（retireChunkMesh / collectRetiredMeshes），
+    // 不再需要停 GPU —— 旧 buffer 会在引用它的命令缓冲执行完之后才释放。
     const auto perfT1 = std::chrono::steady_clock::now();
     std::size_t perfCmp = 0;   // 逐 chunk 过滤时的边界比较次数
     double perfFilterMs = 0.0, perfVertMs = 0.0, perfUploadMs = 0.0;   // 三段细分
@@ -769,14 +771,14 @@ bool VulkanContext::rebuildChunkMeshes(
         auto it =  chunkMeshes_.find(cp);
         if (vertices.empty() && cutoutVerts.empty()) {
             if (it != chunkMeshes_.end()) {
-                destroyChunkMesh(device_, it->second);
+                retireChunkMesh(std::move(it->second));   // P14：延迟销毁，不等 GPU
                 chunkMeshes_.erase(it);
             }
             continue;
         }
         //有网格
         if (it != chunkMeshes_.end()) {
-            destroyChunkMesh(device_, it->second);
+            retireChunkMesh(std::move(it->second));       // P14：延迟销毁，不等 GPU
             chunkMeshes_.erase(it);
         }
         ChunkMesh m;
@@ -839,6 +841,24 @@ bool VulkanContext::rebuildChunkMeshes(
     }
     // ===== 临时计时结束 =====
     return true;
+}
+
+// ---- 延迟销毁（P14）----
+// 把网格挂到"当前帧槽"的墓地：等下一次轮回到该帧槽（那时它的 fence 已经 wait 过），
+// 引用这个网格的提交必然全部执行完，才真正 vkDestroyBuffer。
+//
+// 安全性推导（kMaxFramesInFlight = 2）：
+//   在第 F 帧（槽 S）退休的网格，最后一次被引用是 F-1 帧（槽 1-S）；
+//   第 F+2 帧重新轮到槽 S 时，S 的 fence（F 帧）刚 wait 完，而 1-S 的 fence（F-1 帧）
+//   在第 F+1 帧已经 wait 过 —— 两者都完成，销毁安全。
+void VulkanContext::retireChunkMesh(ChunkMesh&& m) {
+    graveyard_[currentFrameSlot_ % kMaxFramesInFlight].push_back(std::move(m));
+}
+
+void VulkanContext::collectRetiredMeshes(std::size_t slot) {
+    auto& bucket = graveyard_[slot % kMaxFramesInFlight];
+    for (auto& m : bucket) destroyChunkMesh(device_, m);
+    bucket.clear();
 }
 
 // ---- 刚体网格（可动方块组）----
@@ -1404,6 +1424,10 @@ bool VulkanContext::drawFrame() {
     // acquire 失败(OUT_OF_DATE)时 fence 保持 signaled → 下一帧 wait 直接通过
     // 若先 reset，失败帧没有 submit 触发 fence → 下一帧 wait 无限阻塞 → 渲染线程卡死
 
+    // P14：这个帧槽的 fence 刚 wait 完 → 上一轮挂在这里的旧网格可以真正销毁了。
+    currentFrameSlot_ = frame;
+    collectRetiredMeshes(frame);
+
     // 增量重建请求：只重建脏 chunk（∪6 邻居由 rebuildChunkMeshes 内部展开）
     if (chunkRebuildRequested_.exchange(false, std::memory_order_relaxed)) {
         rebuildChunkMeshes(pendingRebuildBlocks_, pendingDirtyChunks_);
@@ -1680,6 +1704,11 @@ void VulkanContext::destroyRenderObjects() {
     // 增量重建：销毁所有 chunk 网格（每 chunk 的 GPU 资源）
     for (auto& [cp, m] : chunkMeshes_) destroyChunkMesh(device_, m);
     chunkMeshes_.clear();
+    // P14：延迟销毁队列里可能还挂着旧网格，关停时一并释放（此处已 vkDeviceWaitIdle）
+    for (auto& bucket : graveyard_) {
+        for (auto& m : bucket) destroyChunkMesh(device_, m);
+        bucket.clear();
+    }
     // 刚体网格：与 chunk 网格同结构，同样逐个销毁
     for (auto& [id, m] : bodyMeshes_) destroyChunkMesh(device_, m);
     bodyMeshes_.clear();
