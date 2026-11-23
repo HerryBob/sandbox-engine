@@ -562,10 +562,12 @@ bool VulkanContext::createPipeline() {
     pipelineLayoutInfo.pSetLayouts = &descLayout_;
 
     // 刚体变换：每趟绘制前推一次 4x4 矩阵（静态 chunk 推单位矩阵，矩阵乘上去等于没乘）
+    // 相机矩阵 viewProj 也一并推（总共 128 字节 = 2 个 mat4，正好是规范保证的下限）。
+    // 这样每个命令缓冲自带一份相机矩阵，不再跨帧共享 UBO。
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushRange.offset = 0;
-    pushRange.size = sizeof(glm::mat4);
+    pushRange.size = sizeof(glm::mat4) * 2;
     pipelineLayoutInfo.pushConstantRangeCount = 1;
     pipelineLayoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(device_, &pipelineLayoutInfo, nullptr, &pipelineLayout_) != VK_SUCCESS) {
@@ -1379,10 +1381,20 @@ void VulkanContext::updateViewProj(double /*dt*/) {
     // 预乘：proj * view（model 恒为单位阵，不再上传也不再在着色器里乘）。
     // 具体模型变换（刚体/骨骼）仍走 push constant，逐 draw 变化。
     ubo.viewProj = proj * view;
-    void* data = nullptr;
-    vkMapMemory(device_, uboMemory_, 0, sizeof(ubo), 0, &data);
-    std::memcpy(data, &ubo, sizeof(ubo));
-    vkUnmapMemory(device_, uboMemory_);
+
+    // 相机矩阵改由 push constant 携带（见 pushDrawMatrices）：每个命令缓冲自带一份，
+    // 不再有"两个 in-flight 帧共用一块 UBO"的竞态。
+    viewProj_ = ubo.viewProj;
+}
+
+// 推送「模型矩阵 + 相机矩阵」：128 字节，两个 mat4。
+void VulkanContext::pushDrawMatrices(VkCommandBuffer cmd, const glm::mat4& bodyModel) const {
+    struct PushData {
+        glm::mat4 bodyModel;
+        glm::mat4 viewProj;
+    };
+    const PushData data{ bodyModel, viewProj_ };
+    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(data), &data);
 }
 
 // 每帧绘制：acquire → 录制 → submit → present
@@ -1486,8 +1498,7 @@ bool VulkanContext::drawFrame() {
 
     // 第一趟：Solid 桶（不透明先画，写深度建立遮挡基准）
     vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-    vkCmdPushConstants(cmdBuffers_[frame], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                       0, sizeof(glm::mat4), &identityMatrix);
+    pushDrawMatrices(cmdBuffers_[frame], identityMatrix);
     for (const auto& [cp, m] : chunkMeshes_) {
         if (m.vertexCount == 0) continue;   // 无 Solid 面跳过
         VkDeviceSize vbOffset = 0;
@@ -1528,8 +1539,7 @@ bool VulkanContext::drawFrame() {
                 (rit != bodyRot_.end()) ? rit->second : glm::quat{1.0f, 0.0f, 0.0f, 0.0f};
             const glm::mat4 bodyModel =
                 glm::translate(glm::mat4(1.0f), worldPos) * glm::mat4_cast(bodyRot);
-            vkCmdPushConstants(cmdBuffers_[frame], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                               0, sizeof(glm::mat4), &bodyModel);
+            pushDrawMatrices(cmdBuffers_[frame], bodyModel);
             VkDeviceSize vbOffset = 0;
             vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &m.vertexBuffer, &vbOffset);
             vkCmdBindIndexBuffer(cmdBuffers_[frame], m.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
@@ -1574,8 +1584,7 @@ bool VulkanContext::drawFrame() {
             for (std::size_t bi = 0; bi < em.bones.size(); ++bi) {
                 const EntityBoneGpu& g = em.bones[bi];
                 if (g.indexCount == 0) continue;
-                vkCmdPushConstants(cmdBuffers_[frame], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                                   0, sizeof(glm::mat4), &boneWorld[bi]);
+                pushDrawMatrices(cmdBuffers_[frame], boneWorld[bi]);
                 VkDeviceSize vbOffset = 0;
                 vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &g.vertexBuffer, &vbOffset);
                 vkCmdBindIndexBuffer(cmdBuffers_[frame], g.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
@@ -1590,8 +1599,7 @@ bool VulkanContext::drawFrame() {
 
     // 第二趟：Cutout 桶（透明/镂空后画，双面 cull NONE）
     vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, cutoutPipeline_);
-    vkCmdPushConstants(cmdBuffers_[frame], pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                       0, sizeof(glm::mat4), &identityMatrix);
+    pushDrawMatrices(cmdBuffers_[frame], identityMatrix);
     for (const auto& [cp, m] : chunkMeshes_) {
         if (m.cutoutVertexCount == 0) continue;   // 无 Cutout 面跳过
         VkDeviceSize vbOffset = 0;

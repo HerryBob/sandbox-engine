@@ -213,7 +213,12 @@ private:
     // 确保某张实体贴图已加载（图像/视图/采样器 + 自己的 descriptor set）。
     // 按路径去重：重复调用同一路径只建一次。返回 false 表示该贴图不可用。
     bool ensureEntityTexture(const std::string& texturePath);
-    void updateViewProj(double dt); // 从 CameraState 读相机状态 → 算 MVP 写 UBO（drawFrame 开头调用，只读不处理输入）
+    void updateViewProj(double dt); // 从 CameraState 读相机状态 → 算 viewProj（drawFrame 开头调用，只读不处理输入）
+    // 推送「模型矩阵 + 相机矩阵」共 128 字节到 push constant（两个 mat4，正好是规范保证的下限）。
+    // 相机矩阵以前放在单份 UBO 里，而 kMaxFramesInFlight=2 → CPU 写第 N 帧会覆盖第 N-1 帧
+    // 还在读的内容，偶发一帧的相机矩阵错乱（表现为一片地形变天空色）。改走 push constant 后
+    // 每个命令缓冲自带一份，不再有跨帧共享。
+    void pushDrawMatrices(VkCommandBuffer cmd, const glm::mat4& bodyModel) const;
     void destroyUniformObjects();
 
     // ---- HUD 资源（字体纹理 + 独立管线 + 每帧顶点缓冲）----
@@ -308,8 +313,9 @@ private:
     std::unordered_set<engine::shared::ChunkPos> pendingDirtyChunks_; // 待重建的脏 chunk 集
     std::atomic<bool> chunkRebuildRequested_{ false };                // 增量重建请求标志
 
-    VkBuffer             uboBuffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory       uboMemory_ = VK_NULL_HANDLE;
+    VkBuffer             uboBuffer_ = VK_NULL_HANDLE;   // 已废弃：相机矩阵改走 push constant（见 pushDrawMatrices）
+    VkDeviceMemory       uboMemory_ = VK_NULL_HANDLE;   // 同上；layout/set 保留仅为兼容旧的 binding 0
+    glm::mat4            viewProj_{1.0f};               // 本帧的 proj*view（updateViewProj 写，pushDrawMatrices 读）
     VkDescriptorSetLayout descLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool     descPool_ = VK_NULL_HANDLE;
     VkDescriptorSet      descSet_ = VK_NULL_HANDLE;

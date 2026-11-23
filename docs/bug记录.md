@@ -234,34 +234,75 @@
 
 ---
 
-## 十、窗口模式下的"地形局部透明"（2026-11-23 调查，⏸ 暂缓）
+## 十、窗口模式下的"地形局部透明"（2026-11-23 ✅ 已修）
 
-**现象**：默认窗口大小下，大幅晃动视角 / 飞到新加载区域时，**一片跟地形起伏一致的区域变成天空色**，
-只持续约 **1 帧**（截图都来不及），全屏时基本不出现。
+### 根因（2026-11-23 定案）
 
-**已排除（都是硬数据，不是推测）**：
+**相机矩阵放在一块共享 UBO 里，而渲染有 2 个 frame-in-flight。**
 
-| 嫌疑 | 排除方式 | 结论 |
+```
+第 N 帧：drawFrame 开头 updateViewProj() → vkMapMemory 写 uboBuffer_（唯一一块）
+        此时第 N-1 帧的 GPU 提交可能还在读同一块 buffer
+        → 第 N-1 帧读到"半新半旧"的矩阵 → 整帧投影错位 → 屏幕边缘那片地形被投出视锥
+        → 只剩清屏色（天空），且只错 1 帧
+```
+
+为什么症状是这些特征：
+
+| 现象 | 为什么 |
+|---|---|
+| **切全屏就好** | 全屏分辨率更高 → 帧更慢 → CPU 不会跑到 GPU 前面 → 撞不上 |
+| **窗口模式频繁** | 分辨率低 → 帧更快 → CPU 领先 → 更容易覆盖在飞的 buffer |
+| **只转视角也能复现** | 不动时算出的矩阵每帧相同，覆盖了也看不出；一转视角矩阵就变 |
+| **只错 1 帧、难截图** | 下一帧矩阵又写对了 |
+| **边缘随地形起伏** | 整帧投影偏了一点，缺的是视锥边缘那一圈，形状跟着地形轮廓 |
+| **破坏方块时不出现** | 那条路径不改变相机矩阵 |
+
+**为什么之前全部排除**：网格、深度、事件、同步、extent、呈现模式 —— 确实都与它无关，
+所以 A/B 都没有效果。真正的错误在**"相机矩阵怎么送到 GPU"**这一层。
+
+### 修法
+
+相机矩阵也走 **push constant**（原本只放了 model 矩阵，64 字节；push constant 上限 128 字节，
+两个 mat4 正好放得下）：
+
+- `shaders/block.vert`：`layout(push_constant)` 里加 `mat4 viewProj`，删掉原来的 UBO 声明
+- `VulkanContext::pushDrawMatrices(cmd, bodyModel)`：一次推 128 字节（model + viewProj），
+  4 处推送点（chunk solid / chunk cutout / 刚体 / 骨骼）全部改用它
+- `pipelineLayout` 的 push range：`sizeof(mat4)` → `sizeof(mat4) * 2`
+- `updateViewProj()`：不再 `vkMapMemory` 写 UBO，只算到 `viewProj_` 成员
+
+**为什么这样彻底**：push constant 跟着命令缓冲走，每个 in-flight 帧自带一份，**不再有共享**。
+
+验证：构建通过、冒烟 9/9 PASS、**0 条 Vulkan 校验层报错**、用户实测**症状消失**。
+
+### 遗留
+
+`uboBuffer_` / `uboMemory_` 及其 descriptor binding 0 现在**已废弃不用**（着色器不再声明），
+但为了不牵动实体贴图的 descriptor set 分配，暂时保留（代码里已标"已废弃"）。
+彻底删除时注意 `ensureEntityTexture` 也往 binding 0 写了同一个 UBO。
+
+### 排查过程中顺带修掉的两个真 bug
+
+| # | 问题 | 影响 |
 |---|---|---|
-| B135 请求覆盖 | 加计数器跑 20s：**覆盖 0 次** | ❌ |
-| P14-1 延迟销毁（旧 buffer 提前释放） | A/B 开关回到"停 GPU + 立即销毁"，**症状一样** | ❌ |
-| 深度缓冲未清 | `depth.loadOp = CLEAR`，每帧清 1.0 | ❌ |
-| 呈现信号量配对 | `imageAvailable_` 按帧槽、`renderFinished_` 按图像 | ❌ |
-| extent / renderArea / viewport 不一致 | 全部同源于 `swapchainExtent_` | ❌ |
-| 远平面裁剪 | `far` 100 → 1000 后症状不变（但 100 本身确实裁掉窗边区块，**已修**） | ❌ |
-| 深度约定不匹配 | 补 `GLM_FORCE_DEPTH_ZERO_TO_ONE`（**已修**），症状不变 | ❌ |
+| 1 | 远平面 `far = 100` | 流式窗口半径 4 列（对角 ~90 格），窗边刚加载的区块正好被裁掉 |
+| 2 | 缺 `GLM_FORCE_DEPTH_ZERO_TO_ONE` | `glm::perspective` 输出 OpenGL 的 z∈[-1,1]，Vulkan 只认 [0,1] → 一半深度范围被丢弃 |
 
-**关键线索**：
+### 已排除清单（供以后参考，都是硬数据）
 
-1. 洞里是**天空色** → 那些像素只被 clear，没有任何几何画上去。
-2. 洞的边缘**跟地形起伏一致**（不是方块形、不是屏幕矩形）。
-3. **只晃动视角不动位置**时也能复现 —— 而流式窗口只跟位置走，所以**不是加载/卸载/重建**造成的。
-4. 受影响的是"离相机一定距离的那片地形"，飞近后换另一片。
+| 嫌疑 | 排除方式 |
+|---|---|
+| B135 请求覆盖 | 加计数器跑 20s：覆盖 0 次 |
+| P14-1 延迟销毁 | A/B 回到"停 GPU + 立即销毁"，症状一样 |
+| 深度缓冲未清 | `depth.loadOp = CLEAR`，每帧清 1.0 |
+| 呈现信号量配对 | `imageAvailable_` 按帧槽、`renderFinished_` 按图像 |
+| extent / renderArea / viewport 不一致 | 全部同源于 `swapchainExtent_` |
+| 远平面裁剪 / 深度约定 | 修了之后症状不变 |
+| 呈现模式 | 本卡只支持 IMMEDIATE/FIFO/FIFO_RELAXED（无 MAILBOX）；强制 IMMEDIATE 后症状一样 |
+| alpha 透窗（AMD 已知问题） | `compositeAlpha = OPAQUE` + 清屏 alpha 1.0 |
 
-**判定**：⏸ **暂缓**，等渲染层重构时再查。
-
-### 外部同类问题（2026-11-23 检索）
-
+### 外部同类问题（检索于 2026-11-23，供参考）
 | 来源 | 现象 | 要点 |
 |---|---|---|
 | [MC-312375](https://mojira.dev/MC-312375)（Minecraft 官方 issue，Vulkan 后端） | **窗口模式渲染错乱，切全屏"就好了"** | 与我们的症状几乎一样。评论指出 **"其实不是全屏的缘故，而是只有特定窗口宽度（如 1920px）才正常"** → **尺寸相关**；Linux（radv / intel_hasvk）**不复现** → Windows 驱动 + DWM 相关；OpenGL 后端正常 |
@@ -274,16 +315,6 @@
 
 **结论**：这是 **Windows 上 Vulkan 呈现路径（native flip ↔ layered DXGI copy）** 的已知一族问题，不是我们独有的实现错误。
 也解释了此前所有"排除"：网格、深度、事件、同步都与它无关，所以 A/B 全部无效果。
-
-### 由此得到的两个可操作点
-
-1. ⭐ **`VK_SUBOPTIMAL_KHR` 现在被当成成功忽略掉了**
-   `drawFrame` 只在 `VK_ERROR_OUT_OF_DATE_KHR` 时重建交换链。多份资料（Mesa WSI / Khronos 最佳实践 / 中文实现笔记）一致认为
-   **SUBOPTIMAL 应触发重建** —— "本可 flip 却退化成 copy" 正是窗口模式下画面异常的场景。
-   改动只有 1 行：`if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) { recreateSwapchain(); ... }`。
-2. **给用户一个环境侧规避**：NVIDIA 控制面板 → 管理 3D 设置 → **Vulkan/OpenGL 呈现方式** 从"自动"改为"native（首选本机）"（社区实测可消除同类闪烁）。
-   这是验证"是否属于呈现层"的最快实验，不花代码成本。
-
 ### AMD 平台补充（2026-11-23，本机 RX 6750 GRE 12GB / 驱动 32.0.21045.16010，单显卡）
 
 **关键机制**（比"驱动 bug"更具体）：
@@ -310,26 +341,35 @@
 3. **关掉 overlay 再测**（Afterburner / RTSS / Discord / AMD 自己的 overlay 都会再插一层呈现）。
 4. **我们自己的 1 行改动**：`VK_SUBOPTIMAL_KHR` 也触发重建交换链（见上节可操作点 1）。
 
-**下次的切入点**（按性价比）：
+> ⚠️ 这些资料当时把我引向"呈现路径"（错误方向），实际根因是共享 UBO 竞态。
+> 保留它们是因为：① 症状描述高度相似，值得记录；② 里面的排除手段（呈现模式、compositeAlpha）以后再遇到同类现象能省时间。
 
-1. **帧捕获**：加 `vkCmdCopyImageToBuffer` + 存 PNG，把出问题那一帧存下来看 ——
-   1 帧肉眼抓不到，但程序可以条件触发（比如"连续 3 帧某 chunk 的面数骤降"）。
-2. **A/B 光栅状态**：`cullMode = NONE` / `depthTestEnable = FALSE`，各跑一次（各 1 行）。
-3. **环境侧对照**（零代码成本，最先做）：NVIDIA 控制面板把"Vulkan/OpenGL 呈现方式"在
-   **自动 / native / layered DXGI** 三档之间切换，各复现一次 —— 若某一档症状变化，
-   即确认属于 Windows 呈现路径，代码侧就不必再追。
-4. 结合 P15（全量重建按 chunk 取数）一起重写这段 —— 那时逻辑会简单得多。
+### 排查中被证伪的"环境侧规避"（记录以免重复尝试）
 
----
+| 尝试 | 结果 |
+|---|---|
+| 强制 `VK_PRESENT_MODE_IMMEDIATE_KHR`（本卡只支持 IMMEDIATE / FIFO / FIFO_RELAXED，**无 MAILBOX**） | 症状**完全不变** → 与呈现模式无关 |
+| `VK_SUBOPTIMAL_KHR` → 重建交换链 | 代码**本来就这么写的**（`drawFrame` 的 present 分支已含 SUBOPTIMAL），不是缺失项 |
+| NVIDIA 控制面板 "Vulkan/OpenGL present method" 改 native | AMD 卡无此开关 |
+| HAGS / 驱动版本 / 关 overlay | 未尝试（根因已定位，不必再试） |
+
+### 教训
+
+1. **"窗口模式才出现"不一定是呈现层**：两个 in-flight 帧共用一份每帧更新的资源，
+   在全屏（帧慢）时不撞、在窗口（帧快）时撞 —— 表现为"和窗口模式强相关"，误导性极强。
+2. **每帧更新的 GPU 资源必须按 frame-in-flight 分份**（UBO / 描述符 / 任何 host 可见缓冲），
+   否则就是这种"偶发一帧"的错乱。检查清单：UBO、staging buffer、动态描述符更新。
+3. 排查顺序里应**更早**检查"每帧数据是怎么送到 GPU 的" —— 这次它排在第 8 位，
+   而前面 7 项（网格/深度/事件/同步/信号量/extent/裁剪）本来都有硬数据可快速否定。
 
 ## 汇总
 
 | 项 | 数量 |
 |---|---|
-| 核实条目 | **136 条**（B1–B136；B135/B136 为通读新发现，待验证） |
+| 核实条目 | **138 条**（B1–B138；B135/B136 待验证，B137/B138 为 2026-11-23 读代码/实测发现） |
 | 其中 🔴 | **15 条**（含 B135/B136） |
 | 文档误记（❌ 不实） | **8 条**（TimeManager ×2、ChunkData ×1、PlayerBodyState ×1、ChunkPos ×1、Protocol ×3） |
 | 已被重构修复（🔧） | **3 条**（BodyPose 缺旋转、`queue*` 命名、"事件流语义"） |
 | 归类为性能（→ `性能问题记录.md`） | 8 条（P1–P8）→ 现共 14 条（P1–P14） |
 | 归类为渲染端注意项（规则 2/5 豁免） | 3 条（CameraState→Vulkan） |
-| **暂缓（⏸ 等渲染层重构）** | **1 条**（B138 窗口模式地形局部透明，见第十节；已确认是 Windows Vulkan 呈现路径的已知一族问题） |
+| **本次已修（✅）** | **2 条**（B137 全量重建入口缺失——改名+记录；**B138 窗口模式地形局部透明——根因是共享 UBO 竞态**，见第十节） |

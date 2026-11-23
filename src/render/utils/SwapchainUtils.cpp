@@ -1,6 +1,7 @@
 #include "SwapchainUtils.hpp"
 
 #include <vector>
+#include <string_view>
 
 namespace engine::render::util {
 
