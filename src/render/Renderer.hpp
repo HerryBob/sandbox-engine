@@ -43,7 +43,10 @@ public:
     }
 
 private:
-    bool first_ = false;   // 第一帧标志：启动时全量重建一次 mesh
+    // 首帧全量重建是否已做过（R5：布尔成员 = 过去分词 + _，与 `started_` 同一写法）。
+    // 原来叫 `first_`，但 `if (!first_)` 读起来像"如果不是第一帧"，语义反了 —— 改为
+    // 明确表达"已构建"，避免将来把条件改错方向。
+    bool fullMeshBuilt_ = false;
     engine::render::VulkanContext& vk_;
     engine::business::BusinessWorld& world_;
     engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& changeQueue_;

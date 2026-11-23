@@ -4,8 +4,12 @@
 namespace engine::render {
 
 void Renderer::tick() {
-    if (!first_) {
-        first_ = true;
+    // 首帧：把整个世界一次性建好网格（此后只走增量）。
+    // 注意（bug记录 B137）：这里**只由首帧门控**，目前没有"世界重建"的入口 ——
+    // 将来若加切世界/重载存档，必须显式重置 fullMeshBuilt_ 或改成 rebuildAll() 调用，
+    // 否则世界换了而网格还是旧的。
+    if (!fullMeshBuilt_) {
+        fullMeshBuilt_ = true;
         vk_.rebuildMeshFromBlocks(world_.renderSnapshot());
     }
     engine::shared::BlockChangeEvent ev;

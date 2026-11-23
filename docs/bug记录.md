@@ -196,6 +196,17 @@
 | B135 | 请求单槽覆盖 | `VulkanContext::requestChunkRebuild` | `pendingDirtyChunks_ = dirtyChunks` 是**覆盖**而非并集；`chunkRebuildRequested_` 只是一个 bool | 两次变更事件落在同一次重建之前时，前一批脏 chunk 永久丢失 → 那个 chunk 的网格停在旧状态 | 🔴 | ⏳ 待验证 |
 | B136 | 范围不一致 | `VulkanContext::rebuildChunkMeshes:685` | 剔除依据是「脏 chunk ∪ 1 环邻居」（`chunkSnapshot(expandNeighbors=true)`），但重建集合只有脏 chunk（`rebuildSet = dirtyChunks`） | 用邻居的数据剔掉了面，却不重建邻居的网格 → **接缝一侧缺面，看穿墙体**。第 1376 行注释写"∪6 邻居由内部展开"，**实现里没有** | 🔴 | ⏳ 待验证 |
 
+## 九、渲染全量重建的入口问题（读代码发现，2026-11-23）
+
+| # | 类型 | 位置 | 现象 | 影响 | 严重度 | 状态 |
+|---|---|---|---|---|---|---|
+| B137 | 入口缺失 + 命名歧义 | `Renderer::tick` / `Renderer.hpp:46` | ① `rebuildMeshFromBlocks` 全项目只有**一个**调用点，且只由首帧门控（原 `first_`，已改名 `fullMeshBuilt_`）；**"世界重建"路径根本不存在** —— 注释写着"首帧/世界重建用"，但没有第二个入口 | 将来加「切世界 / 重载存档」时，`fullMeshBuilt_` 已是 true → **全量重建再也不会发生**，世界换了而网格还是旧的。这是 latent bug：今天不触发，补功能时必踩 | 🟡 | ✅已记录；命名已改（`first_` → `fullMeshBuilt_`，R5 过去分词） |
+
+> **补充（缺"整体重建"入口）**：现在只有"首帧隐式触发"这一条路。若将来需要"大规模卸载后回收所有网格并重建"，
+> 没有 API 可用 —— `chunkMeshes_` 只能靠逐 chunk 脏标记清理。
+> 建议与 P15 一起改：`Renderer::requestFullRebuild()` → `VulkanContext::rebuildAllChunks(chunks)`
+> （按 chunk 从 World 直接取数，不再经过 `vector<Block>` 的 1.3 MB 中转）。
+
 ### 成因链（为什么"几帧后自己好"）
 
 1. 破坏 chunk 边界上的方块 → `markDirtyWithBoundary` 把 A、B 两个 chunk 都标脏；
