@@ -363,6 +363,30 @@ bodyInterface.SetGravityFactor(id, 1.0f - lift / weight);
 |---|---|---|
 | **A** | block state 与 Jolt 的先后 | **block state 先行**（按 §八）。理由：state 决定 `PaletteEntry` 语义，物理适配层要按 state 取质量，两者同源，一起做省一轮返工 |
 | **B** | 多刚体改造的时机 | **与 Jolt 一起改**（一次完成），但拆成独立一步：先改数据结构（手搓占位实现仍能跑），再接 Jolt |
+| **C** | 精度方案 | **采用 Jolt 官方推荐：float 内核 + 世界原点偏移**（不启用 `DOUBLE_PRECISION`），详见下节 |
+
+### 精度方案：float + 世界原点偏移（官方推荐，2026-11-23 定）
+
+**结论**：Jolt 保持 `DOUBLE_PRECISION=OFF`（float 内核，默认配置 —— 性能与 ABI 都最稳），
+引擎自己的世界坐标继续用 `double`，两者靠"每个结构一个 float 原点"桥接。
+
+| 层 | 用什么 | 说明 |
+|---|---|---|
+| 引擎世界坐标 | `double` | `RigidBody.x/y/z`、渲染侧 `bodyPos_` 都是 double，保持不动 |
+| Jolt 内部坐标 | `float`（相对原点） | 刚体位置的**有效位数全花在局部**，远处不抖 |
+| 桥 | 每个结构一个 `float origin` | Jolt 坐标 = 世界坐标 − origin |
+
+落地要点：
+
+1. **喂进 Jolt 的位置必须是相对原点**：`BodyInterface::SetPosition(id, RVec3(x,y,z))`
+   —— `DOUBLE_PRECISION=OFF` 时 `RVec3` 就是 `Vec3`，传绝对世界坐标等于把精度丢掉。
+2. **移动原点（moving origin）**：结构整体走远时，重新定 origin（把所有刚体位置减去新原点后重设）。
+   相机/渲染侧本来就在做 double→float 的局部化，物理侧对齐同一套做法即可。
+3. **与架构 2.8 同源**：2.8 说「复合体 = 基准 + 局部坐标」，这里的 `origin` 就是那个「基准」——
+   两处是同一个概念，实现时共用同一份数据，不要各写一套。
+4. **玩家 `CharacterVirtual` 同样遵循**：它的 `SetPosition`/`GetPosition` 也是 `RVec3`。
+5. **重新定原点的阈值待定**（建议：结构离原点超过 ~10 km 时触发；当前世界只有几百米，1.0 可以先不做，
+   但**数据结构里要留 origin 字段**，否则以后再补要动所有位置换算）。
 
 ### 步骤 1（已完成）：构建集成
 
@@ -381,7 +405,8 @@ target_link_libraries(sandbox_engine PRIVATE ... Jolt)
 | `OVERRIDE_CXX_FLAGS` | **ON** | 覆盖全局 `CMAKE_CXX_FLAGS_DEBUG/RELEASE`，连带影响三个模组 DLL target（`/utf-8`、告警、运行库） |
 | `USE_STATIC_MSVC_RUNTIME_LIBRARY` | **ON** | 把 `CMAKE_MSVC_RUNTIME_LIBRARY` 设成 `/MTd`，与引擎的 `/MDd` 冲突 → `LNK2038 RuntimeLibrary 不匹配` |
 
-另设 `DOUBLE_PRECISION=OFF`（见 §六 的精度方案，待补世界原点偏移）、`USE_ASSERTS=OFF`（Debug 断言会显著拖慢构建与运行，需要时单独开）。
+另设 `DOUBLE_PRECISION=OFF`（float 内核 —— 配合"世界原点偏移"，见上节「精度方案」）、
+`USE_ASSERTS=OFF`（Debug 断言会显著拖慢构建与运行，需要时单独开）。
 
 结果：`Jolt.lib` 64.6 MB 静态库编出；exe 仍 4.19 MB（**目前无源码引用，符号未进 exe**）；冒烟 9/9 PASS，行为零变化。
 
