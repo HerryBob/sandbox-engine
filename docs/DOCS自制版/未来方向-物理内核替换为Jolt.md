@@ -422,5 +422,9 @@ target_link_libraries(sandbox_engine PRIVATE ... Jolt)
 
 | 目录 | 删除 |
 |---|---|
-| `third_party/JoltPhysics` | `.github` / `Assets` / `HelloWorld` / `JoltViewer` / `PerformanceTest` / `Samples` / `TestFramework` / `UnitTests`（保留 `Jolt/` 源码、`Build/` cmake、`Docs/`、`LICENSE`、`.git`（版本锚点）） |
+| `third_party/JoltPhysics` | `.github` / `Assets` / `HelloWorld` / `JoltViewer` / `PerformanceTest` / `Samples` / `TestFramework` / `UnitTests`，以及 `.git`（16.2 MB 历史）、`Doxyfile` / `doxygen-awesome.css` / `run_doxygen.bat` / `sonar-project.properties` / `ContributorAgreement.md` / `.clang-format` / `.editorconfig` / `.gitattributes` / `.gitignore`。**保留**：`Jolt/`（源码）、`Build/`（cmake）、`Docs/`（API 参考）、`LICENSE`、`README.md` —— 目录从 **51.3 MB 降到 10.4 MB** |
 | `third_party/spdlog` | `.github` / `bench` / `example` / `logos` / `scripts` / `tests`（保留 `include/` `src/` `cmake/` `CMakeLists.txt` `LICENSE`） |
+
+> `.git` 删除后 `third_party/JoltPhysics` 变成普通目录（父仓库本来就 ignore 它）：
+> **版本以 `Jolt v5.6.0`（commit `e77f175`）为准，已记在上面的「步骤 1」里**；
+> 将来升级 Jolt 需要重新下载对应 tag 覆盖该目录，不能再 `git pull`。
