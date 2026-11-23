@@ -33,7 +33,13 @@ public:
     // 业务 Tick 边界：组装一条指令发出（优先级 全量同步→放置→破坏）。
     // fullSnapshot = 业务世界全量方块（SyncBlockSet 用；业务线程现场生成）。
     // push 成功才清对应待发位；失败（队列满）保留下 tick 重试（指令可延迟）。
+    //
+    // 性能（P1）：fullSnapshot 是**参入即求值**的 —— 调用方必须先问 hasPendingSync()，
+    // 只在真要发全量同步时才现场拍快照，否则每 tick 白拷一次整个世界。
     void syncWorldToPhysics(const std::vector<engine::shared::Block>& fullSnapshot);
+
+    // 是否有待发的全量同步指令。调用方据此决定"要不要拍全量快照"（P1）。
+    bool hasPendingSync() const noexcept { return wantSync_; }
 
     // 业务 Tick 边界：收光回执并消化。
     // 位置快照/碰撞体数量 → 原子投影（本类自留）；

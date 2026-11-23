@@ -138,6 +138,11 @@ private:
     // B96：收物理回执时复用的事件缓冲（避免每 tick 构造/销毁 vector）。
     // 只在业务线程使用，容量留在跨 tick 之间。
     std::vector<engine::shared::BodyStructureEvent> bodyEvents_;
+
+    // 诊断（性能记录 P1）：累计拍过多少次全量世界快照（renderSnapshot）。
+    // 稳态应为 0 —— 只有"待发全量同步"时才需要快照；每 tick 都拍就是 P1 描述的问题。
+    long long syncSnapshotCount_ = 0;
+    long long lastLogSnapshotCount_ = 0;
     std::atomic<bool> firstTick_{ true };                      // 首个业务 tick 强制全量同步：地形预热在主线程完成，业务线程无新列可触发
 
     std::atomic<long long> placedBlockCount_{0};       // 成功放置（裁决通过）次数

@@ -49,8 +49,20 @@ void BusinessWorld::syncWorldToPhysics() {
     if (resyncPending_.load(std::memory_order_relaxed)) {
         if (physicsBridge_.pushSyncCommand()) resyncPending_.store(false, std::memory_order_relaxed);
     }
-    // tick 边界：委托 PhysicsBridge 发指令（全量同步需现场生成世界快照）。
-    physicsBridge_.syncWorldToPhysics(world_.renderSnapshot());
+    // tick 边界：委托 PhysicsBridge 发指令。
+    //
+    // P1（性能）：**只有真的待发全量同步时才拍快照**。
+    // 原来这里无条件 `world_.renderSnapshot()`：25 次/秒 × 全量持锁拷贝。
+    // 实测 82,944 方块时每秒 25~26 次、约 33 MB/s 的纯拷贝，稳态下全是白做；
+    // 10k chunk 时单次需几百 ms、峰值内存近 1GB（OOM 直接崩）。
+    // 现在稳态快照次数为 0，只有 chunk 加载/卸载触发 resync 的那几个 tick 才拍。
+    static const std::vector<engine::shared::Block> kEmptySnapshot; // 无同步时不构造临时表
+    if (physicsBridge_.hasPendingSync()) {
+        ++syncSnapshotCount_;   // 诊断：1Hz 日志里的"全量快照=N/s"
+        physicsBridge_.syncWorldToPhysics(world_.renderSnapshot());
+    } else {
+        physicsBridge_.syncWorldToPhysics(kEmptySnapshot);
+    }
 }
 
 void BusinessWorld::receiveResultsFromPhysics() {
@@ -271,9 +283,14 @@ void BusinessWorld::maybeLog() {
         const double wall =
             std::chrono::duration<double>(now - startWall_).count();
         const double tps = wall > 0.0 ? static_cast<double>(t) / wall : 0.0;
+        // 诊断（P1）：上一秒拍了几次全量快照。stead-state 应为 0 ——
+        // 因为只有"待发全量同步"时才需要快照；每 tick 都拍就是 P1 描述的问题。
+        const long long snapsThisSecond = syncSnapshotCount_ - lastLogSnapshotCount_;
+        lastLogSnapshotCount_ = syncSnapshotCount_;
         std::ostringstream os;
         os << "[业务] sim=" << sim << "s tick=" << t
            << " 平均tps=" << tps
+           << " 全量快照=" << snapsThisSecond << "/s"
            << " 世界方块=" << blockCount()
            << " 物理碰撞体=" << physicsBlockCount()
            << " 放置/破坏=" << placedBlockCount() << "/" << removedBlockCount()
