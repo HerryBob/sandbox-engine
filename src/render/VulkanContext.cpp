@@ -680,16 +680,9 @@ bool VulkanContext::rebuildChunkMeshes(
     const std::vector<engine::shared::Block>& blocks, 
     const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks) {
         
-    // ===== 临时计时（P14 测量用，测完删除）=====
-    const auto perfT0 = std::chrono::steady_clock::now();
     // P14：原来这里有 vkDeviceWaitIdle（等整条 GPU 流水空闲，实测平均被拖 6.18ms）。
     // 现在改为"按帧槽延迟销毁"（retireChunkMesh / collectRetiredMeshes），
     // 不再需要停 GPU —— 旧 buffer 会在引用它的命令缓冲执行完之后才释放。
-    const auto perfT1 = std::chrono::steady_clock::now();
-    std::size_t perfCmp = 0;   // 逐 chunk 过滤时的边界比较次数
-    double perfFilterMs = 0.0, perfVertMs = 0.0, perfUploadMs = 0.0;   // 三段细分
-    double perfLookupMs = 0.0, perfMaskMs = 0.0, perfBlockVertMs = 0.0; // 顶点段内的三小段
-    // ===== 临时计时结束 =====
     //待重建集合
     std::unordered_set<engine::shared::ChunkPos> rebuildSet = dirtyChunks;
     //solid集合
@@ -712,17 +705,13 @@ bool VulkanContext::rebuildChunkMeshes(
             by = cp.y << 4,
             bz = cp.z << 4;
         std::vector<engine::shared::Block> chunkBlocks;
-        const auto perfF0 = std::chrono::steady_clock::now();
         for (const auto& b : blocks) {
-            ++perfCmp;   // 临时计时：过滤比较次数
             if (b.type == engine::shared::BlockType::Air || b.contraptionId != -1) continue;
             if (b.pos.x >= bx && b.pos.x < bx + 16 &&
                 b.pos.y >= by && b.pos.y < by + 16 &&
                 b.pos.z >= bz && b.pos.z < bz + 16)
                 chunkBlocks.push_back(b);
         }
-        const auto perfF1 = std::chrono::steady_clock::now();
-        perfFilterMs += std::chrono::duration<double, std::milli>(perfF1 - perfF0).count();
         //生成chunk的顶点和索引（分桶：Solid 默认组 / Cutout 透明组）
         std::vector<Vertex> vertices;           // Solid 组顶点
         std::vector<uint32_t> indices;          // Solid 组索引
@@ -744,7 +733,6 @@ bool VulkanContext::rebuildChunkMeshes(
 
         for (const auto& block : chunkBlocks) {
             // 细插桩（P14-2 决策用）：① 三次查表  ② 面剔除  ③ 顶点生成+拷贝
-            const auto perfA0 = std::chrono::steady_clock::now();
             const glm::vec3 center{block.pos.x + 0.5f, block.pos.y + 0.5f, block.pos.z + 0.5f};
             // 类型 → 渲染属性（首次遇到该类型时查表，之后直接命中缓存）
             const auto cacheSlot =
@@ -772,12 +760,8 @@ bool VulkanContext::rebuildChunkMeshes(
             auto& dstVerts   = isCutout ? cutoutVerts : vertices;
             auto& dstIndices = isCutout ? cutoutIndices : indices;
             auto& dstOffset  = isCutout ? cutoutVertexOffset : vertexOffset;
-            const auto perfA1 = std::chrono::steady_clock::now();
-            perfLookupMs += std::chrono::duration<double, std::milli>(perfA1 - perfA0).count();
             // 玻璃整体淡蓝；solid 不传 tint 用默认逐面色
             const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
-            const auto perfA2 = std::chrono::steady_clock::now();
-            perfMaskMs += std::chrono::duration<double, std::milli>(perfA2 - perfA1).count();
             // 顶点生成：优先数据驱动模型（模型名注册且加载成功 → buildModelVertices；
             // 无 model / 模型缺失 → 立方体兜底，仍用注册表纹理）
             // P14-2b：直接追加进 dstVerts，不再每块新建 vector 再拷贝
@@ -793,12 +777,8 @@ bool VulkanContext::rebuildChunkMeshes(
                 dstIndices.push_back(b0 + 0); dstIndices.push_back(b0 + 2); dstIndices.push_back(b0 + 3);
             }
             dstOffset += static_cast<uint32_t>(dstVerts.size() - vertsBefore);
-            const auto perfA3 = std::chrono::steady_clock::now();
-            perfBlockVertMs += std::chrono::duration<double, std::milli>(perfA3 - perfA2).count();
         }
         //无chunk 删除旧网格, 继续下一个
-        const auto perfV1 = std::chrono::steady_clock::now();
-        perfVertMs += std::chrono::duration<double, std::milli>(perfV1 - perfF1).count();
         auto it =  chunkMeshes_.find(cp);
         if (vertices.empty() && cutoutVerts.empty()) {
             if (it != chunkMeshes_.end()) {
@@ -842,8 +822,6 @@ bool VulkanContext::rebuildChunkMeshes(
             m.cutoutIndexCount = static_cast<uint32_t>(cutoutIndices.size());
         }
         chunkMeshes_[cp] = m;
-        const auto perfU1 = std::chrono::steady_clock::now();
-        perfUploadMs += std::chrono::duration<double, std::milli>(perfU1 - perfV1).count();
 
         //重建日志（面数 = Solid + Cutout）
         {
@@ -854,26 +832,6 @@ bool VulkanContext::rebuildChunkMeshes(
             ENGINE_LOG_INFO("Vulkan", os.str());
         }
     }
-    // ===== 临时计时（P14 测量用，测完删除）=====
-    {
-        const auto perfT2 = std::chrono::steady_clock::now();
-        const double waitMs = std::chrono::duration<double, std::milli>(perfT1 - perfT0).count();
-        const double totalMs = std::chrono::duration<double, std::milli>(perfT2 - perfT0).count();
-        std::ostringstream os;
-        os << "[perfP14] chunks=" << rebuildSet.size()
-           << " blocks=" << blocks.size()
-           << " cmp=" << perfCmp
-           << " waitIdle=" << waitMs << "ms"
-           << " 过滤=" << perfFilterMs << "ms"
-           << " 顶点=" << perfVertMs << "ms"
-           << "[查表=" << perfLookupMs
-           << " 面剔除=" << perfMaskMs
-           << " 生成=" << perfBlockVertMs << "]"
-           << " 上传=" << perfUploadMs << "ms"
-           << " total=" << totalMs << "ms";
-        ENGINE_LOG_INFO("Vulkan", os.str());
-    }
-    // ===== 临时计时结束 =====
     return true;
 }
 
