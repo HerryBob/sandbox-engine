@@ -56,10 +56,33 @@ set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
 set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory("${THIRD_PARTY_DIR}/spdlog" EXCLUDE_FROM_ALL)
 
+# ---- Jolt Physics（v5.6.0，刚体物理内核）----
+# 只编库本体（Build/ 子目录就是"仅库"构建）：
+#   ① Build/CMakeLists.txt 里 TARGET_SAMPLES / HELLO_WORLD / PERFORMANCE_TEST /
+#      VIEWER / UNIT_TESTS **默认全 ON**，且是 if() 里直接 include 子工程 ——
+#      不关掉会连带编译一堆示例，还会引入 TestFramework / Assets 依赖。
+#   ② OVERRIDE_CXX_FLAGS 默认 ON，会**覆盖全局** CMAKE_CXX_FLAGS_DEBUG/RELEASE，
+#      连带影响本工程的三个模组 DLL target（/utf-8、告警等级、运行库选择）→ 必须关。
+#   ③ DOUBLE_PRECISION 维持 OFF（float）。引擎世界坐标用 double，精度方案见
+#      docs/DOCS自制版/未来方向-物理内核替换为Jolt.md（待补：世界原点偏移）。
+#   ④ USE_STATIC_MSVC_RUNTIME_LIBRARY 默认 ON → 它会把 CMAKE_MSVC_RUNTIME_LIBRARY
+#      设成 /MT(/MTd)，与引擎的 /MDd 冲突（LNK2038 RuntimeLibrary 不匹配）。必须关。
+set(TARGET_UNIT_TESTS        OFF CACHE BOOL "" FORCE)
+set(TARGET_HELLO_WORLD       OFF CACHE BOOL "" FORCE)
+set(TARGET_PERFORMANCE_TEST  OFF CACHE BOOL "" FORCE)
+set(TARGET_SAMPLES           OFF CACHE BOOL "" FORCE)
+set(TARGET_VIEWER            OFF CACHE BOOL "" FORCE)
+set(OVERRIDE_CXX_FLAGS       OFF CACHE BOOL "" FORCE)
+set(DOUBLE_PRECISION         OFF CACHE BOOL "" FORCE)
+set(USE_ASSERTS              OFF CACHE BOOL "" FORCE)
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+add_subdirectory("${THIRD_PARTY_DIR}/JoltPhysics/Build" EXCLUDE_FROM_ALL ${CMAKE_BINARY_DIR}/jolt)
+
 target_link_libraries(sandbox_engine PRIVATE
     Vulkan::Vulkan
     "${THIRD_PARTY_DIR}/lib/glfw3dll.lib"   # GLFW 动态库导入库
     spdlog::spdlog                          # 日志库（编译库模式；fmt 走 spdlog 内置 bundled 版本）
+    Jolt                                    # 刚体物理（静态库；目前尚未被源码引用，接物理时启用）
 )
 
 # glfw3.dll 运行时依赖：构建后拷贝到 exe 目录

@@ -352,3 +352,50 @@ bodyInterface.SetGravityFactor(id, 1.0f - lift / weight);
 | `gravityFactor` 已能表达"升力" | 一个 float 解决 90% 需求 |
 | 状态机需要接触事件 + 动量估计 + 滞后 | 是"另一套系统"，不是参数调整 |
 | **触发条件** | ① 构造数量 > 20 ② 或 `Update()` 耗时 > 2ms ③ 或需要"过载掉落/升力失效"玩法 |
+
+---
+
+## 十四、接入准备（2026-11-23 记录）
+
+### 决策
+
+| # | 决策 | 结论 |
+|---|---|---|
+| **A** | block state 与 Jolt 的先后 | **block state 先行**（按 §八）。理由：state 决定 `PaletteEntry` 语义，物理适配层要按 state 取质量，两者同源，一起做省一轮返工 |
+| **B** | 多刚体改造的时机 | **与 Jolt 一起改**（一次完成），但拆成独立一步：先改数据结构（手搓占位实现仍能跑），再接 Jolt |
+
+### 步骤 1（已完成）：构建集成
+
+Jolt 源码已在 `third_party/JoltPhysics`（**v5.6.0**，`e77f175`），CMake 之前完全没引用。现已接入：
+
+```cmake
+add_subdirectory("${THIRD_PARTY_DIR}/JoltPhysics/Build" EXCLUDE_FROM_ALL ${CMAKE_BINARY_DIR}/jolt)
+target_link_libraries(sandbox_engine PRIVATE ... Jolt)
+```
+
+**三个必须关掉的默认选项**（都是踩出来的）：
+
+| 选项 | Jolt 默认 | 不关的后果 |
+|---|---|---|
+| `TARGET_SAMPLES` / `TARGET_HELLO_WORLD` / `TARGET_VIEWER` / `TARGET_PERFORMANCE_TEST` / `TARGET_UNIT_TESTS` | **全 ON** | `Build/CMakeLists.txt` 里 `if()` 直接 include 子工程，会连带编译示例，并引入 TestFramework / Assets 依赖 |
+| `OVERRIDE_CXX_FLAGS` | **ON** | 覆盖全局 `CMAKE_CXX_FLAGS_DEBUG/RELEASE`，连带影响三个模组 DLL target（`/utf-8`、告警、运行库） |
+| `USE_STATIC_MSVC_RUNTIME_LIBRARY` | **ON** | 把 `CMAKE_MSVC_RUNTIME_LIBRARY` 设成 `/MTd`，与引擎的 `/MDd` 冲突 → `LNK2038 RuntimeLibrary 不匹配` |
+
+另设 `DOUBLE_PRECISION=OFF`（见 §六 的精度方案，待补世界原点偏移）、`USE_ASSERTS=OFF`（Debug 断言会显著拖慢构建与运行，需要时单独开）。
+
+结果：`Jolt.lib` 64.6 MB 静态库编出；exe 仍 4.19 MB（**目前无源码引用，符号未进 exe**）；冒烟 9/9 PASS，行为零变化。
+
+### 步骤 2（下一步）：最小验证
+
+在动引擎之前，先在 `SelfTest` 里加一条**临时**自检：
+建 `PhysicsSystem` + 地面 + 一个箱子 → 跑 100 步 → 断言箱子下落并停在预期高度。
+跑通说明编译 / 链接 / 初始化 / 精度 / 断言全部没问题；验证完可删或留作长期 smoke。
+
+### 第三方目录清理
+
+同时删掉了两个目录里的示例与 GitHub 相关内容（共 24.5 MB）：
+
+| 目录 | 删除 |
+|---|---|
+| `third_party/JoltPhysics` | `.github` / `Assets` / `HelloWorld` / `JoltViewer` / `PerformanceTest` / `Samples` / `TestFramework` / `UnitTests`（保留 `Jolt/` 源码、`Build/` cmake、`Docs/`、`LICENSE`、`.git`（版本锚点）） |
+| `third_party/spdlog` | `.github` / `bench` / `example` / `logos` / `scripts` / `tests`（保留 `include/` `src/` `cmake/` `CMakeLists.txt` `LICENSE`） |
