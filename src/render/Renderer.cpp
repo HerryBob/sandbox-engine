@@ -14,6 +14,16 @@ void Renderer::tick() {
         for (const auto& cp : ev.dirtyChunks) dirtyChunks_.insert(cp);
     }
     // 有脏 chunk → 请求增量重建（取数只导 dirty ∪ 6 邻居，drawFrame 在 GPU 安全点执行）
+    // ===== 临时计时（P14 测量用，测完删除）=====
+    // 每 30 帧伪造一个脏 chunk，逼出一次增量重建；数据不变 → 重建出的 mesh 与原来完全一致。
+    {
+        static int perfProbeFrames = 0;
+        if (++perfProbeFrames >= 30) {
+            perfProbeFrames = 0;
+            dirtyChunks_.insert(engine::shared::ChunkPos{0, 0, 0});
+        }
+    }
+    // ===== 临时计时结束 =====
     if (!dirtyChunks_.empty()) {
         vk_.requestChunkRebuild(world_.chunkSnapshot(dirtyChunks_), dirtyChunks_);
         dirtyChunks_.clear();
