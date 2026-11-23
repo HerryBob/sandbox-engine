@@ -80,5 +80,6 @@
 ## 6. 当前主线
 
 1. **接手 Jolt**（两天后）：逻辑层 `physics\PhysicsWorld.cpp` 整段替换积分/碰撞；数据层 `physics\PhysicsState.hpp` 的 `RigidBody` 换成 `JPH::BodyID` + 位置缓存。
+   **已定（2026-11-23）：刚体按「多刚体 + 约束表」建** —— 一个结构 → N 个 `PhysicsBody` + `PhysicsConstraint` 表，1.0 只用一个刚体、约束表为空；`contraptionId` 语义变为**结构 id**。详见 `docs\七大维度与一大底座设计\09-模组化边界.md` §九。
 2. **进场前先处理 `P1`**：`syncWorldToPhysics(world_.renderSnapshot())` 每 tick 无条件拍全量快照（10k chunk 时峰值近 1GB）。
 3. **区块边缘透空**（`bug记录` 第八节 B135/B136 + `P14`）待验证后修，修法顺序：脏集合改并集 → 快照按 chunk 分组 → 重建范围对齐 1-ring → 延迟销毁 buffer。
