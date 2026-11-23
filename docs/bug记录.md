@@ -260,12 +260,38 @@
 
 **判定**：⏸ **暂缓**，等渲染层重构时再查。
 
+### 外部同类问题（2026-11-23 检索）
+
+| 来源 | 现象 | 要点 |
+|---|---|---|
+| [MC-312375](https://mojira.dev/MC-312375)（Minecraft 官方 issue，Vulkan 后端） | **窗口模式渲染错乱，切全屏"就好了"** | 与我们的症状几乎一样。评论指出 **"其实不是全屏的缘故，而是只有特定窗口宽度（如 1920px）才正常"** → **尺寸相关**；Linux（radv / intel_hasvk）**不复现** → Windows 驱动 + DWM 相关；OpenGL 后端正常 |
+| 同上，26.4 snapshot 5 之后 | **"Vulkan only：修好了；Vulkan + DXGI Present：又坏了"** | ⭐ **元凶定位在"呈现路径"**：换成 DXGI 呈现就又出现 → 应用侧**确实有可控点** |
+| [Khronos 论坛：Present mode: Preferred Native vs Layered on DXGI Swapchain](https://community.khronos.org/t/vulkan-present-mode-preferred-native-vs-layered-on-dxgi-swapchain/112055) | 窗口模式画面异常 | Windows DWM 有 **redirection surface（BitBlt）** 与 **Flip model** 两条路径；**FIFO 呈现模式下更容易显现** |
+| [NVIDIA 开发者论坛：window gutter artifact](https://forums.developer.nvidia.com/t/windows-window-gutter-artifact-vk-present-mode-vs-layered-on-dxgi-swapchain/342975) | "窗口沟槽/边缘伪影" | 官方回复：**强制走 DXGI 呈现是个 hack**，行为不会像正规的 VK-on-DXGI interop，且增加 CPU 开销 |
+| [Vintage Story](https://www.vintagestory.at/profile/685565-darkinferno/content) / [Starsector 论坛](https://fractalsoftworks.com/forum/index.php?topic=28362.msg427017) | 窗口模式闪烁 | 用户侧规避：NVIDIA 控制面板把 **"Vulkan/OpenGL present method" 从 Auto 改成 native**，或开三缓冲 → 闪烁消失 |
+| [MC-312426](https://mojira.dev/MC-312426) | 非全屏窗口下 GUI 渲染损坏（Intel UHD） | 同一族的 Windows 窗口模式问题 |
+| Mesa 提交（[1](https://chromium.journaldev.googlesource.com/chromiumos/third_party/mesa/+/df776419934bf7bd2e245a17118190b9d98df89b)） | — | WSI 在"本可 flip 却退化成 copy"时返回 **`VK_SUBOPTIMAL_KHR`**，并明确期望**客户端收到后重建交换链** |
+
+**结论**：这是 **Windows 上 Vulkan 呈现路径（native flip ↔ layered DXGI copy）** 的已知一族问题，不是我们独有的实现错误。
+也解释了此前所有"排除"：网格、深度、事件、同步都与它无关，所以 A/B 全部无效果。
+
+### 由此得到的两个可操作点
+
+1. ⭐ **`VK_SUBOPTIMAL_KHR` 现在被当成成功忽略掉了**
+   `drawFrame` 只在 `VK_ERROR_OUT_OF_DATE_KHR` 时重建交换链。多份资料（Mesa WSI / Khronos 最佳实践 / 中文实现笔记）一致认为
+   **SUBOPTIMAL 应触发重建** —— "本可 flip 却退化成 copy" 正是窗口模式下画面异常的场景。
+   改动只有 1 行：`if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) { recreateSwapchain(); ... }`。
+2. **给用户一个环境侧规避**：NVIDIA 控制面板 → 管理 3D 设置 → **Vulkan/OpenGL 呈现方式** 从"自动"改为"native（首选本机）"（社区实测可消除同类闪烁）。
+   这是验证"是否属于呈现层"的最快实验，不花代码成本。
+
 **下次的切入点**（按性价比）：
 
 1. **帧捕获**：加 `vkCmdCopyImageToBuffer` + 存 PNG，把出问题那一帧存下来看 ——
    1 帧肉眼抓不到，但程序可以条件触发（比如"连续 3 帧某 chunk 的面数骤降"）。
 2. **A/B 光栅状态**：`cullMode = NONE` / `depthTestEnable = FALSE`，各跑一次（各 1 行）。
-3. **`VK_SUBOPTIMAL_KHR` 计数**：现在的代码只在 `OUT_OF_DATE` 重建，SUBOPTIMAL 直接继续。
+3. **环境侧对照**（零代码成本，最先做）：NVIDIA 控制面板把"Vulkan/OpenGL 呈现方式"在
+   **自动 / native / layered DXGI** 三档之间切换，各复现一次 —— 若某一档症状变化，
+   即确认属于 Windows 呈现路径，代码侧就不必再追。
 4. 结合 P15（全量重建按 chunk 取数）一起重写这段 —— 那时逻辑会简单得多。
 
 ---
@@ -280,4 +306,4 @@
 | 已被重构修复（🔧） | **3 条**（BodyPose 缺旋转、`queue*` 命名、"事件流语义"） |
 | 归类为性能（→ `性能问题记录.md`） | 8 条（P1–P8）→ 现共 14 条（P1–P14） |
 | 归类为渲染端注意项（规则 2/5 豁免） | 3 条（CameraState→Vulkan） |
-| **暂缓（⏸ 等渲染层重构）** | **1 条**（B138 窗口模式地形局部透明，见第十节） |
+| **暂缓（⏸ 等渲染层重构）** | **1 条**（B138 窗口模式地形局部透明，见第十节；已确认是 Windows Vulkan 呈现路径的已知一族问题） |
