@@ -91,6 +91,23 @@ struct PlayerBodyState {
     // 渲染端：请求"重锚"（物理丢过欠账 / 时钟漂移过大时）。
     void requestReanchor() { epoch.fetch_add(1, std::memory_order_relaxed); }
 
+    // 当前渲染进度的小数部分（0~1）：tick N → N+1 之间走了多少。
+    // 刚体等**非玩家**对象也用它插值 —— 它们和玩家在同一条 25Hz 时间线上，
+    // 用同一个 alpha 才能保证"玩家站在飞船上不漂移"。
+    // 当前渲染时刻在**模拟时间轴**上的位置（秒）。刚体等非玩家对象用它做时间轴索引，
+    // 与玩家同一域 —— 这样"玩家站在飞船上"两者相位严格一致。
+    double renderSimSeconds() const { return renderTickF() * (kStepSimMs / 1000.0); }
+
+    // 当前渲染时刻的浮点 tick 号（相对 tickCount 的域）。
+    double renderTickF() const {
+        const std::int64_t origin = originNs.load(std::memory_order_relaxed);
+        const std::int64_t step   = stepNs.load(std::memory_order_relaxed);
+        if (origin <= 0 || step <= 0) return 0.0;
+        const std::int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        return static_cast<double>(nowNs - origin) / static_cast<double>(step) - kDelayTicks;
+    }
+
     // 插值读取（输入/渲染线程）：纯本地单调时钟，不依赖快照到达时刻。
     void readInterpolated(double& ox, double& oy, double& oz) const {
         if (!valid.load(std::memory_order_relaxed)) {

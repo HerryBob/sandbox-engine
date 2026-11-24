@@ -894,49 +894,60 @@ bool VulkanContext::uploadBodyMesh(int contraptionId, const std::vector<engine::
 }
 
 void VulkanContext::setBodyPose(int contraptionId, double x, double y, double z,
-                                float qx, float qy, float qz, float qw) {
+                                float qx, float qy, float qz, float qw, double simTime) {
     bodyPos_[contraptionId] = glm::dvec3{x, y, z};
     // glm::quat 的构造顺序是 (w, x, y, z) —— 这里显式换序，避免 (x,y,z,w) 误用。
     bodyRot_[contraptionId] = glm::quat{qw, qx, qy, qz};
 
-    // 插值状态：旧 curr 降为 prev，新值成为 curr，并记下到达时刻。
-    // 物理是 25Hz，两次到达间隔理论 40ms；alpha 用它做分母，慢/快放时会自适应。
-    const std::int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    // 入 4 槽环（按模拟时刻索引）。同一时刻重复到达时覆盖末位，避免环里出现重复 t。
     BodyPoseAnim& a = bodyAnim_[contraptionId];
-    if (a.currNs == 0) {
-        // 第一次收到位姿：prev 直接等于 curr，避免从原点"飞"过来
-        a.prevPos = bodyPos_[contraptionId];
-        a.prevRot = bodyRot_[contraptionId];
-        a.prevNs  = nowNs;
-    } else {
-        a.prevPos = a.currPos;
-        a.prevRot = a.currRot;
-        a.prevNs  = a.currNs;
+    if (a.count > 0 && simTime <= a.keys[a.count - 1].t) {
+        a.keys[a.count - 1].pos = bodyPos_[contraptionId];
+        a.keys[a.count - 1].rot = bodyRot_[contraptionId];
+        return;
     }
-    a.currPos = bodyPos_[contraptionId];
-    a.currRot = bodyRot_[contraptionId];
-    a.currNs  = nowNs;
+    if (a.count >= BodyPoseAnim::kSlots) {
+        for (int i = 1; i < BodyPoseAnim::kSlots; ++i) a.keys[i - 1] = a.keys[i];
+        a.count = BodyPoseAnim::kSlots - 1;
+    }
+    a.keys[a.count].t   = simTime;
+    a.keys[a.count].pos = bodyPos_[contraptionId];
+    a.keys[a.count].rot = bodyRot_[contraptionId];
+    ++a.count;
 }
 
 bool VulkanContext::interpolatedBodyPose(int contraptionId, glm::dvec3& outPos,
-                                         glm::quat& outRot) const {
+                                         glm::quat& outRot) {
     const auto it = bodyAnim_.find(contraptionId);
-    if (it == bodyAnim_.end()) return false;
+    if (it == bodyAnim_.end() || it->second.count == 0) return false;
     const BodyPoseAnim& a = it->second;
-    double alpha = 1.0;
-    if (a.currNs > a.prevNs) {
-        const std::int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        alpha = static_cast<double>(nowNs - a.prevNs) /
-                static_cast<double>(a.currNs - a.prevNs);
-        alpha = std::clamp(alpha, 0.0, 1.0);   // 物理落后时停在终点，不外推
+    if (a.count == 1) {
+        outPos = a.keys[0].pos;
+        outRot = a.keys[0].rot;
+        return true;
     }
-    outPos = a.prevPos + (a.currPos - a.prevPos) * alpha;
-    outRot = glm::slerp(a.prevRot, a.currRot, static_cast<float>(alpha));
+    const double t = bodyInterpTime_;
+    if (t <= a.keys[0].t) {                     // 比最旧还旧：贴住最旧
+        outPos = a.keys[0].pos;
+        outRot = a.keys[0].rot;
+        return true;
+    }
+    for (int i = 0; i + 1 < a.count; ++i) {
+        const auto& k0 = a.keys[i];
+        const auto& k1 = a.keys[i + 1];
+        if (t <= k1.t) {
+            const double span = k1.t - k0.t;
+            double alpha = (span > 1e-9) ? (t - k0.t) / span : 1.0;
+            alpha = std::clamp(alpha, 0.0, 1.0);
+            outPos = k0.pos + (k1.pos - k0.pos) * alpha;
+            outRot = glm::slerp(k0.rot, k1.rot, static_cast<float>(alpha));
+            return true;
+        }
+    }
+    outPos = a.keys[a.count - 1].pos;           // 比最新还新：贴住最新
+    outRot = a.keys[a.count - 1].rot;
     return true;
 }
-
 void VulkanContext::destroyBodyMesh(int contraptionId) {
     auto it = bodyMeshes_.find(contraptionId);
     if (it != bodyMeshes_.end()) {

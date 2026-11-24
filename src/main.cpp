@@ -542,13 +542,19 @@ static int run(const std::string& presetName) {
                 }
             }
 
+            // 刚体插值时刻：与玩家用**同一条模拟时间轴**（秒，PlayerBodyState::renderSimSeconds）。
+            // 之前渲染端按"位姿到达的墙钟"算，而位姿要经 物理→结果队列→业务线程→渲染队列
+            // 两跳，到达时刻抖动更大 → 刚体比玩家更卡。
+            vkCtx.setBodyInterpTime(playerBodyState.renderSimSeconds());
+
             // 刚体位姿：状态语义，逐条应用——同 id 的后一条覆盖前一条，
             // 不同 id 各自留最新（多刚体后不能再只取全局最后一条）。
             engine::shared::BodyPose bodyPose;
             while (renderBridge.businessToRenderPoses().pop(bodyPose)) {
                 vkCtx.setBodyPose(bodyPose.contraptionId,
                                   bodyPose.x, bodyPose.y, bodyPose.z,
-                                  bodyPose.qx, bodyPose.qy, bodyPose.qz, bodyPose.qw);
+                                  bodyPose.qx, bodyPose.qy, bodyPose.qz, bodyPose.qw,
+                                  bodyPose.simTime);
             }
 
             // 玩家模型位姿：直读共享槽（原子）。位置语义 = 脚底中心，与模型原点一致。

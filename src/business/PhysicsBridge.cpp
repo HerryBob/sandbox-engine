@@ -102,7 +102,7 @@ void PhysicsBridge::receiveResultsFromPhysics(
             if (bodyPose)
                 *bodyPose = engine::shared::BodyPose{
                     res.contraptionId, res.rx, res.ry, res.rz,
-                    res.qx, res.qy, res.qz, res.qw};
+                    res.qx, res.qy, res.qz, res.qw, res.simTime};
             break;
         }
         case engine::shared::PhysicsResult::Type::ContraptionUnpacked: {
@@ -120,7 +120,7 @@ void PhysicsBridge::receiveResultsFromPhysics(
             if (bodyPose)
                 *bodyPose = engine::shared::BodyPose{
                     res.contraptionId, res.rx, res.ry, res.rz,
-                    res.qx, res.qy, res.qz, res.qw};
+                    res.qx, res.qy, res.qz, res.qw, res.simTime};
             break;
         }
         case engine::shared::PhysicsResult::Type::CollisionEvent:
