@@ -251,9 +251,22 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
     }
 }
 
-void BusinessWorld::requestPhysicsResync() {
-    // 只置标志；真正的下发在 syncWorldToPhysics（那里才有世界快照，且每 tick 会重试）。
+void BusinessWorld::requestPhysicsResync() {    // 只置标志；真正的下发在 syncWorldToPhysics（那里才有世界快照，且每 tick 会重试）。
     resyncPending_.store(true, std::memory_order_relaxed);
+}
+
+// 增量同步：直接把一条 SyncChunks 推进队列（不经过"待发快照"那条路，避免又拍一次全量）。
+void BusinessWorld::syncChunksToPhysics(std::vector<engine::shared::Block> blocks,
+                                        std::vector<engine::shared::ChunkPos> chunks) {
+    if (chunks.empty()) return;
+    engine::shared::PhysicsCommand cmd;
+    cmd.type = engine::shared::PhysicsCommand::Type::SyncChunks;
+    cmd.blocks = std::move(blocks);
+    cmd.changedChunks = std::move(chunks);
+    if (!physicsBridge_.businessToPhysicsCommands().push(std::move(cmd))) {
+        // 队列满：退回全量（下次 syncWorldToPhysics 会重发整个世界），保证最终一致
+        resyncPending_.store(true, std::memory_order_relaxed);
+    }
 }
 
 long long BusinessWorld::placedBlockCount() const {

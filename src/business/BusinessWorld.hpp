@@ -109,6 +109,10 @@ public:
     // 物理侧只认 SyncBlockSet 才能建立集合，逐条 RemoveBlock 卸载 4096 格不现实。
     // 只置标志：真正的下发与重试在 syncWorldToPhysics 里（指令槽位被占用时下 tick 再试）。
     void requestPhysicsResync();
+    // 增量同步：只把变化的 chunk 及其方块发给物理（流式加载/卸载时用，替代全量重发）。
+    // 队列满时退回"置 resyncPending_"，下次走全量，保证最终一致。
+    void syncChunksToPhysics(std::vector<engine::shared::Block> blocks,
+                             std::vector<engine::shared::ChunkPos> chunks);
 
     long long playerActionsProcessed() const;  // 已处理玩家点击次数（断言/诊断）
     long long placedBlockCount() const;        // 成功放置次数

@@ -73,6 +73,11 @@
 
 ## 5. 已知的工具坑
 
+- **改共享结构体后必须全量重编**：`shared/protocol/Protocol.hpp`、`shared/state/**`、`shared/block/**`
+  里的结构体一加字段，增量构建可能留下仍用旧布局的 `.obj` →
+  SPSC 队列里 `T` 的大小在生产者/消费者两边不一致 → 堆损坏
+  （表现：`xmemory` 里 `invalid argument` / `LNK2005` 多重定义 / 运行到某处就崩）。
+  处理：删掉 `build\Debug\CMakeFiles\sandbox_engine.dir` 再构建。
 - `tools\smoke.ps1` **必须保存为 UTF-8 with BOM**：Windows PowerShell 5.1 会把无 BOM 的 UTF-8 当 GBK，中文注释导致解析失败。
 - `git commit -m` 带中文引号会报 `pathspec` 错误 → 用 `-F` 文件。
 - 沙箱下曾在 `build\` 出现「写入被拒但 ACL 正常」的情况；本会话已切到完全权限，若再次出现请如实报告，不要反复重试。

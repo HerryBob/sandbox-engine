@@ -27,6 +27,9 @@ public:
     // 排队待发指令（裁决通过后调用；业务线程私有状态，无需原子）：
     // 全量同步（已有待发指令则返回 false，防覆盖）。
     bool pushSyncCommand();
+    // 增量同步：只推变化的 chunk 及其方块（流式加载/卸载）。队列满返回 false。
+    bool pushChunksCommand(std::vector<engine::shared::Block> blocks,
+                           std::vector<engine::shared::ChunkPos> chunks);
     void pushPlaceCommand(const engine::shared::BlockPos& p, int type);
     void pushRemoveCommand(const engine::shared::BlockPos& p);
 

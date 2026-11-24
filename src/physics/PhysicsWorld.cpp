@@ -196,6 +196,7 @@ void PhysicsWorld::tick(double scale, double wallDt,
     int steps = 0;
     while (accumulator_ >= 0.04 && steps < kMaxStepsPerFrame_) { // 25TPS, dt=0.04
         applyCommands(fromBusiness);
+        drainPendingChunkRebuilds();   // 每 tick 只重建 1 个待处理 chunk（预算式）
         stepJolt();            // 推进 Dynamic 刚体（无动态体时内部直接跳过）
         syncContraptionPoses();// Jolt 位姿 → 数据体（渲染与回执都读数据体）
         // 玩家本 tick 的**起点**：必须在推进之前取。
@@ -236,6 +237,9 @@ void PhysicsWorld::applyCommands(engine::core::SPSCQueue<engine::shared::Physics
         case engine::shared::PhysicsCommand::Type::SyncBlockSet:
             onSyncBlockSet(cmd);
             break;
+        case engine::shared::PhysicsCommand::Type::SyncChunks:
+            onSyncChunks(cmd);
+            break;
         case engine::shared::PhysicsCommand::Type::PlaceBlock:
             onPlaceBlock(cmd);
             break;
@@ -250,6 +254,43 @@ void PhysicsWorld::applyCommands(engine::core::SPSCQueue<engine::shared::Physics
             break;
         }
         processedCommandCount_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+// 增量同步：只动"这次真变了的 chunk"。
+// 数据层按 chunk 区域先清后填（4096 次查找/块，很便宜）；
+// Jolt 侧的重建**入队**，由 drainPendingChunkRebuilds 每 tick 只做 1 个。
+void PhysicsWorld::onSyncChunks(const engine::shared::PhysicsCommand& cmd) {
+    for (const auto& cp : cmd.changedChunks) {
+        const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4;
+        for (int x = bx; x < bx + 16; ++x)
+            for (int y = by; y < by + 16; ++y)
+                for (int z = bz; z < bz + 16; ++z)
+                    state_.colliders().erase(engine::shared::BlockPos{x, y, z});
+    }
+    for (const auto& b : cmd.blocks) state_.colliders()[b.pos] = b.type;
+
+    // 入队（去重：同一 chunk 本 tick 已经排队就不重复）
+    for (const auto& cp : cmd.changedChunks) {
+        bool exists = false;
+        for (const auto& q : pendingChunkRebuilds_) {
+            if (q == cp) { exists = true; break; }
+        }
+        if (!exists) pendingChunkRebuilds_.push_back(cp);
+    }
+}
+
+// 预算：每 tick 按**时间**重建 pending chunk（单块约 2.4ms，上限 3ms ≈ 1~2 块）。
+// 用时间而不是固定条数：块大小可能差很多（空 chunk 极快，满 chunk 2.4ms）。
+void PhysicsWorld::drainPendingChunkRebuilds() {
+    const auto t0 = std::chrono::steady_clock::now();
+    while (!pendingChunkRebuilds_.empty()) {
+        const auto cp = pendingChunkRebuilds_.front();
+        pendingChunkRebuilds_.erase(pendingChunkRebuilds_.begin());
+        rebuildChunkStatic(cp.x, cp.y, cp.z);
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (ms >= 3.0) break;   // 超过预算，剩下的下个 tick 继续
     }
 }
 

@@ -22,6 +22,7 @@ struct PhysicsCommand {
     enum class Type {
         MoveBlock,         // 移动演示方块（原型）
         SyncBlockSet,      // 全量同步业务世界方块 → 物理碰撞体集合（初始/重建）
+        SyncChunks,        // 增量同步：只发变化的 chunk（流式加载/卸载时用）
         PlaceBlock,        // 放置一块方块（业务裁决通过 → 物理建碰撞体）
         RemoveBlock,       // 破坏一块方块（业务裁决通过 → 物理删碰撞体）
         PackContraption,   // 打包：方块列表转移进刚体（物理形态转移，见架构 2.7）
@@ -40,7 +41,13 @@ struct PhysicsCommand {
     int    contraptionId = -1;  // 目标刚体 ID（PlaceBlock/RemoveBlock 目标域；Unpack 目标刚体）
     int    blockCount = 0;      // 打包：方块数
     double ivx = 0.0, ivy = 0.0, ivz = 0.0; // 打包初始速度（业务裁决起飞速度）
-    std::vector<Block> blocks;  // SyncBlockSet：全量方块；Pack：待打包方块（世界坐标）
+    std::vector<Block> blocks;  // SyncBlockSet：全量方块；SyncChunks：变化 chunk 的方块
+                                // Pack：待打包方块（世界坐标）
+    // SyncChunks：本次同步覆盖的 chunk 列表。物理侧按它"先清该 chunk 区域、再填 blocks"，
+    // 所以列表里可以有"已卸载、blocks 里没有内容"的 chunk（清完即为空）。
+    // 为什么不用全量：流式每加载一批就全量重发 8 万方块，物理侧要整表重建（实测 11~14ms/次），
+    // 那一帧直接变成 30~70ms —— 就是"每次更新区块卡一下"。
+    std::vector<engine::shared::ChunkPos> changedChunks;
 };
 
 // 物理 → 业务：刚体位置/姿态/碰撞标记回传。

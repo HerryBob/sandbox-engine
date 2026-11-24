@@ -74,6 +74,10 @@ private:
     // Pack/UnpackContraption → 刚体建/拆 + 碰撞体形态转移。
     void applyCommands(engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness);
     void onSyncBlockSet(const engine::shared::PhysicsCommand& cmd);
+    // 增量同步：只处理变化的 chunk（清旧内容 → 填新方块 → 重建静态形状入队）。
+    void onSyncChunks(const engine::shared::PhysicsCommand& cmd);
+    // 每 tick 最多重建 1 个 chunk 的静态形状（预算式，避免一帧干 4 个 = 10ms 长帧）。
+    void drainPendingChunkRebuilds();
     void onPlaceBlock(const engine::shared::PhysicsCommand& cmd);
     void onRemoveBlock(const engine::shared::PhysicsCommand& cmd);
     void onPackContraption(const engine::shared::PhysicsCommand& cmd);
@@ -136,6 +140,9 @@ private:
     // Jolt 后端（pimpl）：持有 PhysicsSystem 与"每 chunk 一个静态刚体"的表。
     // 物理线程独占，无锁。
     std::unique_ptr<JoltBackend> jolt_;
+    // 待重建静态形状的 chunk 队列（预算式：每 tick 只处理 1 个）。
+    // 一次流式批次可能带 4 个变化 chunk，逐个重建各 2.4ms —— 全做完就是 10ms 长帧。
+    std::vector<engine::shared::ChunkPos> pendingChunkRebuilds_;
     engine::shared::PlayerBodyState* playerState_{nullptr}; // 玩家位置输出槽（装配期注入）
     engine::shared::PlayerControlState* playerControl_{nullptr}; // 玩家操控输入槽（装配期注入）
     std::atomic<long long>     bodyCount_{0};
