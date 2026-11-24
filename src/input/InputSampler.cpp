@@ -82,7 +82,12 @@ void InputSampler::updatePlayerCamera(const LookBasis& b) {
         // 采进相机位置，渲染线程再怎么高频采样也只是在采同一段阶梯。
         double px = 0.0, py = 0.0, pz = 0.0;
         playerOut_->readInterpolated(px, py, pz);
-        if (state_.thirdPerson_) {
+        if (topDown_) {
+            // 调试固定相机（F9）：位置钉死在按下那一刻的世界坐标，鼠标只转视角。
+            camX_ = fixedCamX_;
+            camY_ = fixedCamY_;
+            camZ_ = fixedCamZ_;
+        } else if (state_.thirdPerson_) {
             // 第三人称：相机 = 瞄准点沿视线反方向后退固定距离。
             // 因为相机位置是从瞄准点沿 lookDir 反向推出来的，视线正好穿过瞄准点，
             // 玩家始终在画面中心，view 矩阵不用改（yaw/pitch 语义保持不变）。
@@ -98,6 +103,7 @@ void InputSampler::updatePlayerCamera(const LookBasis& b) {
             camZ_ = pz;
         }
     }
+
     if (state_.keyR_.load(std::memory_order_relaxed)) { // R：只重置朝向（位置归玩家体）
         yaw_ = spawnYaw_; pitch_ = spawnPitch_;
     }
@@ -255,6 +261,24 @@ void InputSampler::keyboardCb(GLFWwindow* w, int key, int scancode, int action, 
         if (action != GLFW_PRESS) return;
         if (self->clickOut_) {
             self->clickOut_->toggleThirdPerson.store(true, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    // F9（调试）：**完全固定相机** —— 按下瞬间把相机钉在当前世界坐标，
+    // 之后鼠标只转视角、WASD 只动玩家。用途：把相机运动从画面里彻底去掉，
+    // 单独观察玩家模型有没有残留抖动。再按一次恢复跟随。
+    if (key == GLFW_KEY_F9) {
+        if (action != GLFW_PRESS) return;
+        self->topDown_ = !self->topDown_;
+        if (self->topDown_) {
+            self->fixedCamX_ = self->camX_;
+            self->fixedCamY_ = self->camY_;
+            self->fixedCamZ_ = self->camZ_;
+            if (self->clickOut_) {
+                // 要看得见模型：若当前是第一人称，切到第三人称
+                self->clickOut_->toggleThirdPerson.store(true, std::memory_order_relaxed);
+            }
         }
         return;
     }

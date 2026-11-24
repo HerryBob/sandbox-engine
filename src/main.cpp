@@ -419,7 +419,6 @@ static int run(const std::string& presetName) {
 
     core::ThreadLoop businessLoop("business");
     core::ThreadLoop physicsLoop("physics");
-    core::ThreadLoop inputLoop("input");
     core::ThreadLoop renderLoop("render");
 
     // ---- 业务线程 25TPS：固定 40ms 墙钟节奏 ----
@@ -518,19 +517,20 @@ static int run(const std::string& presetName) {
         }
     });
 
-    // ---- 输入线程：消费回调增量 → 更新相机 → 写 PlayerInput（~125Hz，墙钟原生）----
-    inputLoop.start([&] {
-        while (!inputLoop.shouldStop()) {
-            inputSampler.tick();
-            std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~125Hz
-        }
-    });
+    // 输入不再单独开线程：鼠标增量由 GLFW 回调累积，**每渲染帧消费一次**（MC 同款）。
+    // 之前是 125Hz 的输入线程，而渲染/实体是 ~165Hz —— 相机与实体的运动步长不同，
+    // 转身时世界会以 125Hz 步进（实测：把相机钉死后实体本身完全顺滑）。
+    // 见渲染循环里的 inputSampler.tick()。
 
     // ---- 渲染线程（第 4 轨只读观众，~165Hz）：消费变更事件 + 绘制 ----
     // 渲染不向模拟发任何指令；数据源 = businessToRender 事件流（增量）+ 锁内快照。
     renderLoop.start([&] {
         while (!renderLoop.shouldStop()) {
             renderer.tick();
+
+            // 输入：**每渲染帧消费一次**鼠标/键盘增量（MC 同款）。
+            // 放在 renderer.tick 之后、取实体位姿之前 —— 相机与实体用同一帧的插值结果。
+            inputSampler.tick();
 
             // 刚体结构事件（打包建网格 / 解包销毁）：事件流，逐条处理。
             engine::shared::BodyStructureEvent bodyEv;
@@ -590,7 +590,6 @@ static int run(const std::string& presetName) {
     businessLoop.stop();
     if (streamer) streamer->stop();   // 业务线程已停（不再 receiveResults），再停生成线程
     physicsLoop.stop();
-    inputLoop.stop();
     renderLoop.stop();
 
     vkCtx.shutdown();
