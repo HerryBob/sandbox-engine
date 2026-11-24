@@ -90,6 +90,8 @@ private:
     // 推进玩家角色（CharacterVirtual）：水平速度来自 PlayerControlState，
     // 垂直由跳跃/重力决定，结果回写数据体（位置语义仍是脚底中心）。
     void stepPlayer(double dt);
+    // 把 Jolt 动态刚体的位姿回写数据体（渲染与 RigidBodyPos 回执都读数据体）。
+    void syncContraptionPoses();
     // 注意：原 recomputeAABB / moveKinematicAxis 已删除（求解器迁 Jolt 时整段替换）。
     // 二者的职责分别由 compound shape 的 GetLocalBounds() 和 CharacterVirtual 承担。
 

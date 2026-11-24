@@ -15,6 +15,7 @@
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 
 #include <algorithm>
@@ -93,6 +94,8 @@ struct JoltBackend {
     // 玩家角色（CharacterVirtual）：不是刚体，靠碰撞查询移动。
     // 声明在 system 之后 → 析构时先于 system 销毁（顺序必须正确）。
     JPH::Ref<JPH::CharacterVirtual> player;
+    // 结构 id → 动态刚体（打包的 contraption）。解包时移除。
+    std::unordered_map<int, JPH::BodyID> contraptionBodies;
 
     JoltBackend()
         : tempAllocator(16 * 1024 * 1024),
@@ -111,6 +114,12 @@ struct JoltBackend {
     void removeAllChunkBodies() {
         for (const auto& [cp, id] : chunkBodies) system.GetBodyInterface().RemoveBody(id);
         chunkBodies.clear();
+    }
+    void removeContraptionBody(int structureId) {
+        const auto it = contraptionBodies.find(structureId);
+        if (it == contraptionBodies.end()) return;
+        system.GetBodyInterface().RemoveBody(it->second);
+        contraptionBodies.erase(it);
     }
 };
 
@@ -184,6 +193,7 @@ void PhysicsWorld::tick(double scale, double wallDt,
     while (accumulator_ >= 0.04 && steps < kMaxStepsPerFrame_) { // 25TPS, dt=0.04
         applyCommands(fromBusiness);
         stepJolt();            // 推进 Dynamic 刚体（无动态体时内部直接跳过）
+        syncContraptionPoses();// Jolt 位姿 → 数据体（渲染与回执都读数据体）
         stepPlayer(0.04);      // 推进玩家角色（CharacterVirtual）
         snapshotPlayerBody(wallDt);
 
@@ -397,6 +407,22 @@ void PhysicsWorld::stepPlayer(double dt) {
     }
 }
 
+// 把 Jolt 的动态刚体位姿回写到数据体（位置 + 旋转）。
+// 渲染端的刚体网格与 RigidBodyPos 回执都读数据体，所以这里必须紧随 stepJolt 之后。
+void PhysicsWorld::syncContraptionPoses() {
+    if (!jolt_) return;
+    JPH::BodyInterface& bi = jolt_->system.GetBodyInterface();
+    for (auto& b : state_.bodies()) {
+        if (b.structureId < 0) continue;                       // 玩家不走这条路
+        const auto it = jolt_->contraptionBodies.find(b.structureId);
+        if (it == jolt_->contraptionBodies.end()) continue;
+        const JPH::RVec3 p = bi.GetPosition(it->second);
+        const JPH::Quat  q = bi.GetRotation(it->second);
+        b.x = p.GetX(); b.y = p.GetY(); b.z = p.GetZ();
+        b.qx = q.GetX(); b.qy = q.GetY(); b.qz = q.GetZ(); b.qw = q.GetW();
+    }
+}
+
 void PhysicsWorld::onPlaceBlock(const engine::shared::PhysicsCommand& cmd) {
     // 放置：业务裁决已通过。目标域（cmd.contraptionId）：
     // -1 = 主世界（建静态碰撞体）；≥0 = 刚体（飞船改造：方块加入刚体，
@@ -448,10 +474,30 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
     body.vx = cmd.ivx;
     body.vy = cmd.ivy;
     body.vz = cmd.ivz;
-    // [临时验证] 固定 45° 绕 Y 轴：只用来确认"旋转数据通路"通到渲染端。
-    // 四元数 = (0, sin22.5°, 0, cos22.5°)。Jolt 接入后删掉这一行。
-    body.qx = 0.0f; body.qy = 0.38268343f; body.qz = 0.0f; body.qw = 0.92387953f;
-    body.blocks = cmd.blocks; // 局部坐标 = 世界坐标（刚体建在原点 0）
+
+    // 把方块从世界坐标重定到"刚体原点"的局部坐标（原点取方块包围盒中心，取整）。
+    // 为什么必须重定：渲染端拿局部坐标建网格、再乘刚体位姿。若局部坐标仍是世界坐标，
+    // 一旦刚体旋转就会绕世界原点转，而不是绕自己转。
+    int minX = INT32_MAX, minY = INT32_MAX, minZ = INT32_MAX;
+    int maxX = INT32_MIN, maxY = INT32_MIN, maxZ = INT32_MIN;
+    for (const auto& b : cmd.blocks) {
+        minX = std::min(minX, b.pos.x); maxX = std::max(maxX, b.pos.x);
+        minY = std::min(minY, b.pos.y); maxY = std::max(maxY, b.pos.y);
+        minZ = std::min(minZ, b.pos.z); maxZ = std::max(maxZ, b.pos.z);
+    }
+    const int originX = (minX + maxX) / 2;
+    const int originY = (minY + maxY) / 2;
+    const int originZ = (minZ + maxZ) / 2;
+    body.x = static_cast<double>(originX);
+    body.y = static_cast<double>(originY);
+    body.z = static_cast<double>(originZ);
+    body.blocks.clear();
+    body.blocks.reserve(cmd.blocks.size());
+    for (const auto& b : cmd.blocks) {
+        body.blocks.push_back(engine::shared::Block{
+            b.type, engine::shared::BlockPos{b.pos.x - originX, b.pos.y - originY, b.pos.z - originZ}});
+    }
+
     for (const auto& b : cmd.blocks) state_.colliders().erase(b.pos);
     // Jolt 侧同步：这些方块从静态世界移出 → 重建受影响的 chunk 形状
     {
@@ -459,7 +505,36 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
         for (const auto& b : cmd.blocks) touched.insert(engine::shared::toChunkOf(b.pos));
         for (const auto& cp : touched) rebuildChunkStatic(cp.x, cp.y, cp.z);
     }
-    // 碰撞箱不再手算：Jolt 接入时由 MutableCompoundShape 的 AddShape 生成。
+
+    // Jolt 侧：局部方块各一个盒子 → MutableCompoundShape（将来方块增删要改它）→ Dynamic 刚体
+    {
+        JPH::MutableCompoundShapeSettings compound;
+        JPH::RefConst<JPH::ShapeSettings> box =
+            new JPH::BoxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+        for (const auto& b : body.blocks) {
+            compound.AddShape(
+                JPH::Vec3(static_cast<float>(b.pos.x) + 0.5f,
+                          static_cast<float>(b.pos.y) + 0.5f,
+                          static_cast<float>(b.pos.z) + 0.5f),
+                JPH::Quat::sIdentity(), box.GetPtr());
+        }
+        JPH::ShapeSettings::ShapeResult result = compound.Create();
+        if (result.HasError()) {
+            ENGINE_LOG_ERROR("Physics",
+                std::string("刚体复合形状创建失败：") + result.GetError().c_str());
+        } else {
+            JPH::BodyCreationSettings settings(
+                result.Get(), JPH::RVec3(body.x, body.y, body.z), JPH::Quat::sIdentity(),
+                JPH::EMotionType::Dynamic, kObjLayerMoving);
+            settings.mLinearVelocity =
+                JPH::Vec3(static_cast<float>(cmd.ivx), static_cast<float>(cmd.ivy),
+                          static_cast<float>(cmd.ivz));
+            jolt_->contraptionBodies[body.structureId] =
+                jolt_->system.GetBodyInterface().CreateAndAddBody(
+                    settings, JPH::EActivation::Activate);
+        }
+    }
+
     state_.bodies().push_back(body);
     state_.bindStructure(body.structureId, body.bodyId);
     bodyCount_.store(static_cast<long long>(state_.bodies().size()),
@@ -483,6 +558,7 @@ void PhysicsWorld::onUnpackContraption(const engine::shared::PhysicsCommand& cmd
     std::vector<engine::shared::Block> worldBlocks;
     PhysicsBody* it = state_.findBodyByStructure(cmd.contraptionId);
     if (it != nullptr) {
+        const int structureId = it->structureId;
         worldBlocks.reserve(it->blocks.size());
         for (const auto& b : it->blocks) {
             const engine::shared::BlockPos world{
@@ -493,6 +569,7 @@ void PhysicsWorld::onUnpackContraption(const engine::shared::PhysicsCommand& cmd
             worldBlocks.push_back(engine::shared::Block{b.type, world});
         }
         state_.unbindStructure(it->structureId);
+        jolt_->removeContraptionBody(structureId);   // Jolt 侧：销毁动态刚体
         state_.bodies().erase(state_.bodies().begin() + (it - state_.bodies().data()));
     }
     bodyCount_.store(static_cast<long long>(state_.bodies().size()),
