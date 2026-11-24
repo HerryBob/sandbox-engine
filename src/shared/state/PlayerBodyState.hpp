@@ -1,6 +1,5 @@
 #pragma once
 #include <algorithm>
-#include "core/Log.hpp"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -45,9 +44,6 @@ struct PlayerBodyState {
     // 时间基准（物理线程首次写入时定一次，之后不变）
     std::atomic<std::int64_t> originNs{0};        // tick 0 的墙钟时刻
     std::atomic<std::int64_t> stepNs{0};          // 每 tick 的墙钟周期（0.04/scale 秒）
-    // 安全重锚计数：物理侧发现渲染进度落后太多（丢过欠账）时 +1，渲染侧据此重建映射
-    std::atomic<int>          epoch{0};
-
     std::atomic<std::uint64_t> seq{0};
     std::atomic<double> yaw{0.0};
     std::atomic<bool>   valid{false};
@@ -91,12 +87,6 @@ struct PlayerBodyState {
         valid.store(true, std::memory_order_relaxed);
     }
 
-    // 渲染端：请求"重锚"（物理丢过欠账 / 时钟漂移过大时）。
-    void requestReanchor() { epoch.fetch_add(1, std::memory_order_relaxed); }
-
-    // 当前渲染进度的小数部分（0~1）：tick N → N+1 之间走了多少。
-    // 刚体等**非玩家**对象也用它插值 —— 它们和玩家在同一条 25Hz 时间线上，
-    // 用同一个 alpha 才能保证"玩家站在飞船上不漂移"。
     // 当前渲染时刻在**模拟时间轴**上的位置（秒）。刚体等非玩家对象用它做时间轴索引，
     // 与玩家同一域 —— 这样"玩家站在飞船上"两者相位严格一致。
     double renderSimSeconds() const { return renderTickF() * (kStepSimMs / 1000.0); }
@@ -170,23 +160,6 @@ struct PlayerBodyState {
             oy = ys[i0] + (ys[i1] - ys[i0]) * alpha;
             oz = zs[i0] + (zs[i1] - zs[i0]) * alpha;
             return;
-        }
-        // ===== 临时诊断（测完删）：兜底命中计数（1Hz）=====
-        {
-            static std::atomic<long long> miss{0}, total{0};
-            static thread_local long long lastLogNs = 0;
-            total.fetch_add(1, std::memory_order_relaxed);
-            miss.fetch_add(1, std::memory_order_relaxed);
-            const std::int64_t now2 = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (lastLogNs == 0) lastLogNs = now2;
-            if (now2 - lastLogNs >= 1000000000LL) {
-                const long long m = miss.exchange(0);
-                const long long n = total.exchange(0);
-                ENGINE_LOG_INFO("Render",
-                    "[兜底] 每秒 " + std::to_string(m) + " / " + std::to_string(n) + " 帧没找到精确帧对");
-                lastLogNs = now2;
-            }
         }
         // 环里没有正好那两帧（首帧 / 刚重锚）：夹到环内最近的 tick 再插值
         int lo = -1, hi = -1;

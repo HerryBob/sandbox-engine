@@ -82,12 +82,6 @@ private:
 
     // 调试顶视相机（F9）：相机固定跟玩家正上方 5 格、垂直向下看。
     // 用途：把相机运动从画面里去掉，单独观察玩家模型是否还有残留抖动。
-    bool topDown_ = false;
-    // 调试固定相机（F9）：位置钉死在按下那一刻的世界坐标，鼠标只转视角、WASD 只动玩家。
-    double fixedCamX_ = 0.0;
-    double fixedCamY_ = 0.0;
-    double fixedCamZ_ = 0.0;
-
     // 第三人称相机的后退距离（格）与瞄准点抬高（格）—— 属**逻辑层调参**，不是世界状态。
     static constexpr double kThirdPersonDist_ = 4.0;
     static constexpr double kThirdPersonAim_ = 1.35;
