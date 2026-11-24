@@ -87,6 +87,9 @@ private:
     std::uint64_t chunkSignature(int chunkX, int chunkY, int chunkZ) const;
     // 推进 Jolt（固定步长 0.04s，碰撞子步 2，与文档 §六 一致）。
     void stepJolt();
+    // 推进玩家角色（CharacterVirtual）：水平速度来自 PlayerControlState，
+    // 垂直由跳跃/重力决定，结果回写数据体（位置语义仍是脚底中心）。
+    void stepPlayer(double dt);
     // 注意：原 recomputeAABB / moveKinematicAxis 已删除（求解器迁 Jolt 时整段替换）。
     // 二者的职责分别由 compound shape 的 GetLocalBounds() 和 CharacterVirtual 承担。
 
@@ -98,6 +101,8 @@ private:
     // 跳跃初速度（格/秒）：跳高 = v²/(2g)。默认 4.9 ⇒ 约 1.23 格，略高于 1 格台阶。
     // 装配期由 addPlayerBody 按实体类型定义覆盖；只在 onGround 时生效，空中按跳跃无效。
     double                     jumpSpeed_{4.9};
+    // 下落终端速度（格/秒，负数）：防止长时间坠落后速度过大穿透碰撞体。
+    static constexpr double    kTerminalFallSpeed_{-60.0};
 
     engine::core::TimeManager& tm_;
     double                     accumulator_{0.0};

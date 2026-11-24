@@ -15,6 +15,7 @@
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
 
 #include <algorithm>
 #include <cmath>
@@ -40,16 +41,48 @@ inline std::uint64_t blockHash(const engine::shared::Block& b) {
     h = h * 31ull + static_cast<std::uint64_t>(b.type);
     return h;
 }
+
+// ---- 层接口：手写三个小类（与 Jolt HelloWorld 同款）----
+// 为什么不用 `*Table` 便捷类：实测它们的语义和"查询对象层 × 刚体 broadphase 层"
+// 的组合对不上，导致角色的碰撞查询与射线全部打空（无过滤器时能命中，带过滤器就 0 命中）。
+// 手写虽然多 20 行，但每一处判断都是显式的，不会猜错方向。
+class BPLayerInterfaceImpl final : public JPH::BroadPhaseLayerInterface {
+public:
+    JPH::uint GetNumBroadPhaseLayers() const override { return kNumBroadPhaseLayers; }
+    JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer inLayer) const override {
+        return JPH::BroadPhaseLayer(inLayer == kObjLayerNonMoving ? 0 : 1);
+    }
+#if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
+    const char* GetBroadPhaseLayerName(JPH::BroadPhaseLayer inLayer) const override {
+        return inLayer == JPH::BroadPhaseLayer(0) ? "NON_MOVING" : "MOVING";
+    }
+#endif
+};
+
+class ObjectVsBroadPhaseFilterImpl final : public JPH::ObjectVsBroadPhaseLayerFilter {
+public:
+    // 宽进：真正的"能不能碰"由 ObjectLayerPairFilter 判定。
+    bool ShouldCollide(JPH::ObjectLayer, JPH::BroadPhaseLayer) const override { return true; }
+};
+
+class ObjectLayerPairFilterImpl final : public JPH::ObjectLayerPairFilter {
+public:
+    bool ShouldCollide(JPH::ObjectLayer inA, JPH::ObjectLayer inB) const override {
+        // 两块静态地形之间不用检测（永远不移动）；其余都检测。
+        if (inA == kObjLayerNonMoving && inB == kObjLayerNonMoving) return false;
+        return true;
+    }
+};
 } // namespace
 
 struct JoltBackend {
-    // 声明顺序 = 构造顺序：层表 → 过滤器（引用层表）→ 分配器/作业系统 → PhysicsSystem
-    JPH::BroadPhaseLayerInterfaceTable      bpLayers;
-    JPH::ObjectLayerPairFilterTable         objPairFilter;
-    JPH::ObjectVsBroadPhaseLayerFilterTable objVsBpFilter;
-    JPH::TempAllocatorImpl                  tempAllocator;
-    JPH::JobSystemSingleThreaded            jobSystem;
-    JPH::PhysicsSystem                      system;
+    // 声明顺序 = 构造顺序：层接口 → 过滤器 → 分配器/作业系统 → PhysicsSystem
+    BPLayerInterfaceImpl          bpLayers;
+    ObjectLayerPairFilterImpl     objPairFilter;
+    ObjectVsBroadPhaseFilterImpl  objVsBpFilter;
+    JPH::TempAllocatorImpl        tempAllocator;
+    JPH::JobSystemSingleThreaded  jobSystem;
+    JPH::PhysicsSystem            system;
     // 每 chunk 一个静态刚体（StaticCompoundShape：一个 chunk 的方块各是一个盒子）。
     // 放置/破坏时只重建受影响的那个 chunk。
     std::unordered_map<engine::shared::ChunkPos, JPH::BodyID> chunkBodies;
@@ -57,17 +90,13 @@ struct JoltBackend {
     // 没有它，每次 SyncBlockSet（流式每加载一批就发一次）都要重建全部 chunk 形状
     // —— 实测 82,944 方块 = 250ms/次，直接把物理线程卡住。
     std::unordered_map<engine::shared::ChunkPos, std::uint64_t> chunkSignatures;
+    // 玩家角色（CharacterVirtual）：不是刚体，靠碰撞查询移动。
+    // 声明在 system 之后 → 析构时先于 system 销毁（顺序必须正确）。
+    JPH::Ref<JPH::CharacterVirtual> player;
 
     JoltBackend()
-        : bpLayers(kNumObjectLayers, kNumBroadPhaseLayers),
-          objPairFilter(kNumObjectLayers),
-          objVsBpFilter(bpLayers, kNumBroadPhaseLayers, objPairFilter, kNumObjectLayers),
-          tempAllocator(16 * 1024 * 1024),
+        : tempAllocator(16 * 1024 * 1024),
           jobSystem(4096) {
-        bpLayers.MapObjectToBroadPhaseLayer(kObjLayerNonMoving, JPH::BroadPhaseLayer(0));
-        bpLayers.MapObjectToBroadPhaseLayer(kObjLayerMoving,    JPH::BroadPhaseLayer(1));
-        objPairFilter.EnableCollision(kObjLayerNonMoving, kObjLayerMoving);
-        objPairFilter.EnableCollision(kObjLayerMoving,    kObjLayerMoving);
         // maxBodies / bodyMutexes(0=自动) / maxBodyPairs / maxContactConstraints
         system.Init(1024, 0, 8192, 2048, bpLayers, objVsBpFilter, objPairFilter);
         system.SetGravity(JPH::Vec3(0.0f, -9.81f, 0.0f));
@@ -120,6 +149,19 @@ int PhysicsWorld::addPlayerBody(double x, double y, double z,
     state_.bodies().push_back(b);
     bodyCount_.store(static_cast<long long>(state_.bodies().size()), std::memory_order_relaxed);
     state_.setPlayerBodyId(b.bodyId);
+
+    // Jolt 侧：角色盒以"脚底 + 半高"为中心（数据层的位置语义是脚底中心）。
+    JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(
+        JPH::Vec3(static_cast<float>(halfExtentX),
+                  static_cast<float>(halfExtentY),
+                  static_cast<float>(halfExtentZ)));
+    JPH::Ref<JPH::CharacterVirtualSettings> settings = new JPH::CharacterVirtualSettings();
+    settings->mShape = shape;
+    settings->mMaxSlopeAngle = JPH::DegreesToRadians(45.0f);
+    settings->mMaxStrength = 100.0f;
+    settings->mShapeOffset = JPH::Vec3::sZero();
+    jolt_->player = new JPH::CharacterVirtual(
+        settings, JPH::RVec3(x, y + halfExtentY, z), JPH::Quat::sIdentity(), &jolt_->system);
     return b.bodyId;
 }
 
@@ -141,7 +183,8 @@ void PhysicsWorld::tick(double scale, double wallDt,
     int steps = 0;
     while (accumulator_ >= 0.04 && steps < kMaxStepsPerFrame_) { // 25TPS, dt=0.04
         applyCommands(fromBusiness);
-        stepJolt();            // 推进 Jolt（固定步长 25Hz）
+        stepJolt();            // 推进 Dynamic 刚体（无动态体时内部直接跳过）
+        stepPlayer(0.04);      // 推进玩家角色（CharacterVirtual）
         snapshotPlayerBody(wallDt);
 
         // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
@@ -225,6 +268,8 @@ void PhysicsWorld::onSyncBlockSet(const engine::shared::PhysicsCommand& cmd) {
     }
     const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
+    // 大量刚体在首次 Update 之前加入 → 按 Jolt 文档建议优化一次 broadphase
+    jolt_->system.OptimizeBroadPhase();
     {
         std::ostringstream os;
         os << "静态碰撞体同步：方块=" << state_.colliders().size()
@@ -232,6 +277,7 @@ void PhysicsWorld::onSyncBlockSet(const engine::shared::PhysicsCommand& cmd) {
            << " 重建=" << rebuilt << " 移除=" << removed
            << " 耗时=" << ms << "ms";
         ENGINE_LOG_INFO("Physics", os.str());
+
     }
 }
 
@@ -300,12 +346,55 @@ std::uint64_t PhysicsWorld::chunkSignature(int chunkX, int chunkY, int chunkZ) c
 void PhysicsWorld::stepJolt() {
     if (!jolt_) return;
     // 没有动态刚体时跳过推进：静态世界不需要模拟。
-    // 现在（3c-1）玩家与刚体还没进 Jolt，表里全是静态 chunk 形状 ——
-    // 每 tick 走一遍 broadphase/island 是纯开销（实测把 tps 从 24.99 压到 24.81）。
-    // 玩家（CharacterVirtual）与刚体（Dynamic）接上后这个守卫自然失效、恢复推进。
+    // 玩家是 CharacterVirtual（不是刚体，自己走碰撞查询），所以这里只负责 Dynamic 刚体。
     if (jolt_->system.GetNumActiveBodies(JPH::EBodyType::RigidBody) == 0) return;
     // 固定步长 25Hz + 2 次碰撞子步（与《未来方向-物理内核替换为Jolt》§六 一致）
     jolt_->system.Update(0.04f, 2, &jolt_->tempAllocator, &jolt_->jobSystem);
+}
+
+// 玩家角色推进：水平速度来自输入意图，垂直由跳跃/重力决定；位置回写数据体。
+// 数据层位置语义 = 脚底中心，CharacterVirtual 的位置 = 盒子中心，这里做一次换算。
+void PhysicsWorld::stepPlayer(double dt) {
+    if (!jolt_ || !jolt_->player) return;
+    JPH::CharacterVirtual* ch = jolt_->player.GetPtr();
+
+    JPH::Vec3 vel = ch->GetLinearVelocity();
+    const bool supported = ch->IsSupported();
+    if (playerControl_) {
+        // 水平：输入线程给的是世界坐标目标速度（格/秒）
+        vel.SetX(static_cast<float>(playerControl_->vx.load(std::memory_order_relaxed)));
+        vel.SetZ(static_cast<float>(playerControl_->vz.load(std::memory_order_relaxed)));
+        // 跳跃：只在支撑面（地面/缓坡）上生效，按下边沿已被输入线程置位
+        const bool wantJump =
+            playerControl_->jumpRequested.exchange(false, std::memory_order_relaxed);
+        if (wantJump && supported) vel.SetY(static_cast<float>(jumpSpeed_));
+    }
+    // 重力必须自己积分：Jolt 的 CharacterVirtual::Update 只在"站在别的物体上"时用重力
+    // 算下压量，明确说明"apply gravity to velocity 是你自己的责任"（CharacterVirtual.h:386）。
+    if (!supported) {
+        float vy = vel.GetY() + jolt_->system.GetGravity().GetY() * static_cast<float>(dt);
+        if (vy < static_cast<float>(kTerminalFallSpeed_)) vy = static_cast<float>(kTerminalFallSpeed_);
+        vel.SetY(vy);
+    } else if (vel.GetY() < 0.0f) {
+        vel.SetY(0.0f);   // 贴地：不累积向下速度
+    }
+    ch->SetLinearVelocity(vel);
+
+    // 推进：Jolt 自己处理重力、贴地、台阶与坡度限制
+    const JPH::ObjectLayer layer = kObjLayerMoving;
+    ch->Update(static_cast<float>(dt), jolt_->system.GetGravity(),
+               jolt_->system.GetDefaultBroadPhaseLayerFilter(layer),
+               jolt_->system.GetDefaultLayerFilter(layer),
+               JPH::BodyFilter(), JPH::ShapeFilter(), jolt_->tempAllocator);
+
+    // 回写数据体（脚底中心）
+    const JPH::RVec3 p = ch->GetPosition();
+    if (PhysicsBody* b = state_.findBodyById(state_.playerBodyId())) {
+        b->x = p.GetX();
+        b->y = p.GetY() - b->halfExtentY;
+        b->z = p.GetZ();
+        b->onGround = ch->IsSupported();
+    }
 }
 
 void PhysicsWorld::onPlaceBlock(const engine::shared::PhysicsCommand& cmd) {
