@@ -296,6 +296,20 @@ private:
     std::unordered_map<int, glm::dvec3> bodyPos_;
     // 刚体姿态（四元数）。与 bodyPos_ 同生命周期（位姿更新只动这里，不碰缓冲）。
     std::unordered_map<int, glm::quat>  bodyRot_;
+    // 刚体位姿插值：物理 25Hz 推位姿、渲染 60~165Hz 画，直接覆盖会看到 40ms 一格的阶梯。
+    // 每次 setBodyPose 到达时把旧的 curr 降为 prev，绘制时按墙钟在两者之间混合。
+    struct BodyPoseAnim {
+        glm::dvec3 prevPos{0.0};
+        glm::dvec3 currPos{0.0};
+        glm::quat  prevRot{1.0f, 0.0f, 0.0f, 0.0f};
+        glm::quat  currRot{1.0f, 0.0f, 0.0f, 0.0f};
+        std::int64_t prevNs = 0;   // 上一帧位姿到达的墙钟（steady_clock 纳秒）
+        std::int64_t currNs = 0;   // 最新位姿到达的墙钟
+    };
+    std::unordered_map<int, BodyPoseAnim> bodyAnim_;
+    // 取插值后的位姿（alpha = 现在距上一次到达 / 两次到达间隔，钳到 [0,1]）。
+    // 返回 false 表示该 id 还没有位姿数据。
+    bool interpolatedBodyPose(int contraptionId, glm::dvec3& outPos, glm::quat& outRot) const;
     VkCommandPool        cmdPool_ = VK_NULL_HANDLE;
     VkCommandBuffer      cmdBuffers_[kMaxFramesInFlight]{}; // 每帧槽一条（2 组轮转）
     VkSemaphore          imageAvailable_[kMaxFramesInFlight]{}; // acquire 信号量：2 组轮转

@@ -194,8 +194,14 @@ void PhysicsWorld::tick(double scale, double wallDt,
         applyCommands(fromBusiness);
         stepJolt();            // 推进 Dynamic 刚体（无动态体时内部直接跳过）
         syncContraptionPoses();// Jolt 位姿 → 数据体（渲染与回执都读数据体）
+        // 玩家本 tick 的**起点**：必须在推进之前取。
+        // （曾经在推进之后取，导致 prev == curr，插值退化成"直接画最新 25Hz 采样"→ 看见阶梯。）
+        double prevPX = 0.0, prevPY = 0.0, prevPZ = 0.0;
+        if (const PhysicsBody* pb = state_.findBodyById(state_.playerBodyId())) {
+            prevPX = pb->x; prevPY = pb->y; prevPZ = pb->z;
+        }
         stepPlayer(0.04);      // 推进玩家角色（CharacterVirtual）
-        snapshotPlayerBody(wallDt);
+        snapshotPlayerBody(wallDt, prevPX, prevPY, prevPZ);
 
         // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
         simTime_.store(simTime_.load(std::memory_order_relaxed) + 0.04,
@@ -587,15 +593,14 @@ void PhysicsWorld::onUnpackContraption(const engine::shared::PhysicsCommand& cmd
     pendingReceipts_.push_back(r);
 }
 
-void PhysicsWorld::snapshotPlayerBody(double wallDt) {
-    // ---- 刚体积分：已删除 ----
+void PhysicsWorld::snapshotPlayerBody(double wallDt, double prevX, double prevY, double prevZ) {
+    // prevX/Y/Z = 本 tick 推进**之前**的玩家位置（调用方在 stepPlayer 之前取好）。
     for (auto& b : state_.bodies()) {
         if (b.motion != MotionType::Kinematic) continue;
-        // 插值快照：先记下本 tick 起点的位置（= 上一 tick 的终点）。
         const bool   isPlayerBody = (b.bodyId == state_.playerBodyId() && playerState_ != nullptr);
-        const double tickStartX = b.x;
-        const double tickStartY = b.y;
-        const double tickStartZ = b.z;
+        const double tickStartX = prevX;
+        const double tickStartY = prevY;
+        const double tickStartZ = prevZ;
         // 玩家位置回传（相机跟随 + 实体位姿）：只写共享槽，不占业务结果队列。
         // 一次成组写入 prev（本 tick 起点）/ curr（本 tick 终点）/ tick 起点时刻，
         // 整组用 seqlock 包住：读侧要么拿到同一 tick 的一对值，要么重试。

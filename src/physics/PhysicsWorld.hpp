@@ -78,8 +78,11 @@ private:
     void onRemoveBlock(const engine::shared::PhysicsCommand& cmd);
     void onPackContraption(const engine::shared::PhysicsCommand& cmd);
     void onUnpackContraption(const engine::shared::PhysicsCommand& cmd);
-    // 刚体插值快照：为玩家体成组写 PlayerBodyState（seqlock 包住 prev/curr/时刻）
-    void snapshotPlayerBody(double wallDt);
+    // 刚体插值快照：为玩家体成组写 PlayerBodyState（seqlock 包住 prev/curr/时刻）。
+    // prevX/Y/Z 是**本 tick 推进之前**的位置（调用方在 stepPlayer 之前取）——
+    // 传进来而不是在这里读 b.x：这里读到的 b.x 已经是推进后的终点，prev 会等于 curr，
+    // 插值退化成"直接画 25Hz 采样"，看到的是一段一段的阶梯。
+    void snapshotPlayerBody(double wallDt, double prevX, double prevY, double prevZ);
     // 按 chunk 重建静态碰撞体的 Jolt 形态（每 chunk 一个 StaticCompoundShape）。
     // 全量同步只重建签名变化的 chunk；放置/破坏只重建受影响的那一个。
     void rebuildChunkStatic(int chunkX, int chunkY, int chunkZ);

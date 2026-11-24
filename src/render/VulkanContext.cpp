@@ -898,6 +898,43 @@ void VulkanContext::setBodyPose(int contraptionId, double x, double y, double z,
     bodyPos_[contraptionId] = glm::dvec3{x, y, z};
     // glm::quat 的构造顺序是 (w, x, y, z) —— 这里显式换序，避免 (x,y,z,w) 误用。
     bodyRot_[contraptionId] = glm::quat{qw, qx, qy, qz};
+
+    // 插值状态：旧 curr 降为 prev，新值成为 curr，并记下到达时刻。
+    // 物理是 25Hz，两次到达间隔理论 40ms；alpha 用它做分母，慢/快放时会自适应。
+    const std::int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    BodyPoseAnim& a = bodyAnim_[contraptionId];
+    if (a.currNs == 0) {
+        // 第一次收到位姿：prev 直接等于 curr，避免从原点"飞"过来
+        a.prevPos = bodyPos_[contraptionId];
+        a.prevRot = bodyRot_[contraptionId];
+        a.prevNs  = nowNs;
+    } else {
+        a.prevPos = a.currPos;
+        a.prevRot = a.currRot;
+        a.prevNs  = a.currNs;
+    }
+    a.currPos = bodyPos_[contraptionId];
+    a.currRot = bodyRot_[contraptionId];
+    a.currNs  = nowNs;
+}
+
+bool VulkanContext::interpolatedBodyPose(int contraptionId, glm::dvec3& outPos,
+                                         glm::quat& outRot) const {
+    const auto it = bodyAnim_.find(contraptionId);
+    if (it == bodyAnim_.end()) return false;
+    const BodyPoseAnim& a = it->second;
+    double alpha = 1.0;
+    if (a.currNs > a.prevNs) {
+        const std::int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        alpha = static_cast<double>(nowNs - a.prevNs) /
+                static_cast<double>(a.currNs - a.prevNs);
+        alpha = std::clamp(alpha, 0.0, 1.0);   // 物理落后时停在终点，不外推
+    }
+    outPos = a.prevPos + (a.currPos - a.prevPos) * alpha;
+    outRot = glm::slerp(a.prevRot, a.currRot, static_cast<float>(alpha));
+    return true;
 }
 
 void VulkanContext::destroyBodyMesh(int contraptionId) {
@@ -908,6 +945,7 @@ void VulkanContext::destroyBodyMesh(int contraptionId) {
     }
     bodyPos_.erase(contraptionId);
     bodyRot_.erase(contraptionId);
+    bodyAnim_.erase(contraptionId);
 }
 
 // ---- 实体模型（带骨骼，逐骨骼 draw）----
@@ -1526,19 +1564,18 @@ bool VulkanContext::drawFrame() {
         }
         for (const auto& [id, m] : bodyMeshes_) {
             if (m.vertexCount == 0) continue;
-            const auto pit = bodyPos_.find(id);
-            if (pit == bodyPos_.end()) continue;
+            // 位姿走插值：物理 25Hz 推，渲染 60~165Hz 画（见 interpolatedBodyPose）
+            glm::dvec3 posePos;
+            glm::quat  poseRot;
+            if (!interpolatedBodyPose(id, posePos, poseRot)) continue;
             const glm::vec3 worldPos{
-                static_cast<float>(pit->second.x),
-                static_cast<float>(pit->second.y),
-                static_cast<float>(pit->second.z)};
+                static_cast<float>(posePos.x),
+                static_cast<float>(posePos.y),
+                static_cast<float>(posePos.z)};
             // 顶点在局部坐标（buildBodyVertices），所以旋转在 model matrix 里做：
-            // T(pos) × R(quat)。没有旋转记录时用单位四元数（等价于原来的纯平移）。
-            const auto rit = bodyRot_.find(id);
-            const glm::quat bodyRot =
-                (rit != bodyRot_.end()) ? rit->second : glm::quat{1.0f, 0.0f, 0.0f, 0.0f};
+            // T(pos) × R(quat)。
             const glm::mat4 bodyModel =
-                glm::translate(glm::mat4(1.0f), worldPos) * glm::mat4_cast(bodyRot);
+                glm::translate(glm::mat4(1.0f), worldPos) * glm::mat4_cast(poseRot);
             pushDrawMatrices(cmdBuffers_[frame], bodyModel);
             VkDeviceSize vbOffset = 0;
             vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &m.vertexBuffer, &vbOffset);
@@ -1717,6 +1754,7 @@ void VulkanContext::destroyRenderObjects() {
     bodyMeshes_.clear();
     bodyPos_.clear();
     bodyRot_.clear();
+    bodyAnim_.clear();
     // 实体：逐骨骼释放缓冲，再释放贴图三件套
     for (auto& [id, em] : entityMeshes_) {
         for (auto& g : em.bones) {
