@@ -14,6 +14,7 @@
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
@@ -159,11 +160,14 @@ int PhysicsWorld::addPlayerBody(double x, double y, double z,
     bodyCount_.store(static_cast<long long>(state_.bodies().size()), std::memory_order_relaxed);
     state_.setPlayerBodyId(b.bodyId);
 
-    // Jolt 侧：角色盒以"脚底 + 半高"为中心（数据层的位置语义是脚底中心）。
-    JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(
-        JPH::Vec3(static_cast<float>(halfExtentX),
-                  static_cast<float>(halfExtentY),
-                  static_cast<float>(halfExtentZ)));
+    // Jolt 侧：角色用**胶囊**而不是盒子。
+    // 方块地形下盒子的四个直角会卡在方块棱上，表现为"走一步被弹回半步"
+    // （实测逐 tick 位移在 ±0.1 之间来回翻号）。胶囊没有直角，沿地形滑动时不会卡。
+    // 尺寸映射：碰撞箱 0.6×1.8×0.6 → 半径 0.3、圆柱半高 0.6（总高 2*(0.6+0.3)=1.8）。
+    const float radius   = static_cast<float>(std::min(halfExtentX, halfExtentZ));
+    const float cylHalf  = static_cast<float>(halfExtentY) - radius;
+    JPH::RefConst<JPH::Shape> shape = new JPH::CapsuleShape(
+        cylHalf > 0.0f ? cylHalf : 0.0f, radius);
     JPH::Ref<JPH::CharacterVirtualSettings> settings = new JPH::CharacterVirtualSettings();
     settings->mShape = shape;
     settings->mMaxSlopeAngle = JPH::DegreesToRadians(45.0f);
@@ -212,10 +216,10 @@ void PhysicsWorld::tick(double scale, double wallDt,
         maybeLog();
     }
 
-    // 超限丢时间：若跑满 kMaxStepsPerFrame_ 仍欠账（本帧严重落后），
-    // 丢弃剩余累积——下一帧从零开始，不把落后带进下一帧。
-    if (accumulator_ >= 0.04) {
-        accumulator_ = 0.0;
+    // 欠账处理：只在"真卡顿"（>320ms 落后）时才丢弃，且丢到只剩一步；
+    // 一般落后（<320ms）保留欠账，接下来几帧逐帧追上 —— 不丢时间，视觉上也更连续。
+    if (accumulator_ > kMaxAccumulator_) {
+        accumulator_ = 0.04;
     }
 }
 
@@ -611,13 +615,30 @@ void PhysicsWorld::snapshotPlayerBody(double wallDt, double prevX, double prevY,
             const long long nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
 
-            // tickDurationNs：用上次写入到这次的墙钟差，自适应 time_scale 和调度抖动。
-            // 物理是累加器驱动，墙钟间隔 = 0.04 / scale 秒；scale≠1 时写死 40ms 会让
-            // 渲染端 alpha 的分母错误（scale=2 滞后半帧、scale=0.5 卡终点再跳）。
-            // 首次写入（lastPlayerStateWriteNs_ == 0）用当前帧墙钟兜底。
-            long long durNs = static_cast<long long>(wallDt * 1e9);
-            if (lastPlayerStateWriteNs_ > 0 && nowNs > lastPlayerStateWriteNs_) {
-                durNs = nowNs - lastPlayerStateWriteNs_;
+            // tickDurationNs：**平滑后的实测间隔**（指数平均），不是标称值也不是原始间隔。
+            // 两个极端都试过、都有问题：
+            //   原始实测间隔（26~52ms 抖）→ 渲染速度忽快忽慢（逐帧位移 0.01~0.15 乱跳）
+            //   标称 0.04/scale（恒定 40ms）→ 实际 tick 间隔 42~48ms 时 alpha 提前顶到 1
+            //     并钳住（实测 min=0 的帧），下一 tick 再跳一次（max=2.4×avg）
+            // EMA 折中：收敛到真实平均间隔、又不会被单次抖动带偏。
+            long long durNs = 0;
+            {
+                const double physScale = tm_.effectiveScale(engine::core::Domain::Physics);
+                const long long nominal = static_cast<long long>(
+                    0.04 / (physScale > 1e-6 ? physScale : 1.0) * 1e9);
+                if (lastPlayerStateWriteNs_ > 0 && nowNs > lastPlayerStateWriteNs_) {
+                    const long long measured = nowNs - lastPlayerStateWriteNs_;
+                    // 限幅：离标称太远时不信这一次（避免偶发长帧把 EMA 拖走）
+                    if (measured > nominal / 2 && measured < nominal * 2) {
+                        tickIntervalEmaNs_ = (tickIntervalEmaNs_ == 0.0)
+                            ? static_cast<double>(measured)
+                            : 0.9 * tickIntervalEmaNs_ + 0.1 * static_cast<double>(measured);
+                    }
+                }
+                if (tickIntervalEmaNs_ == 0.0) {
+                    tickIntervalEmaNs_ = static_cast<double>(nominal);
+                }
+                durNs = static_cast<long long>(tickIntervalEmaNs_);
             }
 
             st.seq.fetch_add(1, std::memory_order_acq_rel); // 奇数 = 写入中

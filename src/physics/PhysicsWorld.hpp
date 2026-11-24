@@ -98,10 +98,14 @@ private:
     // 注意：原 recomputeAABB / moveKinematicAxis 已删除（求解器迁 Jolt 时整段替换）。
     // 二者的职责分别由 compound shape 的 GetLocalBounds() 和 CharacterVirtual 承担。
 
-    // tick 银行上限：单帧最多补跑 5 个物理 tick（=200ms 模拟时间）。
-    // 超过说明本帧严重落后（卡顿/掉帧），剩余累积时间直接丢弃，
-    // 防止"越落后越要补、越补越落后"的螺旋死亡（spiral of death）。
-    static constexpr int kMaxStepsPerFrame_ = 5;
+    // 单帧最多补跑 2 个物理 tick（=80ms 模拟时间）。
+    // 为什么不是 5：一帧补跑 5 个 tick 会让渲染端看到一次 0.4~0.7 格的跳跃
+    // （实测"时不时大抖动"就来自这种帧）。限到 2 之后，落后的部分摊到接下来几帧，
+    // 视觉上是"稍微快走几步"而不是"瞬移一下"。
+    static constexpr int kMaxStepsPerFrame_ = 2;
+    // 欠账超过这个值（8 tick = 320ms）才认为是真卡顿，丢弃到只剩一步；
+    // 否则保留欠账、逐帧追上——丢弃会让物理时间永久落后。
+    static constexpr double kMaxAccumulator_ = 0.32;
 
     // 跳跃初速度（格/秒）：跳高 = v²/(2g)。默认 4.9 ⇒ 约 1.23 格，略高于 1 格台阶。
     // 装配期由 addPlayerBody 按实体类型定义覆盖；只在 onGround 时生效，空中按跳跃无效。
@@ -123,6 +127,9 @@ private:
     // 上次写入 PlayerBodyState 的墙钟时刻（纳秒）。用于计算 tickDurationNs：
     // 两次写入的墙钟差 = 本次物理 tick 的实际墙钟间隔，自适应时间缩放和调度抖动。
     long long                  lastPlayerStateWriteNs_ = 0;
+    // 物理 tick 间隔的指数平均（纳秒）：给渲染端插值当 alpha 分母。
+    // 纯物理线程；只有 snapshotPlayerBody 读写。
+    double                     tickIntervalEmaNs_ = 0.0;
     // 数据层（PhysicsState）：刚体表 + 静态碰撞体表 + id 分配。
     // 逻辑层只通过它的访问器读写，不直接碰容器 —— 接 Jolt 时这一层基本不动。
     PhysicsState               state_;
