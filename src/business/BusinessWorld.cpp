@@ -308,7 +308,7 @@ void BusinessWorld::maybeLog() {
            << " 物理碰撞体=" << physicsBlockCount()
            << " 放置/破坏=" << placedBlockCount() << "/" << removedBlockCount()
            << "(拒" << rejectedPlacementCount() << "/" << rejectedRemovalCount() << ")"
-           << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Business);
+           << "  生效系数=" << tm_.scale();
         ENGINE_LOG_INFO("Business", os.str());
     }
 }

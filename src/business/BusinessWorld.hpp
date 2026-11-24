@@ -27,7 +27,7 @@ public:
                   PhysicsBridge& physicsBridge,
                   RenderBridge& renderBridge);
 
-    // 推进一个业务 tick：simTime += 0.04 * scale（scale 来自 TimeManager::effectiveScale）。
+    // 推进一个业务 tick：simTime += 0.04 * scale（scale 来自 TimeManager::scale，全局唯一）。
     void tick(double scale);
 
     // tick 边界：委托 PhysicsBridge 把待发指令（全量同步/放置/破坏）发给物理线程。

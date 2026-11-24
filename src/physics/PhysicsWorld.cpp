@@ -661,7 +661,7 @@ void PhysicsWorld::snapshotPlayerBody(double wallDt) {
             // 若 step 每 tick 都在变，运行 10 秒后哪怕 step 抖 0.2ms，
             // renderTick 也会跳 ~50ms —— 抖动幅度反而被放大（实测"幅度变大"）。
             // MC 的 tickLength 也是常量（50ms），同理。
-            const double physScale = tm_.effectiveScale(engine::core::Domain::Physics);
+            const double physScale = tm_.scale();
             const long long durNs = static_cast<long long>(
                 0.04 / (physScale > 1e-6 ? physScale : 1.0) * 1e9);
 
@@ -782,7 +782,7 @@ void PhysicsWorld::maybeLog() {
            << " 碰撞体=" << state_.colliders().size()
            << " 碰撞=" << collisionCount()
            << " 方块=(" << blockX() << "," << blockY() << "," << blockZ() << ")"
-           << "  生效系数=" << tm_.effectiveScale(engine::core::Domain::Physics);
+           << "  生效系数=" << tm_.scale();
         // 各物理体位置（物理线程内遍历刚体表安全）：动态体与生物分开标名
         for (const auto& b : state_.bodies()) {
             if (b.motion == MotionType::Dynamic) {

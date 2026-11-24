@@ -429,7 +429,7 @@ static int run(const std::string& presetName) {
     businessLoop.start([&] {
         auto next = std::chrono::steady_clock::now();
         while (!businessLoop.shouldStop()) {
-            businessWorld.tick(tm.effectiveScale(core::Domain::Business));
+            businessWorld.tick(tm.scale());
             businessWorld.handlePlayerInput(cameraState, playerInput);  // 玩家点击 → DDA → 放置/破坏
             // 1b 流式：请求窗口内未加载的列 + 应用后台已算好的结果。
             // 必须在 flushChangesToRender 之前——新到货 chunk 的脏标记要进本 tick 的变更事件，
@@ -510,7 +510,7 @@ static int run(const std::string& presetName) {
             const double wallDt =
                 std::chrono::duration<double>(now - prev).count();
             prev = now;
-            physicsWorld.tick(tm.effectiveScale(core::Domain::Physics), wallDt,
+            physicsWorld.tick(tm.scale(), wallDt,
                                  physicsBridge.businessToPhysicsCommands());
             physicsWorld.pushResultsToBusiness(physicsBridge.physicsToBusinessResults());
             std::this_thread::sleep_for(std::chrono::milliseconds(1)); // 避免忙等
