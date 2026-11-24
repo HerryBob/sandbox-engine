@@ -558,32 +558,6 @@ static int run(const std::string& presetName) {
                 // 第三人称下会看到"相机平滑、角色仍在 40ms 一跳"的相对运动，反而更刺眼。
                 double px = 0.0, py = 0.0, pz = 0.0;
                 playerBodyState.readInterpolated(px, py, pz);
-                // ===== 临时诊断（测完删）：每帧 dt / prev / curr / out / alpha =====
-                {
-                    static long long n = 0;
-                    static long long lastNs = 0;
-                    static double lastPx = 0.0;
-                    const long long nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count();
-                    const double dtMs = (lastNs > 0) ? (nowNs - lastNs) / 1e6 : 0.0;
-                    const double dPx = px - lastPx;
-                    const double pv = playerBodyState.prevX.load();
-                    const double cv = playerBodyState.x.load();
-                    double alpha = -1.0;
-                    if (cv - pv > 1e-12) alpha = (px - pv) / (cv - pv);
-                    ++n;
-                    if (n > 20) {   // 跳过启动阶段
-                        ENGINE_LOG_INFO("Render",
-                            "[diag] dt=" + std::to_string(dtMs) +
-                            " dur=" + std::to_string(playerBodyState.tickDurationNs.load()) +
-                            " prev=" + std::to_string(pv) +
-                            " curr=" + std::to_string(cv) +
-                            " out=" + std::to_string(px) +
-                            " alpha=" + std::to_string(alpha) +
-                            " d=" + std::to_string(dPx));
-                    }
-                    lastNs = nowNs; lastPx = px;
-                }
 
                 // 朝向换算：相机 yaw = 0 朝 -Z，模型 yawDeg = 0 脸朝 +Z，两套约定差一个镜像，
                 // 所以取 180° - yaw。yaw 是累加量，不归一化（glm::rotate 接受任意角度）。

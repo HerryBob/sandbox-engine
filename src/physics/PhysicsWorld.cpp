@@ -682,17 +682,9 @@ void PhysicsWorld::snapshotPlayerBody(double wallDt, double prevX, double prevY,
                 durNs = static_cast<long long>(tickIntervalEmaNs_);
             }
 
-            st.seq.fetch_add(1, std::memory_order_acq_rel); // 奇数 = 写入中
-            st.prevX.store(tickStartX, std::memory_order_relaxed);
-            st.prevY.store(tickStartY, std::memory_order_relaxed);
-            st.prevZ.store(tickStartZ, std::memory_order_relaxed);
-            st.x.store(b.x, std::memory_order_relaxed);
-            st.y.store(b.y, std::memory_order_relaxed);
-            st.z.store(b.z, std::memory_order_relaxed);
-            st.tickStartNs.store(nowNs, std::memory_order_relaxed);
-            st.tickDurationNs.store(durNs, std::memory_order_relaxed);
-            st.seq.fetch_add(1, std::memory_order_release); // 偶数 = 稳定
-            st.valid.store(true, std::memory_order_relaxed);
+            // 推一条快照进三槽环（环 + 到达时刻由 seqlock 成组保护）。
+            // 渲染侧按 now - 1.5*tick 在两份旧快照之间插值（见 PlayerBodyState.hpp）。
+            st.push(b.x, b.y, b.z, nowNs, durNs);
             lastPlayerStateWriteNs_ = nowNs;
         }
     }
