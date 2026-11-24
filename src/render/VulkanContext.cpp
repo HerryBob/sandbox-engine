@@ -893,59 +893,24 @@ bool VulkanContext::uploadBodyMesh(int contraptionId, const std::vector<engine::
     return true;
 }
 
-void VulkanContext::setBodyPose(int contraptionId, double x, double y, double z,
-                                float qx, float qy, float qz, float qw, double simTime) {
+void VulkanContext::setBodyPoseDirect(int contraptionId, double x, double y, double z,
+                                      float qx, float qy, float qz, float qw) {
     bodyPos_[contraptionId] = glm::dvec3{x, y, z};
-    // glm::quat 的构造顺序是 (w, x, y, z) —— 这里显式换序，避免 (x,y,z,w) 误用。
     bodyRot_[contraptionId] = glm::quat{qw, qx, qy, qz};
-
-    // 入 4 槽环（按模拟时刻索引）。同一时刻重复到达时覆盖末位，避免环里出现重复 t。
     BodyPoseAnim& a = bodyAnim_[contraptionId];
-    if (a.count > 0 && simTime <= a.keys[a.count - 1].t) {
-        a.keys[a.count - 1].pos = bodyPos_[contraptionId];
-        a.keys[a.count - 1].rot = bodyRot_[contraptionId];
-        return;
-    }
-    if (a.count >= BodyPoseAnim::kSlots) {
-        for (int i = 1; i < BodyPoseAnim::kSlots; ++i) a.keys[i - 1] = a.keys[i];
-        a.count = BodyPoseAnim::kSlots - 1;
-    }
-    a.keys[a.count].t   = simTime;
-    a.keys[a.count].pos = bodyPos_[contraptionId];
-    a.keys[a.count].rot = bodyRot_[contraptionId];
-    ++a.count;
+    a.direct = true;
 }
 
+// 注：环式位姿插值已删除 —— 刚体位姿改由 PoseHistory（物理每 tick 发布一帧快照）
+// 插值后经 setBodyPoseDirect 喂进来。这里不再保留 pending/keys 那套相位猜测逻辑。
+// 取刚体当前位姿。位姿已由 PoseHistory 插值好（setBodyPoseDirect），这里不再插值。
 bool VulkanContext::interpolatedBodyPose(int contraptionId, glm::dvec3& outPos,
                                          glm::quat& outRot) {
-    const auto it = bodyAnim_.find(contraptionId);
-    if (it == bodyAnim_.end() || it->second.count == 0) return false;
-    const BodyPoseAnim& a = it->second;
-    if (a.count == 1) {
-        outPos = a.keys[0].pos;
-        outRot = a.keys[0].rot;
-        return true;
-    }
-    const double t = bodyInterpTime_;
-    if (t <= a.keys[0].t) {                     // 比最旧还旧：贴住最旧
-        outPos = a.keys[0].pos;
-        outRot = a.keys[0].rot;
-        return true;
-    }
-    for (int i = 0; i + 1 < a.count; ++i) {
-        const auto& k0 = a.keys[i];
-        const auto& k1 = a.keys[i + 1];
-        if (t <= k1.t) {
-            const double span = k1.t - k0.t;
-            double alpha = (span > 1e-9) ? (t - k0.t) / span : 1.0;
-            alpha = std::clamp(alpha, 0.0, 1.0);
-            outPos = k0.pos + (k1.pos - k0.pos) * alpha;
-            outRot = glm::slerp(k0.rot, k1.rot, static_cast<float>(alpha));
-            return true;
-        }
-    }
-    outPos = a.keys[a.count - 1].pos;           // 比最新还新：贴住最新
-    outRot = a.keys[a.count - 1].rot;
+    const auto pit = bodyPos_.find(contraptionId);
+    const auto rit = bodyRot_.find(contraptionId);
+    if (pit == bodyPos_.end() || rit == bodyRot_.end()) return false;
+    outPos = pit->second;
+    outRot = rit->second;
     return true;
 }
 void VulkanContext::destroyBodyMesh(int contraptionId) {

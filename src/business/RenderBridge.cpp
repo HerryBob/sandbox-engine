@@ -33,10 +33,7 @@ bool RenderBridge::pushBodyStructure(const engine::shared::BodyStructureEvent& e
     return businessToRenderStructure_.push(ev);
 }
 
-void RenderBridge::pushBodyPose(const engine::shared::BodyPose& pose) {
-    // 位姿是"状态"：满则丢，下一 tick 还有更新的值。
-    businessToRenderPoses_.push(pose);
-}
+
 
 engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& RenderBridge::businessToRenderChanges() {
     return businessToRenderChanges_;

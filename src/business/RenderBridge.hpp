@@ -31,7 +31,6 @@ public:
     // 刚体结构事件：push 失败返回 false，调用方保留下次重试。
     bool pushBodyStructure(const engine::shared::BodyStructureEvent& ev);
     // 刚体位姿：满则丢（旧位置无留存价值，下一 tick 还有新的）。
-    void pushBodyPose(const engine::shared::BodyPose& pose);
 
     // 渲染侧访问（装配层分发给渲染线程）。
     engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& businessToRenderChanges();

@@ -82,7 +82,10 @@ void BusinessWorld::receiveResultsFromPhysics() {
                 std::to_string(ev.contraptionId) + "，渲染端会缺/多一个网格");
         }
     }
-    if (bodyPose) renderBridge_.pushBodyPose(*bodyPose);
+    // 刚体位姿不再转发给渲染：渲染端直接读 PoseHistory（物理每 tick 发布）。
+    // 原来这一跳（物理→结果队列→业务→渲染队列）多出 ~40ms 延迟且到达抖动大。
+    // bodyPose 仍由 receiveResultsFromPhysics 产出，留给业务侧将来可能需要的位姿查询。
+    (void)bodyPose;
 }
 
 void BusinessWorld::flushChangesToRender() {

@@ -7,7 +7,10 @@
 #include "business/RenderBridge.hpp"
 #include "core/Log.hpp"
 #include "core/ThreadLoop.hpp"
+#include <vector>
+
 #include "core/TimeManager.hpp"
+#include "shared/state/PoseHistory.hpp"
 #include "input/InputSampler.hpp"
 #include "physics/JoltKernel.hpp"
 #include "physics/PhysicsWorld.hpp"
@@ -331,6 +334,11 @@ static int run(const std::string& presetName) {
 
     // 全局 time_scale 单实例，三条轨共享
     core::TimeManager tm;
+
+    // 跨线程实体位姿表（玩家 slot 0 + 刚体按 structureId 分配）：物理每 tick 发布一帧，
+    // 渲染每帧按 renderTick 查表插值。替代原来的 物理→结果队列→业务→渲染队列 两跳，
+    // 让刚体延迟从 80ms 降到 40ms，并与玩家共用同一套插值。~400KB，堆上分配。
+    auto poseHistory = std::make_unique<engine::shared::PoseHistory>();
     // 桥（通信层）：跨线程数据唯一通道，由装配层创建并分发端点。
     //   PhysicsBridge = B1 物理指令（业务→物理）+ B2 回执（物理→业务）+ 指令状态机
     //   RenderBridge  = B3 变更事件（业务→渲染）
@@ -503,6 +511,7 @@ static int run(const std::string& presetName) {
     });
 
     // ---- 物理线程 25TPS：accumulator 累积驱动 ----
+    physicsWorld.attachPoseHistory(poseHistory.get());
     physicsLoop.start([&] {
         auto prev = std::chrono::steady_clock::now();
         while (!physicsLoop.shouldStop()) {
@@ -524,6 +533,8 @@ static int run(const std::string& presetName) {
 
     // ---- 渲染线程（第 4 轨只读观众，~165Hz）：消费变更事件 + 绘制 ----
     // 渲染不向模拟发任何指令；数据源 = businessToRender 事件流（增量）+ 锁内快照。
+    // 渲染端的刚体 id 列表（结构事件增删）；每帧据此查 PoseHistory
+    std::vector<int> bodyIds_;
     renderLoop.start([&] {
         while (!renderLoop.shouldStop()) {
             renderer.tick();
@@ -537,24 +548,28 @@ static int run(const std::string& presetName) {
             while (renderBridge.businessToRenderStructure().pop(bodyEv)) {
                 if (bodyEv.destroy) {
                     vkCtx.destroyBodyMesh(bodyEv.contraptionId);
+                    for (auto& id : bodyIds_) { if (id == bodyEv.contraptionId) id = -1; }
                 } else if (!vkCtx.uploadBodyMesh(bodyEv.contraptionId, bodyEv.blocks)) {
                     std::cout << "刚体网格上传失败 id=" << bodyEv.contraptionId << "\n";
+                } else {
+                    bodyIds_.push_back(bodyEv.contraptionId);
                 }
             }
 
-            // 刚体插值时刻：与玩家用**同一条模拟时间轴**（秒，PlayerBodyState::renderSimSeconds）。
-            // 之前渲染端按"位姿到达的墙钟"算，而位姿要经 物理→结果队列→业务线程→渲染队列
-            // 两跳，到达时刻抖动更大 → 刚体比玩家更卡。
-            vkCtx.setBodyInterpTime(playerBodyState.renderSimSeconds());
-
-            // 刚体位姿：状态语义，逐条应用——同 id 的后一条覆盖前一条，
-            // 不同 id 各自留最新（多刚体后不能再只取全局最后一条）。
-            engine::shared::BodyPose bodyPose;
-            while (renderBridge.businessToRenderPoses().pop(bodyPose)) {
-                vkCtx.setBodyPose(bodyPose.contraptionId,
-                                  bodyPose.x, bodyPose.y, bodyPose.z,
-                                  bodyPose.qx, bodyPose.qy, bodyPose.qz, bodyPose.qw,
-                                  bodyPose.simTime);
+            // 刚体位姿：**直读跨线程位姿表**（PoseHistory）—— 与玩家同一条模拟时间轴、
+            // 同一个 renderTick。原来走 物理→结果队列→业务线程→渲染队列 两跳，
+            // 多 40ms 延迟且到达抖动大，现在这条路已绕开。
+            {
+                const double rt = playerBodyState.renderTickF();
+                engine::shared::PoseEntry pe;
+                for (const int id : bodyIds_) {
+                    if (id < 0) continue;
+                    const int slot = poseHistory->slotOfStructure(id);
+                    if (slot < 0) continue;
+                    if (!poseHistory->readInterpolated(rt, slot, pe)) continue;
+                    vkCtx.setBodyPoseDirect(id, pe.px, pe.py, pe.pz,
+                                            pe.qx, pe.qy, pe.qz, pe.qw);
+                }
             }
 
             // 玩家模型位姿：直读共享槽（原子）。位置语义 = 脚底中心，与模型原点一致。

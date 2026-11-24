@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include "core/Log.hpp"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -27,7 +28,9 @@ namespace engine::shared {
 struct PlayerBodyState {
     static constexpr int    kRingSize   = 5;      // 需覆盖 [tick-3, tick] 范围
     static constexpr double kStepSimMs  = 40.0;   // 每 tick 模拟前进 40ms（固定）
-    static constexpr double kDelayTicks = 2.5;    // 渲染落后最新 tick 的个数
+    // 渲染延迟（1 tick = 40ms）。物理直接写共享环/快照表，没有中间跳数，
+    // 所以玩家与刚体都能用同一个最小延迟（原来刚体走两跳队列时曾需要 2 tick）。
+    static constexpr double kDelayTicks = 1.0;
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
                   "PlayerBodyState requires lock-free atomic<uint64_t>");
 
@@ -97,8 +100,7 @@ struct PlayerBodyState {
     // 当前渲染时刻在**模拟时间轴**上的位置（秒）。刚体等非玩家对象用它做时间轴索引，
     // 与玩家同一域 —— 这样"玩家站在飞船上"两者相位严格一致。
     double renderSimSeconds() const { return renderTickF() * (kStepSimMs / 1000.0); }
-
-    // 当前渲染时刻的浮点 tick 号（相对 tickCount 的域）。
+    // 当前渲染时刻的浮点 tick 号（相对 tickCount 的域）。玩家与刚体共用。
     double renderTickF() const {
         const std::int64_t origin = originNs.load(std::memory_order_relaxed);
         const std::int64_t step   = stepNs.load(std::memory_order_relaxed);
@@ -168,6 +170,23 @@ struct PlayerBodyState {
             oy = ys[i0] + (ys[i1] - ys[i0]) * alpha;
             oz = zs[i0] + (zs[i1] - zs[i0]) * alpha;
             return;
+        }
+        // ===== 临时诊断（测完删）：兜底命中计数（1Hz）=====
+        {
+            static std::atomic<long long> miss{0}, total{0};
+            static thread_local long long lastLogNs = 0;
+            total.fetch_add(1, std::memory_order_relaxed);
+            miss.fetch_add(1, std::memory_order_relaxed);
+            const std::int64_t now2 = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (lastLogNs == 0) lastLogNs = now2;
+            if (now2 - lastLogNs >= 1000000000LL) {
+                const long long m = miss.exchange(0);
+                const long long n = total.exchange(0);
+                ENGINE_LOG_INFO("Render",
+                    "[兜底] 每秒 " + std::to_string(m) + " / " + std::to_string(n) + " 帧没找到精确帧对");
+                lastLogNs = now2;
+            }
         }
         // 环里没有正好那两帧（首帧 / 刚重锚）：夹到环内最近的 tick 再插值
         int lo = -1, hi = -1;

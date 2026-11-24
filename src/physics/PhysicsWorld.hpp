@@ -2,6 +2,7 @@
 #include "core/SPSCQueue.hpp"
 #include "core/TimeManager.hpp"
 #include "physics/PhysicsState.hpp"
+#include "shared/state/PoseHistory.hpp"
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerBodyState.hpp"
 #include "shared/state/PlayerControlState.hpp"
@@ -28,6 +29,11 @@ struct JoltBackend;
 class PhysicsWorld {
 public:
     explicit PhysicsWorld(engine::core::TimeManager& tm);
+    // 注入跨线程位姿表（PoseHistory）。nullptr = 不启用。
+    // 启用后每 tick 发布一帧：玩家占 slot 0，刚体按 structureId 分配的槽。
+    void attachPoseHistory(engine::shared::PoseHistory* ph) { poseHistory_ = ph; }
+    // 每 tick 末尾发布一帧位姿（玩家 + 所有刚体）。tick() 内部调用。
+    void publishPoseFrame();
     ~PhysicsWorld();   // pimpl：JoltBackend 的定义在 .cpp（头文件不引 JPH:: 类型）
 
     // 每墙钟帧调用一次：accumulator += wall_dt * time_scale，
@@ -73,6 +79,8 @@ private:
     // 消费业务指令队列：放置/破坏/全量同步 → 静态碰撞体集合；
     // Pack/UnpackContraption → 刚体建/拆 + 碰撞体形态转移。
     void applyCommands(engine::core::SPSCQueue<engine::shared::PhysicsCommand>& fromBusiness);
+
+
     void onSyncBlockSet(const engine::shared::PhysicsCommand& cmd);
     // 增量同步：只处理变化的 chunk（清旧内容 → 填新方块 → 重建静态形状入队）。
     void onSyncChunks(const engine::shared::PhysicsCommand& cmd);
@@ -140,6 +148,7 @@ private:
     PhysicsState               state_;
     // Jolt 后端（pimpl）：持有 PhysicsSystem 与"每 chunk 一个静态刚体"的表。
     // 物理线程独占，无锁。
+    engine::shared::PoseHistory* poseHistory_ = nullptr;   // 可空（未启用）
     std::unique_ptr<JoltBackend> jolt_;
     // 待重建静态形状的 chunk 队列（预算式：每 tick 只处理 1 个）。
     // 一次流式批次可能带 4 个变化 chunk，逐个重建各 2.4ms —— 全做完就是 10ms 长帧。

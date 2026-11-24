@@ -172,11 +172,9 @@ public:
     bool uploadBodyMesh(int contraptionId, const std::vector<engine::shared::Block>& blocks);
     // 位姿 = 位置 + 旋转（四元数，glm 顺序 w,x,y,z 由调用方按 {qw,qx,qy,qz} 传入）。
     // 刚体顶点是局部坐标，model matrix = translate(pos) × mat4_cast(rot)。
-    // 设置刚体插值时刻（秒，模拟时间轴）；渲染循环每帧从 PlayerBodyState 取。
-    void setBodyInterpTime(double sec) { bodyInterpTime_ = sec; }
-    // simTime：该位姿的模拟时刻（秒）。按它入环，供 interpolatedBodyPose 查表。
-    void setBodyPose(int contraptionId, double x, double y, double z,
-                     float qx, float qy, float qz, float qw, double simTime);
+    // 直接设置已插值好的位姿（PoseHistory 路径）：本类不再做任何插值。
+    void setBodyPoseDirect(int contraptionId, double x, double y, double z,
+                           float qx, float qy, float qz, float qw);
     void destroyBodyMesh(int contraptionId);
 
     // ---- 实体模型（带骨骼，逐骨骼 draw）----
@@ -299,24 +297,9 @@ private:
     std::unordered_map<int, glm::dvec3> bodyPos_;
     // 刚体姿态（四元数）。与 bodyPos_ 同生命周期（位姿更新只动这里，不碰缓冲）。
     std::unordered_map<int, glm::quat>  bodyRot_;
-    // 刚体位姿插值：物理 25Hz 推位姿、渲染 60~165Hz 画，直接覆盖会看到 40ms 一格的阶梯。
-    // 4 槽环，按**模拟时刻**索引（与玩家同一条时间轴）。
-    // 之前按"位姿到达的墙钟"算 alpha —— 位姿要经 物理→结果队列→业务线程→渲染队列
-    // 两跳，到达时刻抖动大，还会在周期中途换对导致"跳一格"。改成按模拟时刻查表后，
-    // 换对时机与渲染进度天然对齐，掉帧也能跨格插值。
-    struct BodyPoseAnim {
-        static constexpr int kSlots = 4;
-        struct Key {
-            double     t = 0.0;                        // 模拟时刻（秒）
-            glm::dvec3 pos{0.0};
-            glm::quat  rot{1.0f, 0.0f, 0.0f, 0.0f};
-        };
-        Key keys[kSlots]{};
-        int count = 0;
-    };
-    std::unordered_map<int, BodyPoseAnim> bodyAnim_;
-    // 当前渲染时刻（模拟时间轴，秒）：由渲染循环每帧从 PlayerBodyState 取。
-    double bodyInterpTime_ = 0.0;
+    // 刚体位姿：由 PoseHistory（跨线程快照表）插值后经 setBodyPoseDirect 喂入。
+    // 这里只做存储，本类不再做任何插值（原先的环 + pending 相位猜测已删除）。
+    struct BodyPoseAnim { bool direct = false; };    std::unordered_map<int, BodyPoseAnim> bodyAnim_;
     // 取插值后的位姿（alpha = 现在距上一次到达 / 两次到达间隔，钳到 [0,1]）。
     // 返回 false 表示该 id 还没有位姿数据。
     bool interpolatedBodyPose(int contraptionId, glm::dvec3& outPos, glm::quat& outRot);

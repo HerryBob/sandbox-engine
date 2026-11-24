@@ -208,6 +208,7 @@ void PhysicsWorld::tick(double scale, double wallDt,
         drainPendingChunkRebuilds();   // 每 tick 只重建 1 个待处理 chunk（预算式）
         stepJolt();            // 推进 Dynamic 刚体（无动态体时内部直接跳过）
         syncContraptionPoses();// Jolt 位姿 → 数据体（渲染与回执都读数据体）
+        publishPoseFrame();    // 每 tick 发布一帧到跨线程位姿表（玩家 + 刚体）
         stepPlayer(0.04);      // 推进玩家角色（CharacterVirtual）
         snapshotPlayerBody(wallDt);   // 推一条快照进模拟时间轴环（历史在环里，不需 prev）
 
@@ -477,6 +478,39 @@ void PhysicsWorld::syncContraptionPoses() {
     }
 }
 
+// 每 tick 发布一帧位姿到跨线程表（玩家 slot 0 + 所有刚体）。
+// 只是一次整表发布：物理线程填完 → 一次 release store 翻转。
+void PhysicsWorld::publishPoseFrame() {
+    if (poseHistory_ == nullptr) return;
+    engine::shared::PoseFrame& f = poseHistory_->beginFrame(tickCount_ + 1);
+    // 玩家
+    if (const PhysicsBody* pb = state_.findBodyById(state_.playerBodyId())) {
+        engine::shared::PoseEntry& e = f.e[poseHistory_->playerSlot()];
+        e.px = static_cast<float>(pb->x);
+        e.py = static_cast<float>(pb->y);
+        e.pz = static_cast<float>(pb->z);
+        e.qx = static_cast<float>(pb->qx);
+        e.qy = static_cast<float>(pb->qy);
+        e.qz = static_cast<float>(pb->qz);
+        e.qw = static_cast<float>(pb->qw);
+    }
+    // 刚体
+    for (const PhysicsBody& b : state_.bodies()) {
+        if (b.structureId < 0) continue;
+        const int slot = poseHistory_->slotOfStructure(b.structureId);
+        if (slot < 0) continue;
+        engine::shared::PoseEntry& e = f.e[slot];
+        e.px = static_cast<float>(b.x);
+        e.py = static_cast<float>(b.y);
+        e.pz = static_cast<float>(b.z);
+        e.qx = static_cast<float>(b.qx);
+        e.qy = static_cast<float>(b.qy);
+        e.qz = static_cast<float>(b.qz);
+        e.qw = static_cast<float>(b.qw);
+    }
+    poseHistory_->commitFrame();
+}
+
 void PhysicsWorld::onPlaceBlock(const engine::shared::PhysicsCommand& cmd) {
     // 放置：业务裁决已通过。目标域（cmd.contraptionId）：
     // -1 = 主世界（建静态碰撞体）；≥0 = 刚体（飞船改造：方块加入刚体，
@@ -591,6 +625,10 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
 
     state_.bodies().push_back(body);
     state_.bindStructure(body.structureId, body.bodyId);
+    // 分配位姿槽（PoseHistory 启用时）：渲染端按 structureId 反查，O(1)
+    if (poseHistory_ != nullptr && body.structureId >= 0) {
+        poseHistory_->allocate(engine::shared::PoseKind::Contraption, body.structureId);
+    }
     bodyCount_.store(static_cast<long long>(state_.bodies().size()),
                      std::memory_order_relaxed);
     // 回执：打包完成（回执必须逐条送达，不参与快照合并）。
