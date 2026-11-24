@@ -1,16 +1,100 @@
 #include "physics/PhysicsWorld.hpp"
+#include "physics/JoltKernel.hpp"
 #include "core/Log.hpp"
+#include "shared/chunk/ChunkPos.hpp"
+
+#include <Jolt/Jolt.h>
+#include <Jolt/Core/Reference.h>
+#include <Jolt/Core/TempAllocator.h>
+#include <Jolt/Core/JobSystemSingleThreaded.h>
+#include <Jolt/Physics/PhysicsSystem.h>
+#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.h>
+#include <Jolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.h>
+#include <Jolt/Physics/Collision/ObjectLayerPairFilterTable.h>
+#include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <sstream>
+#include <unordered_set>
 
 namespace engine::physics {
+
+// ---- Jolt 后端（PhysicsWorld.hpp 里只前置声明，JPH:: 类型不出这条 TU）----
+namespace {
+// v1 层划分：静态地形 / 可动体。加玩家角色、触发器时在这里扩。
+constexpr JPH::ObjectLayer kObjLayerNonMoving    = 0;
+constexpr JPH::ObjectLayer kObjLayerMoving       = 1;
+constexpr JPH::uint        kNumObjectLayers      = 2;
+constexpr JPH::uint        kNumBroadPhaseLayers  = 2;
+
+// 方块集合签名的单块散列（坐标 + 类型；与顺序无关地累加）。
+inline std::uint64_t blockHash(const engine::shared::Block& b) {
+    std::uint64_t h = static_cast<std::uint64_t>(b.pos.x) * 73856093ull;
+    h ^= static_cast<std::uint64_t>(b.pos.y) * 19349663ull;
+    h ^= static_cast<std::uint64_t>(b.pos.z) * 83492791ull;
+    h = h * 31ull + static_cast<std::uint64_t>(b.type);
+    return h;
+}
+} // namespace
+
+struct JoltBackend {
+    // 声明顺序 = 构造顺序：层表 → 过滤器（引用层表）→ 分配器/作业系统 → PhysicsSystem
+    JPH::BroadPhaseLayerInterfaceTable      bpLayers;
+    JPH::ObjectLayerPairFilterTable         objPairFilter;
+    JPH::ObjectVsBroadPhaseLayerFilterTable objVsBpFilter;
+    JPH::TempAllocatorImpl                  tempAllocator;
+    JPH::JobSystemSingleThreaded            jobSystem;
+    JPH::PhysicsSystem                      system;
+    // 每 chunk 一个静态刚体（StaticCompoundShape：一个 chunk 的方块各是一个盒子）。
+    // 放置/破坏时只重建受影响的那个 chunk。
+    std::unordered_map<engine::shared::ChunkPos, JPH::BodyID> chunkBodies;
+    // 每 chunk 的方块集合签名：全量同步时只有签名变化的 chunk 才重建 Jolt 形状。
+    // 没有它，每次 SyncBlockSet（流式每加载一批就发一次）都要重建全部 chunk 形状
+    // —— 实测 82,944 方块 = 250ms/次，直接把物理线程卡住。
+    std::unordered_map<engine::shared::ChunkPos, std::uint64_t> chunkSignatures;
+
+    JoltBackend()
+        : bpLayers(kNumObjectLayers, kNumBroadPhaseLayers),
+          objPairFilter(kNumObjectLayers),
+          objVsBpFilter(bpLayers, kNumBroadPhaseLayers, objPairFilter, kNumObjectLayers),
+          tempAllocator(16 * 1024 * 1024),
+          jobSystem(4096) {
+        bpLayers.MapObjectToBroadPhaseLayer(kObjLayerNonMoving, JPH::BroadPhaseLayer(0));
+        bpLayers.MapObjectToBroadPhaseLayer(kObjLayerMoving,    JPH::BroadPhaseLayer(1));
+        objPairFilter.EnableCollision(kObjLayerNonMoving, kObjLayerMoving);
+        objPairFilter.EnableCollision(kObjLayerMoving,    kObjLayerMoving);
+        // maxBodies / bodyMutexes(0=自动) / maxBodyPairs / maxContactConstraints
+        system.Init(1024, 0, 8192, 2048, bpLayers, objVsBpFilter, objPairFilter);
+        system.SetGravity(JPH::Vec3(0.0f, -9.81f, 0.0f));
+    }
+
+    void removeChunkBody(const engine::shared::ChunkPos& cp) {
+        const auto it = chunkBodies.find(cp);
+        if (it == chunkBodies.end()) return;
+        system.GetBodyInterface().RemoveBody(it->second);
+        chunkBodies.erase(it);
+    }
+    void removeAllChunkBodies() {
+        for (const auto& [cp, id] : chunkBodies) system.GetBodyInterface().RemoveBody(id);
+        chunkBodies.clear();
+    }
+};
+
+PhysicsWorld::~PhysicsWorld() = default;
 
 PhysicsWorld::PhysicsWorld(engine::core::TimeManager& tm)
     : tm_(tm),
       startWall_(std::chrono::steady_clock::now()),
-      lastLog_(std::chrono::steady_clock::now()) {}
+      lastLog_(std::chrono::steady_clock::now()) {
+    // 内核是进程级单例（JoltKernel 幂等）：自检可能已经初始化过。
+    initJoltKernel();
+    jolt_ = std::make_unique<JoltBackend>();
+}
 
 int PhysicsWorld::addPlayerBody(double x, double y, double z,
                                 double halfExtentX, double halfExtentY, double halfExtentZ,
@@ -57,6 +141,7 @@ void PhysicsWorld::tick(double scale, double wallDt,
     int steps = 0;
     while (accumulator_ >= 0.04 && steps < kMaxStepsPerFrame_) { // 25TPS, dt=0.04
         applyCommands(fromBusiness);
+        stepJolt();            // 推进 Jolt（固定步长 25Hz）
         snapshotPlayerBody(wallDt);
 
         // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
@@ -106,11 +191,121 @@ void PhysicsWorld::applyCommands(engine::core::SPSCQueue<engine::shared::Physics
 }
 
 void PhysicsWorld::onSyncBlockSet(const engine::shared::PhysicsCommand& cmd) {
-    // 全量同步：重建静态碰撞体集合（初始世界 / 世界重建时用）。
-    // 注意：碰撞体集合目前只是"静态世界的影子"，没有碰撞消费方（求解器已删）。
-    // Jolt 接入后这里改成"逐 chunk 建 StaticCompoundShape"，且要按脏 chunk 增量重建。
+    // 全量同步：业务侧一次给全部方块（初始世界 / 世界重建 / 流式加载后各发一次）。
+    // 数据层照旧整体重建；**Jolt 侧只重建"方块集合真变了的 chunk"** ——
+    // 否则每次流式加载都要重建 81 个 chunk 的复合形状（约 250ms），物理线程会被卡死。
     state_.colliders().clear();
-    for (const auto& b : cmd.blocks) state_.colliders()[b.pos] = b.type;
+    std::unordered_map<engine::shared::ChunkPos, std::uint64_t> incoming;
+    incoming.reserve(128);
+    for (const auto& b : cmd.blocks) {
+        state_.colliders()[b.pos] = b.type;
+        const auto cp = engine::shared::toChunkOf(b.pos);
+        incoming[cp] += blockHash(b);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    int rebuilt = 0;
+    for (const auto& [cp, sig] : incoming) {
+        const auto it = jolt_->chunkSignatures.find(cp);
+        if (it == jolt_->chunkSignatures.end() || it->second != sig) {
+            rebuildChunkStatic(cp.x, cp.y, cp.z);   // 内部更新签名
+            ++rebuilt;
+        }
+    }
+    // 这次同步里消失的 chunk → 删掉它的静态刚体
+    int removed = 0;
+    for (auto it = jolt_->chunkSignatures.begin(); it != jolt_->chunkSignatures.end();) {
+        if (incoming.find(it->first) == incoming.end()) {
+            jolt_->removeChunkBody(it->first);
+            it = jolt_->chunkSignatures.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    {
+        std::ostringstream os;
+        os << "静态碰撞体同步：方块=" << state_.colliders().size()
+           << " chunk=" << incoming.size()
+           << " 重建=" << rebuilt << " 移除=" << removed
+           << " 耗时=" << ms << "ms";
+        ENGINE_LOG_INFO("Physics", os.str());
+    }
+}
+
+// 重建一个 chunk 的静态形状：该 chunk 内所有方块各成一个盒子，合成一个复合形状。
+// v1 取舍：整 chunk 重建（1024 个盒子），放置/破坏是低频操作，先要正确；
+// 将来要优化就换 MutableCompoundShape 的增删接口。
+void PhysicsWorld::rebuildChunkStatic(int chunkX, int chunkY, int chunkZ) {
+    const engine::shared::ChunkPos cp{chunkX, chunkY, chunkZ};
+    jolt_->removeChunkBody(cp);
+
+    const int bx = chunkX << 4, by = chunkY << 4, bz = chunkZ << 4;
+    JPH::StaticCompoundShapeSettings compound;
+    // 所有方块都是同一个 0.5³ 盒子 → 共用一份 BoxShapeSettings（省掉每块一次分配）。
+    // 盒子设置必须堆分配并被 Ref 托管：AddShape 会加引用计数，栈对象会在计数归零前析构
+    //（Jolt Reference.h 会断言）。
+    JPH::RefConst<JPH::ShapeSettings> box =
+        new JPH::BoxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+    int boxCount = 0;
+    for (int x = bx; x < bx + 16; ++x) {
+        for (int y = by; y < by + 16; ++y) {
+            for (int z = bz; z < bz + 16; ++z) {
+                const auto it = state_.colliders().find(engine::shared::BlockPos{x, y, z});
+                if (it == state_.colliders().end()) continue;
+                compound.AddShape(
+                    JPH::Vec3(static_cast<float>(x) + 0.5f,
+                              static_cast<float>(y) + 0.5f,
+                              static_cast<float>(z) + 0.5f),
+                    JPH::Quat::sIdentity(), box.GetPtr());
+                ++boxCount;
+            }
+        }
+    }
+    if (boxCount == 0) return;   // 空 chunk 不建刚体（与"空 chunk 不占内存"一致）
+
+    JPH::ShapeSettings::ShapeResult result = compound.Create();
+    if (result.HasError()) {
+        ENGINE_LOG_ERROR("Physics", std::string("chunk 静态形状创建失败：") + result.GetError().c_str());
+        return;
+    }
+    JPH::BodyCreationSettings settings(
+        result.Get(), JPH::RVec3::sZero(), JPH::Quat::sIdentity(),
+        JPH::EMotionType::Static, kObjLayerNonMoving);
+    jolt_->chunkBodies[cp] =
+        jolt_->system.GetBodyInterface().CreateAndAddBody(settings, JPH::EActivation::DontActivate);
+    // 记录该 chunk 的方块集合签名（放置/破坏与全量同步共用这一份，保证比较基准一致）
+    jolt_->chunkSignatures[cp] = chunkSignature(chunkX, chunkY, chunkZ);
+}
+
+// 一个 chunk 内方块集合的签名：与顺序无关（逐块散列后累加）。
+// 用途：全量同步时判断"这个 chunk 的方块到底变了没有"，避免无谓重建。
+std::uint64_t PhysicsWorld::chunkSignature(int chunkX, int chunkY, int chunkZ) const {
+    std::uint64_t sum = 0;
+    const int bx = chunkX << 4, by = chunkY << 4, bz = chunkZ << 4;
+    for (int x = bx; x < bx + 16; ++x) {
+        for (int y = by; y < by + 16; ++y) {
+            for (int z = bz; z < bz + 16; ++z) {
+                const auto it = state_.colliders().find(engine::shared::BlockPos{x, y, z});
+                if (it == state_.colliders().end()) continue;
+                sum += blockHash(engine::shared::Block{it->second, {x, y, z}});
+            }
+        }
+    }
+    return sum;
+}
+
+void PhysicsWorld::stepJolt() {
+    if (!jolt_) return;
+    // 没有动态刚体时跳过推进：静态世界不需要模拟。
+    // 现在（3c-1）玩家与刚体还没进 Jolt，表里全是静态 chunk 形状 ——
+    // 每 tick 走一遍 broadphase/island 是纯开销（实测把 tps 从 24.99 压到 24.81）。
+    // 玩家（CharacterVirtual）与刚体（Dynamic）接上后这个守卫自然失效、恢复推进。
+    if (jolt_->system.GetNumActiveBodies(JPH::EBodyType::RigidBody) == 0) return;
+    // 固定步长 25Hz + 2 次碰撞子步（与《未来方向-物理内核替换为Jolt》§六 一致）
+    jolt_->system.Update(0.04f, 2, &jolt_->tempAllocator, &jolt_->jobSystem);
 }
 
 void PhysicsWorld::onPlaceBlock(const engine::shared::PhysicsCommand& cmd) {
@@ -120,6 +315,8 @@ void PhysicsWorld::onPlaceBlock(const engine::shared::PhysicsCommand& cmd) {
     const engine::shared::BlockPos p{cmd.x, cmd.y, cmd.z};
     if (cmd.contraptionId < 0) {
         state_.colliders()[p] = static_cast<engine::shared::BlockType>(cmd.blockType);
+        const auto cp = engine::shared::toChunkOf(p);
+        rebuildChunkStatic(cp.x, cp.y, cp.z);   // Jolt 侧同步：只重建这个 chunk
         return;
     }
     PhysicsBody* it = state_.findBodyByStructure(cmd.contraptionId);
@@ -136,6 +333,8 @@ void PhysicsWorld::onRemoveBlock(const engine::shared::PhysicsCommand& cmd) {
     const engine::shared::BlockPos p{cmd.x, cmd.y, cmd.z};
     if (cmd.contraptionId < 0) {
         state_.colliders().erase(p);
+        const auto cp = engine::shared::toChunkOf(p);
+        rebuildChunkStatic(cp.x, cp.y, cp.z);   // Jolt 侧同步：只重建这个 chunk
         return;
     }
     PhysicsBody* it = state_.findBodyByStructure(cmd.contraptionId);
@@ -165,6 +364,12 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
     body.qx = 0.0f; body.qy = 0.38268343f; body.qz = 0.0f; body.qw = 0.92387953f;
     body.blocks = cmd.blocks; // 局部坐标 = 世界坐标（刚体建在原点 0）
     for (const auto& b : cmd.blocks) state_.colliders().erase(b.pos);
+    // Jolt 侧同步：这些方块从静态世界移出 → 重建受影响的 chunk 形状
+    {
+        std::unordered_set<engine::shared::ChunkPos> touched;
+        for (const auto& b : cmd.blocks) touched.insert(engine::shared::toChunkOf(b.pos));
+        for (const auto& cp : touched) rebuildChunkStatic(cp.x, cp.y, cp.z);
+    }
     // 碰撞箱不再手算：Jolt 接入时由 MutableCompoundShape 的 AddShape 生成。
     state_.bodies().push_back(body);
     state_.bindStructure(body.structureId, body.bodyId);
@@ -203,6 +408,12 @@ void PhysicsWorld::onUnpackContraption(const engine::shared::PhysicsCommand& cmd
     }
     bodyCount_.store(static_cast<long long>(state_.bodies().size()),
                      std::memory_order_relaxed);
+    // Jolt 侧同步：方块回到静态世界 → 重建受影响的 chunk 形状
+    {
+        std::unordered_set<engine::shared::ChunkPos> touched;
+        for (const auto& b : worldBlocks) touched.insert(engine::shared::toChunkOf(b.pos));
+        for (const auto& cp : touched) rebuildChunkStatic(cp.x, cp.y, cp.z);
+    }
     engine::shared::PhysicsResult r;
     r.type = engine::shared::PhysicsResult::Type::ContraptionUnpacked;
     r.contraptionId = cmd.contraptionId;
