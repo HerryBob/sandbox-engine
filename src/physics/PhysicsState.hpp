@@ -35,7 +35,7 @@ struct PhysicsBody {
     std::vector<engine::shared::Block> blocks;
     // 碰撞体半宽 / 中心偏移（相对基准）。
     // 求解器删除后这两组字段不再是"手工 AABB"：
-    //   - 生物：作为 CapsuleShape 的尺寸（装配期由 addPlayerBody 传入）
+    //   - 生物：作为 BoxShape 的半尺寸（装配期由 addPlayerBody 传入）
     //   - 刚体：Jolt 的 compound shape 自己算，这两组字段届时可删
     double halfExtentX = 0.0, halfExtentY = 0.0, halfExtentZ = 0.0;
     double centerOffsetX = 0.0, centerOffsetY = 0.0, centerOffsetZ = 0.0;

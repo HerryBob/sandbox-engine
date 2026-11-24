@@ -255,9 +255,9 @@ static void printPaletteStats(engine::business::World& world) {
 // 加玩家物理体：碰撞箱半宽/半高/半深与跳跃初速取自实体类型定义（缺失时退回 MC 口径默认）。
 static void addPlayerPhysicsBody(engine::physics::PhysicsWorld& physics,
                                  const engine::modhost::EntityTypeInfo* playerType) {
-    const double halfX = (playerType ? playerType->width : 0.6) * 0.5;
+    const double halfX = (playerType ? playerType->width : 0.8) * 0.5;
     const double halfY = (playerType ? playerType->height : 1.8) * 0.5;
-    const double halfZ = (playerType ? playerType->depth : 0.6) * 0.5;
+    const double halfZ = (playerType ? playerType->depth : 0.8) * 0.5;
     const double jump  = (playerType ? playerType->jumpSpeed : 4.9);
     physics.addPlayerBody(0.0, 8.0, 0.0, halfX, halfY, halfZ, jump);
     std::cout << "玩家碰撞箱：半宽=" << halfX << " 半高=" << halfY << " 半深=" << halfZ

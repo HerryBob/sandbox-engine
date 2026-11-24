@@ -14,7 +14,6 @@
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
-#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
@@ -115,12 +114,23 @@ struct JoltBackend {
     void removeAllChunkBodies() {
         for (const auto& [cp, id] : chunkBodies) system.GetBodyInterface().RemoveBody(id);
         chunkBodies.clear();
+        chunkSignatures.clear();   // 签名与 body 同生共死；不清理会让下次同步误判"未变"而跳过重建
     }
     void removeContraptionBody(int structureId) {
         const auto it = contraptionBodies.find(structureId);
         if (it == contraptionBodies.end()) return;
         system.GetBodyInterface().RemoveBody(it->second);
         contraptionBodies.erase(it);
+    }
+
+    // Jolt 要求 PhysicsSystem 析构前所有刚体已移除，否则 BodyManager 的析构断言触发 __debugbreak。
+    // player 不是刚体，但内部持 Shape 引用且依赖 system 的查询接口，先释放。
+    ~JoltBackend() {
+        player = nullptr;
+        removeAllChunkBodies();
+        for (const auto& entry : contraptionBodies)
+            system.GetBodyInterface().RemoveBody(entry.second);
+        contraptionBodies.clear();
     }
 };
 
@@ -140,7 +150,7 @@ int PhysicsWorld::addPlayerBody(double x, double y, double z,
                                 double jumpSpeed) {
     // 生物体：运动学，位置锚在脚底中心。
     // 形状与跳跃初速来自实体类型定义（经装配层传入），本文件不写死某个生物的尺寸。
-    // 尺寸存进 halfExtent（Jolt 接入后作为 CapsuleShape 的参数）；
+    // 尺寸存进 halfExtent（作为 BoxShape 的半尺寸）；
     // centerOffsetY = 半高，让"基准 y = 脚底"成立。
     PhysicsBody b;
     b.bodyId = state_.allocateBodyId();
@@ -160,19 +170,18 @@ int PhysicsWorld::addPlayerBody(double x, double y, double z,
     bodyCount_.store(static_cast<long long>(state_.bodies().size()), std::memory_order_relaxed);
     state_.setPlayerBodyId(b.bodyId);
 
-    // Jolt 侧：角色用**胶囊**而不是盒子。
-    // 方块地形下盒子的四个直角会卡在方块棱上，表现为"走一步被弹回半步"
-    // （实测逐 tick 位移在 ±0.1 之间来回翻号）。胶囊没有直角，沿地形滑动时不会卡。
-    // 尺寸映射：碰撞箱 0.6×1.8×0.6 → 半径 0.3、圆柱半高 0.6（总高 2*(0.6+0.3)=1.8）。
-    const float radius   = static_cast<float>(std::min(halfExtentX, halfExtentZ));
-    const float cylHalf  = static_cast<float>(halfExtentY) - radius;
-    JPH::RefConst<JPH::Shape> shape = new JPH::CapsuleShape(
-        cylHalf > 0.0f ? cylHalf : 0.0f, radius);
+    // Jolt 侧：长方体碰撞箱，尺寸直接来自实体定义（宽×高×深 = 0.8×1.8×0.8）。
+    // 盒子带直角，在方块拼缝上滑动会被 ghost contact 绊住 —— 靠 mEnhancedInternalEdgeRemoval 缓解。
+    JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(JPH::Vec3(
+        static_cast<float>(halfExtentX),
+        static_cast<float>(halfExtentY),
+        static_cast<float>(halfExtentZ)));
     JPH::Ref<JPH::CharacterVirtualSettings> settings = new JPH::CharacterVirtualSettings();
     settings->mShape = shape;
     settings->mMaxSlopeAngle = JPH::DegreesToRadians(45.0f);
     settings->mMaxStrength = 100.0f;
     settings->mShapeOffset = JPH::Vec3::sZero();
+    settings->mEnhancedInternalEdgeRemoval = true;
     jolt_->player = new JPH::CharacterVirtual(
         settings, JPH::RVec3(x, y + halfExtentY, z), JPH::Quat::sIdentity(), &jolt_->system);
     return b.bodyId;
@@ -199,14 +208,8 @@ void PhysicsWorld::tick(double scale, double wallDt,
         drainPendingChunkRebuilds();   // 每 tick 只重建 1 个待处理 chunk（预算式）
         stepJolt();            // 推进 Dynamic 刚体（无动态体时内部直接跳过）
         syncContraptionPoses();// Jolt 位姿 → 数据体（渲染与回执都读数据体）
-        // 玩家本 tick 的**起点**：必须在推进之前取。
-        // （曾经在推进之后取，导致 prev == curr，插值退化成"直接画最新 25Hz 采样"→ 看见阶梯。）
-        double prevPX = 0.0, prevPY = 0.0, prevPZ = 0.0;
-        if (const PhysicsBody* pb = state_.findBodyById(state_.playerBodyId())) {
-            prevPX = pb->x; prevPY = pb->y; prevPZ = pb->z;
-        }
         stepPlayer(0.04);      // 推进玩家角色（CharacterVirtual）
-        snapshotPlayerBody(wallDt, prevPX, prevPY, prevPZ);
+        snapshotPlayerBody(wallDt);   // 推一条快照进模拟时间轴环（历史在环里，不需 prev）
 
         // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
         simTime_.store(simTime_.load(std::memory_order_relaxed) + 0.04,
@@ -638,19 +641,11 @@ void PhysicsWorld::onUnpackContraption(const engine::shared::PhysicsCommand& cmd
     pendingReceipts_.push_back(r);
 }
 
-void PhysicsWorld::snapshotPlayerBody(double wallDt, double prevX, double prevY, double prevZ) {
-    // prevX/Y/Z = 本 tick 推进**之前**的玩家位置（调用方在 stepPlayer 之前取好）。
+void PhysicsWorld::snapshotPlayerBody(double wallDt) {
     for (auto& b : state_.bodies()) {
         if (b.motion != MotionType::Kinematic) continue;
         const bool   isPlayerBody = (b.bodyId == state_.playerBodyId() && playerState_ != nullptr);
-        const double tickStartX = prevX;
-        const double tickStartY = prevY;
-        const double tickStartZ = prevZ;
         // 玩家位置回传（相机跟随 + 实体位姿）：只写共享槽，不占业务结果队列。
-        // 一次成组写入 prev（本 tick 起点）/ curr（本 tick 终点）/ tick 起点时刻，
-        // 整组用 seqlock 包住：读侧要么拿到同一 tick 的一对值，要么重试。
-        // tickStartNs 取此刻：写完之后 alpha 从 0 涨到 1，正好滑到下一 tick 覆盖前，
-        // 即标准的"画面比物理慢一个 tick"。
         if (isPlayerBody) {
             auto& st = *playerState_;
             const long long nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -684,7 +679,11 @@ void PhysicsWorld::snapshotPlayerBody(double wallDt, double prevX, double prevY,
 
             // 推一条快照进三槽环（环 + 到达时刻由 seqlock 成组保护）。
             // 渲染侧按 now - 1.5*tick 在两份旧快照之间插值（见 PlayerBodyState.hpp）。
-            st.push(b.x, b.y, b.z, nowNs, durNs);
+            // 模拟时刻：每 tick 固定前进 40ms（不随 scale 变）。
+            // 插值按这个时间轴排布 —— 与"快照到达的墙钟"无关（到达间隔会抖 26~52ms）。
+            const double simMs = static_cast<double>(tickCount_.load(std::memory_order_relaxed) + 1)
+                                 * engine::shared::PlayerBodyState::kStepSimMs;
+            st.push(b.x, b.y, b.z, simMs, durNs);
             lastPlayerStateWriteNs_ = nowNs;
         }
     }

@@ -37,10 +37,10 @@ public:
         def.model      = "assets/models/entity/PlayerModel.bbmodel";
         def.texture    = "assets/textures/entity/Player.png";
 
-        // 碰撞箱与现有物理一致（原 main.cpp / PhysicsWorld.cpp 的硬编码值）
-        def.width      = 0.6f;
+        // 碰撞箱：长方体 0.8×1.8×0.8，与 PhysicsWorld 的 BoxShape 直接对应
+        def.width      = 0.8f;
         def.height     = 1.8f;
-        def.depth      = 0.6f;
+        def.depth      = 0.8f;
         def.eyeHeight  = 1.62f;
         def.moveSpeed  = 4.3f;
         def.jumpSpeed  = 4.9f;
