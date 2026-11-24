@@ -1,7 +1,7 @@
 ﻿# smoke baseline
-selftest=7
-tps_physics=24.9941
-tps_business=24.8244
+selftest=8
+tps_physics=24.993
+tps_business=24.8475
 blocks=82944
 chunks=81
 warmup_requested=81
