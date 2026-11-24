@@ -554,8 +554,8 @@ static int run(const std::string& presetName) {
             // 玩家模型位姿：直读共享槽（原子）。位置语义 = 脚底中心，与模型原点一致。
             // playerEntityId 由装配层按类型名解析；-1 表示没有玩家实体，跳过。
             if (playerEntityId > 0 && playerBodyState.valid.load(std::memory_order_relaxed)) {
-                // 插值读：模型位置必须与相机取同一个插值结果。否则两者错开一拍，
-                // 第三人称下会看到"相机平滑、角色仍在 40ms 一跳"的相对运动，反而更刺眼。
+                // 插值读：MC 同款 —— 由本地单调时钟算出浮点 tick 号，不需要"推进时钟"。
+                // 模型与相机取同一个插值结果，否则两者错开一拍会看到相对的抖动。
                 double px = 0.0, py = 0.0, pz = 0.0;
                 playerBodyState.readInterpolated(px, py, pz);
 

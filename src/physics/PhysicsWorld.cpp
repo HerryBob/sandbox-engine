@@ -656,34 +656,22 @@ void PhysicsWorld::snapshotPlayerBody(double wallDt) {
             //   原始实测间隔（26~52ms 抖）→ 渲染速度忽快忽慢（逐帧位移 0.01~0.15 乱跳）
             //   标称 0.04/scale（恒定 40ms）→ 实际 tick 间隔 42~48ms 时 alpha 提前顶到 1
             //     并钳住（实测 min=0 的帧），下一 tick 再跳一次（max=2.4×avg）
-            // EMA 折中：收敛到真实平均间隔、又不会被单次抖动带偏。
-            long long durNs = 0;
-            {
-                const double physScale = tm_.effectiveScale(engine::core::Domain::Physics);
-                const long long nominal = static_cast<long long>(
-                    0.04 / (physScale > 1e-6 ? physScale : 1.0) * 1e9);
-                if (lastPlayerStateWriteNs_ > 0 && nowNs > lastPlayerStateWriteNs_) {
-                    const long long measured = nowNs - lastPlayerStateWriteNs_;
-                    // 限幅：离标称太远时不信这一次（避免偶发长帧把 EMA 拖走）
-                    if (measured > nominal / 2 && measured < nominal * 2) {
-                        tickIntervalEmaNs_ = (tickIntervalEmaNs_ == 0.0)
-                            ? static_cast<double>(measured)
-                            : 0.9 * tickIntervalEmaNs_ + 0.1 * static_cast<double>(measured);
-                    }
-                }
-                if (tickIntervalEmaNs_ == 0.0) {
-                    tickIntervalEmaNs_ = static_cast<double>(nominal);
-                }
-                durNs = static_cast<long long>(tickIntervalEmaNs_);
-            }
+            // 每 tick 的墙钟周期：**常量**（0.04/scale），不是实测间隔的 EMA。
+            // 为什么必须常量：渲染端算 renderTick = (now - origin) / step。
+            // 若 step 每 tick 都在变，运行 10 秒后哪怕 step 抖 0.2ms，
+            // renderTick 也会跳 ~50ms —— 抖动幅度反而被放大（实测"幅度变大"）。
+            // MC 的 tickLength 也是常量（50ms），同理。
+            const double physScale = tm_.effectiveScale(engine::core::Domain::Physics);
+            const long long durNs = static_cast<long long>(
+                0.04 / (physScale > 1e-6 ? physScale : 1.0) * 1e9);
 
-            // 推一条快照进三槽环（环 + 到达时刻由 seqlock 成组保护）。
-            // 渲染侧按 now - 1.5*tick 在两份旧快照之间插值（见 PlayerBodyState.hpp）。
-            // 模拟时刻：每 tick 固定前进 40ms（不随 scale 变）。
-            // 插值按这个时间轴排布 —— 与"快照到达的墙钟"无关（到达间隔会抖 26~52ms）。
-            const double simMs = static_cast<double>(tickCount_.load(std::memory_order_relaxed) + 1)
-                                 * engine::shared::PlayerBodyState::kStepSimMs;
-            st.push(b.x, b.y, b.z, simMs, durNs);
+            // 推一条快照（位置 + 整数 tick 号 + 每 tick 墙钟周期）。
+            // 时间轴由渲染端用本地单调时钟自己算（MC 的 Timer 模型），
+            // 不依赖"这条快照什么时候到达"。
+            // MC 同款：只发布"整数 tick 号 + 每 tick 墙钟周期"，时间轴由渲染端自己算。
+            const std::int64_t tickNo =
+                tickCount_.load(std::memory_order_relaxed) + 1;
+            st.push(b.x, b.y, b.z, tickNo, durNs);
             lastPlayerStateWriteNs_ = nowNs;
         }
     }

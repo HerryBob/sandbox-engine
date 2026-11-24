@@ -2,67 +2,96 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 
 namespace engine::shared {
 
-// 玩家体状态（共享槽）：物理线程每 tick 写，输入线程与渲染线程插值读。
-// 位置语义与 PhysicsBody 一致：脚底中心，眼高偏移由读取方自行叠加。
+// 玩家体状态（共享槽）：物理线程每 tick 写快照，输入/渲染线程按**本地单调时钟**插值。
 //
-// 为什么需要插值：物理是固定步长（dt = 0.04 秒，25Hz），而渲染约 165Hz。
+// 设计照搬 Minecraft 的 Timer 模型（net.minecraft.client.Timer / DeltaTracker.Timer）：
+//   物理线程只发布"整数 tick 号 + 时间原点 + 每 tick 周期"；
+//   渲染端用**自己的单调时钟**算：
+//       renderTick = (now - originNs) / stepNs - kDelayTicks
+//       alpha      = frac(renderTick)
+//   再取 tick = floor(renderTick) 与 floor+1 两条快照插值。
 //
-// **关键：插值参数必须用「模拟时间」，不能用「快照到达的墙钟时刻」。**
-//   物理每 tick 恒定前进 0.04s，但 tick 到达墙钟的间隔会抖（实测 26~52ms）。
-//   若按到达时刻插值：间隔 26ms 的那一段走完同样一个 tick 的位移 → 视觉上走快了 1.5 倍，
-//   间隔 52ms 的那一段则走慢 —— 这就是"持续小抖动"的真正来源。
-//   改成按模拟时间插值后：渲染端用**自己的时钟**（每帧 += 帧dt，按 stepSim/stepWall 换算），
-//   在两份快照的模拟时刻之间取 alpha。tick 到达早晚只影响"追赶"，不影响画面速度。
+// **为什么不能把"快照到达的墙钟"当时间轴**（这是之前的错误）：
+//   物理 tick 的到达间隔实测抖在 30~48ms（累加器驱动）。按到达时刻插值，
+//   间隔 30ms 的那段要走完一个 tick 的位移 → 视觉上快 1.3 倍，48ms 则慢；
+//   而且渲染端每个 tick 都要重新锚定一次，抖动被逐次注入 → 沿运动方向来回。
+//   MC 不需要跨线程传时间，所以没有这个问题。
 //
-// 三槽环 + 延迟 1.5 tick：渲染时刻恒落后最新快照 1.5 个 tick，
-//   保证它永远落在"两份旧快照之间"，alpha 不触顶（触顶会产生"短帧"）。
-//   代价：固定 ~60ms 视觉延迟（单机沙盒无感）。这是 MC partialTicks 的同一思路。
+// 延迟 kDelayTicks：渲染进度落后最新 tick 若干个，保证"要插值的那两帧已经收到"。
+//   2.5 tick ≈ 100ms（单机沙盒无感），足以吸收 ±10ms 的 tick 到达抖动。
 struct PlayerBodyState {
-    static constexpr int kRingSize = 3;
-    static constexpr double kStepSimMs = 40.0;   // 每 tick 模拟前进 40ms（固定，不随 scale 变）
+    static constexpr int    kRingSize   = 5;      // 需覆盖 [tick-3, tick] 范围
+    static constexpr double kStepSimMs  = 40.0;   // 每 tick 模拟前进 40ms（固定）
+    static constexpr double kDelayTicks = 2.5;    // 渲染落后最新 tick 的个数
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
                   "PlayerBodyState requires lock-free atomic<uint64_t>");
 
-    // 环形缓冲：位置 + 该快照对应的**模拟时刻**（毫秒）
-    std::atomic<double>      ringX[kRingSize] = {};
-    std::atomic<double>      ringY[kRingSize] = {};
-    std::atomic<double>      ringZ[kRingSize] = {};
-    std::atomic<double>      ringSimMs[kRingSize] = {};
-    std::atomic<int>         newestIdx{0};
-    std::atomic<int>         ringCount{0};
-    // 该 tick 的**墙钟**周期（纳秒）：只用来把"帧 dt"换算成"模拟时间增量"。
-    // scale≠1 时它 ≠ 40ms（周期 = 0.04/scale）。
-    std::atomic<std::int64_t> stepWallNs{0};
-    std::atomic<std::uint64_t> seq{0};
+    // 环形缓冲：位置 + 该快照的**整数 tick 号**
+    std::atomic<double>       ringX[kRingSize] = {};
+    std::atomic<double>       ringY[kRingSize] = {};
+    std::atomic<double>       ringZ[kRingSize] = {};
+    std::atomic<std::int64_t> ringTick[kRingSize] = {};
+    std::atomic<int>          newestIdx{0};
+    std::atomic<int>          ringCount{0};
 
-    // 朝向（弧度，累加不清零，yaw = 0 时前方向朝 -Z，与相机 yaw 同一约定）。
-    // 读侧直接取最新值、不插值（鼠标本身就是每帧连续更新的）。
+    // 时间基准（物理线程首次写入时定一次，之后不变）
+    std::atomic<std::int64_t> originNs{0};        // tick 0 的墙钟时刻
+    std::atomic<std::int64_t> stepNs{0};          // 每 tick 的墙钟周期（0.04/scale 秒）
+    // 安全重锚计数：物理侧发现渲染进度落后太多（丢过欠账）时 +1，渲染侧据此重建映射
+    std::atomic<int>          epoch{0};
+
+    std::atomic<std::uint64_t> seq{0};
     std::atomic<double> yaw{0.0};
     std::atomic<bool>   valid{false};
 
-    // 写入一条快照（物理线程，单写者）。
-    // simMs：本 tick 结束时的模拟时刻（毫秒）；wallNs：本 tick 的墙钟周期（纳秒）。
-    void push(double x, double y, double z, double simMs, std::int64_t wallNs) {
+    // 写入一条快照（物理线程，单写者）。tick 从 1 开始单调递增。
+    void push(double x, double y, double z, std::int64_t tick, std::int64_t stepWallNs) {
         const std::uint64_t s = seq.load(std::memory_order_relaxed);
         seq.store(s + 1, std::memory_order_release);
+        // 时间原点：正常情况**不动**（避免把 tick 到达抖动引进来）；
+        // 只有出现"系统性偏差"时才重锚一次 —— 例如启动补跑让 tickCount 比墙钟超前几百 ms，
+        // 那种偏差一旦产生会永久存在，渲染端请求的 tick 就永远落在环外（实测超前 10 个 tick
+        // → 每帧都走兜底分支 → 冻结几帧再跳）。
+        {
+            const std::int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const std::int64_t cand = nowNs - stepWallNs * tick;
+            const std::int64_t cur = originNs.load(std::memory_order_relaxed);
+            if (cur == 0) {
+                originNs.store(cand, std::memory_order_relaxed);   // 首条：直接定
+            } else {
+                // 连续小步校正：每 tick 把 origin 朝 cand 挪 5%。
+                // 不用"超阈值就跳"——那样 origin 会突然跳 200ms（=5 个 tick），
+                // 渲染端的 pair 跟着跳，抖动幅度反而变大（实测）。
+                // 5%/tick ⇒ 启动时的错位 ~10 tick 在 1 秒内平滑收敛，过程中只表现为
+                // 极轻微的速度偏差（0.05 tick/tick），看不出来。
+                const std::int64_t diff = cand - cur;
+                originNs.store(cur + static_cast<std::int64_t>(
+                    static_cast<double>(diff) * 0.05), std::memory_order_relaxed);
+            }
+        }
         const int idx = (newestIdx.load(std::memory_order_relaxed) + 1) % kRingSize;
         ringX[idx].store(x, std::memory_order_relaxed);
         ringY[idx].store(y, std::memory_order_relaxed);
         ringZ[idx].store(z, std::memory_order_relaxed);
-        ringSimMs[idx].store(simMs, std::memory_order_relaxed);
+        ringTick[idx].store(tick, std::memory_order_relaxed);
         newestIdx.store(idx, std::memory_order_relaxed);
         const int cnt = ringCount.load(std::memory_order_relaxed);
         if (cnt < kRingSize) ringCount.store(cnt + 1, std::memory_order_relaxed);
-        stepWallNs.store(wallNs, std::memory_order_relaxed);
+        stepNs.store(stepWallNs, std::memory_order_relaxed);
         seq.store(s + 2, std::memory_order_release);
         valid.store(true, std::memory_order_relaxed);
     }
 
-    // 插值读取：渲染时刻 = 本线程时钟（模拟时间域），落后最新快照 1.5 tick。
+    // 渲染端：请求"重锚"（物理丢过欠账 / 时钟漂移过大时）。
+    void requestReanchor() { epoch.fetch_add(1, std::memory_order_relaxed); }
+
+    // 插值读取（输入/渲染线程）：纯本地单调时钟，不依赖快照到达时刻。
     void readInterpolated(double& ox, double& oy, double& oz) const {
         if (!valid.load(std::memory_order_relaxed)) {
             ox = 0.0; oy = 0.0; oz = 0.0;
@@ -71,11 +100,11 @@ struct PlayerBodyState {
         const std::int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
 
-        double  xs[kRingSize], ys[kRingSize], zs[kRingSize], sims[kRingSize];
+        double  xs[kRingSize], ys[kRingSize], zs[kRingSize];
+        std::int64_t ticks[kRingSize];
         int newest = 0, count = 0;
-        std::int64_t wallStep = 0;
+        std::int64_t origin = 0, step = 0;
 
-        // ---- 环形数据（seqlock 成组读）----
         bool ok = false;
         for (int attempt = 0; attempt < 4 && !ok; ++attempt) {
             const std::uint64_t s0 = seq.load(std::memory_order_acquire);
@@ -84,61 +113,61 @@ struct PlayerBodyState {
                 xs[i] = ringX[i].load(std::memory_order_relaxed);
                 ys[i] = ringY[i].load(std::memory_order_relaxed);
                 zs[i] = ringZ[i].load(std::memory_order_relaxed);
-                sims[i] = ringSimMs[i].load(std::memory_order_relaxed);
+                ticks[i] = ringTick[i].load(std::memory_order_relaxed);
             }
-            newest = newestIdx.load(std::memory_order_relaxed);
-            count  = ringCount.load(std::memory_order_relaxed);
-            wallStep = stepWallNs.load(std::memory_order_relaxed);
+            newest  = newestIdx.load(std::memory_order_relaxed);
+            count   = ringCount.load(std::memory_order_relaxed);
+            origin  = originNs.load(std::memory_order_relaxed);
+            step    = stepNs.load(std::memory_order_relaxed);
             std::atomic_thread_fence(std::memory_order_acquire);
             if (s0 == seq.load(std::memory_order_acquire)) ok = true;
         }
-        if (!ok) {   // 连续撞写窗口：退回最新值（宁可抖一下，不给错位置）
+        if (!ok) {
             ox = ringX[newest].load(std::memory_order_relaxed);
             oy = ringY[newest].load(std::memory_order_relaxed);
             oz = ringZ[newest].load(std::memory_order_relaxed);
             return;
         }
-
-        // ---- 本线程的渲染时钟（模拟时间域，毫秒）----
-        // 每帧按"帧 dt × (stepSim/stepWall)"推进 —— 与 tick 到达时刻无关。
-        static thread_local double renderSimMs = -1.0;
-        static thread_local std::int64_t lastCallNs = 0;
-        const double newestSim = sims[newest];
-        const double wallStepMs = (wallStep > 0) ? wallStep / 1e6 : kStepSimMs;
-        const double rate = (wallStepMs > 0.01) ? (kStepSimMs / wallStepMs) : 1.0;
-        if (renderSimMs < 0.0) {
-            renderSimMs = newestSim - 1.5 * kStepSimMs;      // 首次：直接落后 1.5 tick
-        } else if (lastCallNs > 0) {
-            const double dtWallMs = (nowNs - lastCallNs) / 1e6;
-            renderSimMs += dtWallMs * rate;
-        }
-        lastCallNs = nowNs;
-
-        // ---- 夹紧：落后太多就对齐；领先就压住（不外推）----
-        if (renderSimMs < newestSim - 1.9 * kStepSimMs) {
-            renderSimMs = newestSim - 1.5 * kStepSimMs;
-        }
-        if (renderSimMs > newestSim - 0.2 * kStepSimMs) {
-            renderSimMs = newestSim - 0.2 * kStepSimMs;
+        if (origin <= 0 || step <= 0 || count <= 0) {
+            ox = xs[newest]; oy = ys[newest]; oz = zs[newest];
+            return;
         }
 
-        // ---- 在环里找夹住 renderSimMs 的相邻两帧（按模拟时刻）----
-        for (int k = 0; k + 1 < count; ++k) {
-            const int i = (newest - k + kRingSize) % kRingSize;          // 新 → 旧
-            const int j = (newest - k - 1 + kRingSize) % kRingSize;      // 更旧
-            if (sims[j] <= renderSimMs && renderSimMs <= sims[i]) {
-                const double span = sims[i] - sims[j];
-                double alpha = (span > 1e-9) ? (renderSimMs - sims[j]) / span : 1.0;
-                alpha = std::clamp(alpha, 0.0, 1.0);
-                ox = xs[j] + (xs[i] - xs[j]) * alpha;
-                oy = ys[j] + (ys[i] - ys[j]) * alpha;
-                oz = zs[j] + (zs[i] - zs[j]) * alpha;
-                return;
-            }
+        // ---- MC 同款：本地单调时钟 → 浮点 tick 号 ----
+        const double tickNow = static_cast<double>(nowNs - origin) / static_cast<double>(step);
+        const double renderTick = tickNow - kDelayTicks;
+        const std::int64_t baseTick = static_cast<std::int64_t>(std::floor(renderTick));
+        const double alpha = std::clamp(renderTick - static_cast<double>(baseTick), 0.0, 1.0);
+
+        // ---- 在环里找 tick == baseTick 与 baseTick+1 ----
+        int i0 = -1, i1 = -1;
+        for (int k = 0; k < count; ++k) {
+            const int i = (newest - k + kRingSize) % kRingSize;
+            if (ticks[i] == baseTick) i0 = i;
+            if (ticks[i] == baseTick + 1) i1 = i;
         }
-        // 兜底：渲染时刻落在环外（首帧/长暂停）→ 用最旧与最新之间插值
-        const int oldest = (newest - count + 1 + kRingSize) % kRingSize;
-        ox = xs[oldest]; oy = ys[oldest]; oz = zs[oldest];
+        if (i0 >= 0 && i1 >= 0) {
+            ox = xs[i0] + (xs[i1] - xs[i0]) * alpha;
+            oy = ys[i0] + (ys[i1] - ys[i0]) * alpha;
+            oz = zs[i0] + (zs[i1] - zs[i0]) * alpha;
+            return;
+        }
+        // 环里没有正好那两帧（首帧 / 刚重锚）：夹到环内最近的 tick 再插值
+        int lo = -1, hi = -1;
+        for (int k = 0; k < count; ++k) {
+            const int i = (newest - k + kRingSize) % kRingSize;
+            if (ticks[i] <= baseTick && (lo < 0 || ticks[i] > ticks[lo])) lo = i;
+            if (ticks[i] >= baseTick + 1 && (hi < 0 || ticks[i] < ticks[hi])) hi = i;
+        }
+        if (lo >= 0 && hi >= 0 && ticks[hi] > ticks[lo]) {
+            const double a = static_cast<double>(baseTick - ticks[lo]) /
+                             static_cast<double>(ticks[hi] - ticks[lo]);
+            ox = xs[lo] + (xs[hi] - xs[lo]) * a;
+            oy = ys[lo] + (ys[hi] - ys[lo]) * a;
+            oz = zs[lo] + (zs[hi] - zs[lo]) * a;
+            return;
+        }
+        ox = xs[newest]; oy = ys[newest]; oz = zs[newest];
     }
 };
 
