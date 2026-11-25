@@ -18,8 +18,8 @@ struct ClickEvent {
     // 将来若支持鼠标指针选块，这里要加屏幕坐标与视口信息。
 };
 
-// 玩家点击输入：输入线程（GLFW 鼠标回调）push，业务线程 pop 逐条消费。
-// 相机状态已拆到 CameraState（输入线程写，渲染/业务只读）。
+// 玩家点击输入：GLFW 鼠标回调（main 线程）push，业务线程 pop 逐条消费。
+// 相机状态已拆到 CameraState（渲染线程写，渲染/业务只读）。
 struct PlayerInput {
     // B40：容量 32 是"32 个事件"，底层的 SPSCQueue 内部还会多留一个哨兵槽，
     // 所以实际占用是 33 项 —— 不要按 32 去算内存或边界。
@@ -30,20 +30,20 @@ struct PlayerInput {
     PlayerInput(const PlayerInput&) = delete;
     PlayerInput& operator=(const PlayerInput&) = delete;
 
-    // B42：三个 toggle* 同在一条缓存行，键盘回调（main 线程）写、输入线程读，
+    // B42：三个 toggle* 同在一条缓存行，键盘回调（main 线程）写、渲染线程读，
     // 写频率是"按键次数"，伪共享代价可忽略，不加 padding。
 
     // F3 调试浮层开关请求：键盘回调在"按下"瞬间置 true，渲染线程 exchange(false) 消费。
-    // 用请求位而不是共享 bool：输入线程只管发事件，可见性状态归渲染线程独占。
+    // 用请求位而不是共享 bool：渲染线程只管发事件，可见性状态归渲染线程独占。
     // B38：三个 toggle* 都是"置位 + 消费"语义，**不是计数器** ——
     //       同一 tick 内连按两次只会切换一次（第二次置位时已是 true），这是有意的。
     std::atomic<bool> toggleHud{ false };
 
-    // F4 相机模式切换请求（自由相机 ↔ 玩家跟随）：键盘回调置位，输入线程 exchange(false) 消费。
-    // 模式状态归输入线程独占（相机由它写），回调只发请求。
+    // F4 相机模式切换请求（自由相机 ↔ 玩家跟随）：键盘回调置位，渲染线程 exchange(false) 消费。
+    // 模式状态归渲染线程独占（相机由它写），回调只发请求。
     std::atomic<bool> togglePlayerMode{ false };
 
-    // F5 第一/第三人称切换请求（只在玩家模式下有效）：同上，回调置位、输入线程消费。
+    // F5 第一/第三人称切换请求（只在玩家模式下有效）：同上，回调置位、渲染线程消费。
     std::atomic<bool> toggleThirdPerson{ false };
 };
 

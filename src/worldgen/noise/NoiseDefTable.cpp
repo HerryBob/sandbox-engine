@@ -37,6 +37,15 @@ void loadNoiseDefs() {
     g_noiseDefs.clear();
     g_noiseDefs.load(resource::ResourceKind::Data, "worldgen/noise", ".json",
                      &decodeNoiseDef, "Data");
+
+    // 内置兜底：数据目录里没有 flat 定义时补一条。
+    // 保证删掉 mods/ 下所有 DLL 后，默认预设引用的 "flat" 仍能解析（provider 恒返回 0，
+    // 见 BuiltinNoiseTypes）。有模组提供时以模组的为准，此处不覆盖。
+    if (g_noiseDefs.find("flat") == nullptr) {
+        NoiseDef flat;
+        flat.type = "flat";
+        g_noiseDefs.add("flat", std::move(flat), "engine");
+    }
 }
 
 } // namespace engine::worldgen

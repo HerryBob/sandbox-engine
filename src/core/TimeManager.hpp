@@ -3,6 +3,8 @@
 #include <cmath>   // std::isfinite
 #include <cstddef>
 
+#include "core/AtomicGuarantees.hpp"
+
 namespace engine::core {
 
     // 全局时间缩放（time_scale）—— **整个游戏只有一条时间线**。
@@ -16,9 +18,7 @@ namespace engine::core {
     //
     // 生效对象：业务 tick 与物理 tick 的步长推进；输入/渲染完全不读（墙钟原生）。
     class TimeManager {
-        static_assert(std::atomic<double>::is_always_lock_free,
-            "TimeManager requires lock-free atomic<double>; "
-            "this platform's atomic<double> is not lock-free");
+        // 无锁原子保证见 core/AtomicGuarantees.hpp
     public:
         // B22：显式禁止拷贝/移动（原来靠 atomic 成员隐式失效）。
         TimeManager() = default;

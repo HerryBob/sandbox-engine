@@ -41,7 +41,7 @@ bool VulkanContext::init(int width, int height, const char* title) {
         return false;
     }
     glfwSetWindowUserPointer(window_, this);
-    // 键盘/鼠标回调由 input::InputSampler::attach 注册（真实输入归输入线程）。
+    // 键盘/鼠标回调由 input::InputSampler::attach 注册（输入并入渲染帧，无独立输入线程）。
     glfwSetFramebufferSizeCallback(window_, framebufferResizeCallback); // 窗口尺寸变化 → 置位重建标志
     {
         std::ostringstream os;
@@ -50,7 +50,7 @@ bool VulkanContext::init(int width, int height, const char* title) {
     }
     //注册准星
     glfwSetInputMode(window_, GLFW_CURSOR, GLFW_CURSOR_DISABLED);//禁用鼠标光标
-    // 光标基准由 input::InputSampler::attach 初始化（真实输入归输入线程）。
+    // 光标基准由 input::InputSampler::attach 初始化（输入并入渲染帧，无独立输入线程）。
 
     if (!createInstance()) return false;
     if (!createSurface()) return false;
@@ -1050,7 +1050,7 @@ bool VulkanContext::createCommandObjects() {
 // 纹理图像：staging 搬运（构建图集 → 上传显存 → 转 SHADER_READ_ONLY）
 // 图集 = 一张大纹理装所有方块小纹理（每格 16²，边长由声明条目数算出）
 bool VulkanContext::createTextureImage() {
-    if (!textureAtlas_.build()) {   // 读 assets/atlases/blocks.json → 拼图集（CPU 内存 RGBA）
+    if (!textureAtlas_.build()) {   // 自动收集纹理名 → 拼图集（CPU 内存 RGBA）
         ENGINE_LOG_ERROR("Vulkan", "图集构建失败");
         return false;
     }
@@ -1359,7 +1359,7 @@ bool VulkanContext::createSyncObjects() {
 }
 
 // 每帧从 CameraState 读相机状态 → 计算 MVP → 写 UBO。
-// 相机状态由输入线程（InputSampler）维护；本函数只读，不再处理输入。
+// 相机状态由渲染线程（每帧调 InputSampler::tick）维护；本函数只读，不再处理输入。
 void VulkanContext::updateViewProj(double /*dt*/) {
     double px = 0.0, py = 0.0, pz = 3.5, pyaw = 0.0, ppitch = 0.0;
     if (cameraState_) {
@@ -2169,7 +2169,7 @@ void VulkanContext::destroyHudResources() {
 std::size_t VulkanContext::buildHudVertices() {
     hudText_.clear();
 
-    // ---- 相机（输入线程写、这里只读）----
+    // ---- 相机（渲染线程写、这里只读）----
     double cx = 0.0, cy = 0.0, cz = 0.0, yaw = 0.0, pitch = 0.0;
     if (cameraState_) {
         cx    = cameraState_->camX.load(std::memory_order_relaxed);

@@ -64,7 +64,7 @@ public:
                       double halfExtentX, double halfExtentY, double halfExtentZ,
                       double jumpSpeed);
 
-    // 绑定玩家状态输出槽（相机跟随用）：物理线程每 tick 写玩家位置，输入线程读。
+    // 绑定玩家状态输出槽（相机跟随用）：物理线程每 tick 写玩家位置，渲染线程读。
     // 必须在物理线程启动前调用。
     void attachPlayerState(engine::shared::PlayerBodyState* out);
 

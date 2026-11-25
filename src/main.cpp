@@ -1,6 +1,6 @@
 // 沙盒引擎 · 单机入口
 // 引擎本体在 core/business/physics/input/render；本文件只做装配：
-//   Vulkan 上下文 → 进程内 SPSC 队列 → 四线程启动 → 主线程 GLFW 事件循环 → 优雅停止。
+//   Vulkan 上下文 → 进程内 SPSC 队列 → 三线程启动（业务/物理/渲染）→ 主线程 GLFW 事件循环 → 优雅停止。
 #include "core/SelfTest.hpp"
 #include "business/BusinessWorld.hpp"
 #include "business/PhysicsBridge.hpp"
@@ -44,6 +44,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -71,7 +72,7 @@ using namespace engine;
 // 玩家操作说明（输入层常量）：相机控制帮助文本。
 // 原定义在 render/VulkanContext（按键输入迁走后的遗留孤岛），按职责归位到引擎入口。
 constexpr const char* kCameraHelp =
-    "相机控制：WASD=平移 空格/左Shift=上下 鼠标左键拖动=旋转 R=重置视角\n"
+    "相机控制：WASD=平移 空格/左Shift=上下 移动鼠标=转视角 R=重置视角\n"
     "         F4=自由相机/玩家跟随切换 F5=第一人称/第三人称切换（仅玩家模式） F3=调试浮层\n";
 
 // 把工作目录切到 exe 所在目录：稳定解析 shaders/、textures/ 相对路径。
@@ -88,10 +89,10 @@ static void chdirToExeDir() {
 #endif
 }
 
-// 引擎主流程：装配四轨 → 启动 → 主线程事件循环 → 优雅停止。
+// 引擎主流程：装配三条轨 → 启动 → 主线程事件循环 → 优雅停止。
 // presetName：世界预设名（不带 .json），由启动参数 --preset 决定。
 // ============================================================================
-// run() 的五个自包含段（规则1 拆分）。
+// run() 的六个自包含段（规则1 拆分）。
 // run() 本身是装配根：绝大多数局部变量被后续阶段使用，整体参数化需要引入
 // AppContext（超出"只拆分"的范围），所以这里只抽"不产生后续依赖"的阶段。
 // ============================================================================
@@ -122,7 +123,7 @@ static void loadModsAndFreezeRegistries() {
               << " 个文件\n";
 
     //模型注册表：方块注册之后、Vulkan 初始化之前——
-    //图集 build 会读 assets/atlases/blocks.json 的纹理声明，同时核对注册表引用的纹理名
+    //图集 build 要遍历模型表的纹理槽位补纹理名，所以模型必须先烘焙好
     engine::assets::loadBlockModels();
 }
 
@@ -255,7 +256,7 @@ static void printPaletteStats(engine::business::World& world) {
                         / static_cast<double>(denseBytes)) << "%）\n";
 }
 
-// 加玩家物理体：碰撞箱半宽/半高/半深与跳跃初速取自实体类型定义（缺失时退回 MC 口径默认）。
+// 加玩家物理体：碰撞箱半宽/半高/半深与跳跃初速取自实体类型定义（缺失时退回本项目默认 0.8×1.8×0.8、跳速 4.9）。
 static void addPlayerPhysicsBody(engine::physics::PhysicsWorld& physics,
                                  const engine::modhost::EntityTypeInfo* playerType) {
     const double halfX = (playerType ? playerType->width : 0.8) * 0.5;
@@ -266,6 +267,65 @@ static void addPlayerPhysicsBody(engine::physics::PhysicsWorld& physics,
     std::cout << "玩家碰撞箱：半宽=" << halfX << " 半高=" << halfY << " 半深=" << halfZ
               << " 跳跃初速=" << jump << "\n";
 }
+
+// 帧门闩（frame gate 帧门闩）：把主线程的 GLFW 事件泵与渲染帧串成"一次 poll 对应一帧"。
+// 时序：主线程等上一帧收尾 → pollEvents（回调只写原子）→ 置 pollReady；
+//       渲染线程取走 pollReady → 渲染整帧 → 置 frameReady。
+// stopped 置真后所有等待立即返回，两边都不再互相等。
+struct FrameGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool pollReady = false;    // 有一次 poll 尚未被渲染帧取走
+    bool frameReady = true;    // 上一帧已收尾（初始 true：首轮 poll 不必等）
+    bool stopped = false;      // 已关闭，等待者应退出
+
+    // 主线程：等上一帧收尾并占位。返回 false 表示已关闭，调用方应退出循环。
+    // 超时只是防"渲染线程卡死导致主线程再也无法 poll"的死锁兜底，正常一帧约 6ms。
+    bool waitFrameConsumed() {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait_for(lock, std::chrono::milliseconds(100),
+                    [this] { return frameReady || stopped; });
+        if (stopped) return false;
+        frameReady = false;
+        return true;
+    }
+
+    // 主线程：本次 poll 完成，交给渲染线程消费。
+    void markPolled() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            pollReady = true;
+        }
+        cv.notify_all();
+    }
+
+    // 渲染线程：取走一次 poll。返回 false 表示已关闭，调用方应退出循环。
+    bool waitPoll() {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [this] { return pollReady || stopped; });
+        if (stopped) return false;
+        pollReady = false;
+        return true;
+    }
+
+    // 渲染线程：本帧收尾，通知主线程可以下一次 poll。
+    void markFrameDone() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            frameReady = true;
+        }
+        cv.notify_all();
+    }
+
+    // 关闩：唤醒所有等待者，此后 wait* 一律返回 false。
+    void shutdown() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stopped = true;
+        }
+        cv.notify_all();
+    }
+};
 
 static int run(const std::string& presetName) {
     initConsole();
@@ -332,12 +392,13 @@ static int run(const std::string& presetName) {
         }
     }
 
-    // 全局 time_scale 单实例，三条轨共享
+    // 全局 time_scale 单实例，业务/物理两条轨共享（渲染轨不参与模拟节奏）
     core::TimeManager tm;
 
     // 跨线程实体位姿表（玩家 slot 0 + 刚体按 structureId 分配）：物理每 tick 发布一帧，
     // 渲染每帧按 renderTick 查表插值。替代原来的 物理→结果队列→业务→渲染队列 两跳，
-    // 让刚体延迟从 80ms 降到 40ms，并与玩家共用同一套插值。~400KB，堆上分配。
+    // 让刚体延迟从 80ms 降到 40ms，并与玩家共用同一套插值。
+    // 6 帧环 × 2048 槽（每帧 64KB）+ id→slot 索引表，合计约 450KB，堆上分配。
     auto poseHistory = std::make_unique<engine::shared::PoseHistory>();
     // 桥（通信层）：跨线程数据唯一通道，由装配层创建并分发端点。
     //   PhysicsBridge = B1 物理指令（业务→物理）+ B2 回执（物理→业务）+ 指令状态机
@@ -346,13 +407,13 @@ static int run(const std::string& presetName) {
     business::RenderBridge  renderBridge;
 
     // 玩家输入共享槽（按职责拆分）：
-    //   CameraState：相机位置/视角（输入线程写；渲染算 MVP、业务做射线，只读）；
+    //   CameraState：相机位置/视角（渲染线程写；渲染算 MVP、业务做射线，只读）；
     //   PlayerInput ：点击事件（鼠标回调写；业务消费做 DDA）。
     shared::CameraState cameraState;
     shared::PlayerInput  playerInput;
-    // 玩家体位置（物理线程写 → 输入线程读）：F4 切到玩家模式后相机跟随它。
+    // 玩家体位置（物理线程写 → 渲染线程读）：F4 切到玩家模式后相机跟随它。
     shared::PlayerBodyState playerBodyState;
-    // 玩家操控意图（输入线程写 → 物理线程读）：玩家模式下 WASD/空格驱动玩家体。
+    // 玩家操控意图（渲染线程写 → 物理线程读）：玩家模式下 WASD/空格驱动玩家体。
     shared::PlayerControlState playerControlState;
     vkCtx.attachCameraState(&cameraState);
 
@@ -394,9 +455,9 @@ static int run(const std::string& presetName) {
     // 碰撞箱半宽/半高/半深与跳跃初速全部取自实体类型定义（模组没加载时退回 MC 口径默认）。
     // 物理线程尚未启动，这里属于装配期单线程，可安全增删物理体。
     addPlayerPhysicsBody(physicsWorld, playerType);
-    // 玩家位置共享槽（物理线程写 → 输入线程读）：相机跟随的唯一数据来源。
+    // 玩家位置共享槽（物理线程写 → 渲染线程读）：相机跟随的唯一数据来源。
     physicsWorld.attachPlayerState(&playerBodyState);
-    // 玩家操控槽（输入线程写 → 物理线程读）：WASD 水平速度 + 空格跳跃。
+    // 玩家操控槽（渲染线程写 → 物理线程读）：WASD 水平速度 + 空格跳跃。
     physicsWorld.attachPlayerControl(&playerControlState);
     input::InputSampler inputSampler;
     // 眼高与步速同样来自实体类型定义（第一人称相机位置、WASD 速度都读它们）。
@@ -418,13 +479,14 @@ static int run(const std::string& presetName) {
                               -0.35);       // pitch：略低头（sin(pitch) 为视线高度分量）
     }
 
-    // 渲染线程（第 4 轨只读观众）：消费变更事件流 + 绘制。
+    // 渲染线程（第 3 轨只读观众）：消费变更事件流 + 绘制（输入采样也在本轨）。
     engine::render::Renderer renderer(businessWorld, renderBridge.businessToRenderChanges(), vkCtx, playerInput);
 
     // 初始世界统计：生成后快照（诊断/验收用）。
     std::cout << "初始世界：方块=" << businessWorld.blockCount() << "\n";
     printPaletteStats(businessWorld.world());
 
+    FrameGate frameGate;   // 主线程事件泵 ↔ 渲染帧的"一进一出"门闩
     core::ThreadLoop businessLoop("business");
     core::ThreadLoop physicsLoop("physics");
     core::ThreadLoop renderLoop("render");
@@ -446,10 +508,10 @@ static int run(const std::string& presetName) {
                 streamer->tick(cameraState.camX.load(), cameraState.camZ.load());
                 const auto batch = streamer->takeBatch(
                     engine::worldgen::ChunkStreamer::kMaxApplyPerTick);
-                // 世界 chunk 集合有变化（加载或卸载）→ 物理侧必须重下一次全量方块集。
-                // 只认"卸载"不够：卸载与分批加载错在不同 tick，最后一次加载若不重同步，
-                // 物理侧就停在旧的中间态快照（实测：世界 90 列、物理仍 81 列）。
-                // 稳态时 batch 为空（不再触发），开销只在滑动的那几个 tick。
+                // 世界 chunk 集合有变化（加载或卸载）→ 物理侧必须重同步，
+                // 否则会停在旧的中间态快照（实测：世界 90 列、物理仍 81 列）。
+                // 策略按变化数量分流：>8 个走全量重建（下方 requestPhysicsResync，一次建完），
+                // 少量走增量、只发这批 chunk 的新内容。稳态 batch 为空，不触发。
                 if (!batch.empty()) {
                     applyStreamBatch(businessWorld.world(), batch);
                     // 增量同步：只发这批 chunk 的新内容（不再全量重发 8 万方块）。
@@ -531,12 +593,17 @@ static int run(const std::string& presetName) {
     // 转身时世界会以 125Hz 步进（实测：把相机钉死后实体本身完全顺滑）。
     // 见渲染循环里的 inputSampler.tick()。
 
-    // ---- 渲染线程（第 4 轨只读观众，~165Hz）：消费变更事件 + 绘制 ----
+    // ---- 渲染线程（第 3 轨只读观众，~165Hz）：消费变更事件 + 绘制 + 输入采样 ----
     // 渲染不向模拟发任何指令；数据源 = businessToRender 事件流（增量）+ 锁内快照。
     // 渲染端的刚体 id 列表（结构事件增删）；每帧据此查 PoseHistory
     std::vector<int> bodyIds_;
     renderLoop.start([&] {
         while (!renderLoop.shouldStop()) {
+            // 等主线程为这一帧完成的事件泵：本帧消费的鼠标/键盘增量恰好是
+            // 上一帧到这一帧之间的那一份，不再出现"某帧增量为零、下一帧双倍"。
+            // 门闩已关闭 → 直接退出（不再渲染）。
+            if (!frameGate.waitPoll()) break;
+
             renderer.tick();
 
             // 输入：**每渲染帧消费一次**鼠标/键盘增量（MC 同款）。
@@ -595,19 +662,27 @@ static int run(const std::string& presetName) {
             }
 
             vkCtx.drawFrame();
+            // 本帧收尾：通知主线程可以开始下一次 poll。
+            frameGate.markFrameDone();
             // 这里原本有一行 sleep_for(5ms) 做限速，已删除：节奏由 FIFO(vsync) 的
             // vkAcquireNextImageKHR 阻塞决定，帧率上限 = 显示器刷新率；
             // 且 Windows 定时器粒度会把 5ms 请求放大到约 9.5ms（实测 165→62 FPS）。
         }
     });
 
-    // ---- 主线程：GLFW 事件循环（窗口保持可拖动/缩放响应），窗口关闭 → 优雅停止 ----
+    // ---- 主线程：GLFW 事件泵，与渲染帧严格一进一出 ----
+    // 每次 poll 之前先等上一帧收尾，poll 派发的输入增量正好归属于接下来这一帧；
+    // 帧率因此由 FIFO(vsync) 决定，事件泵跟着帧走（不再另设定时器）。
     while (!vkCtx.shouldClose()) {
+        if (!frameGate.waitFrameConsumed()) break;
         vkCtx.pollEvents();
-        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        if (vkCtx.shouldClose()) break;   // 本次 poll 里收到关闭请求：不再往下派
+        frameGate.markPolled();
     }
+    // 关闩：唤醒可能仍在等 poll 的渲染线程，让它退出循环。
+    frameGate.shutdown();
 
-    // 优雅停止：模拟三轨先停，渲染线程最后停（第 4 轨只读，不阻塞模拟停止）。
+    // 优雅停止：模拟两条轨先停（业务 → 生成 → 物理），渲染轨最后停（只读，不阻塞模拟停止）。
     businessLoop.stop();
     if (streamer) streamer->stop();   // 业务线程已停（不再 receiveResults），再停生成线程
     physicsLoop.stop();

@@ -23,7 +23,7 @@ void Renderer::tick() {
         dirtyChunks_.clear();
     }
 
-    // ---- HUD 开关：F3 按下边沿（输入线程置位，渲染线程 exchange 消费后清零）----
+    // ---- HUD 开关：F3 按下边沿（键盘回调置位，渲染线程 exchange 消费后清零）----
     if (input_.toggleHud.exchange(false, std::memory_order_relaxed)) {
         hudVisible_ = !hudVisible_;
         vk_.setHudVisible(hudVisible_);

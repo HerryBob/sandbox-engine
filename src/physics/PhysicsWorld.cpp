@@ -426,10 +426,10 @@ void PhysicsWorld::stepPlayer(double dt) {
     JPH::Vec3 vel = ch->GetLinearVelocity();
     const bool supported = ch->IsSupported();
     if (playerControl_) {
-        // 水平：输入线程给的是世界坐标目标速度（格/秒）
+        // 水平：渲染线程给的是世界坐标目标速度（格/秒）
         vel.SetX(static_cast<float>(playerControl_->vx.load(std::memory_order_relaxed)));
         vel.SetZ(static_cast<float>(playerControl_->vz.load(std::memory_order_relaxed)));
-        // 跳跃：只在支撑面（地面/缓坡）上生效，按下边沿已被输入线程置位
+        // 跳跃：只在支撑面（地面/缓坡）上生效，按下边沿已被渲染线程置位
         const bool wantJump =
             playerControl_->jumpRequested.exchange(false, std::memory_order_relaxed);
         if (wantJump && supported) vel.SetY(static_cast<float>(jumpSpeed_));

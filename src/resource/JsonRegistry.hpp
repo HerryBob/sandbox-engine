@@ -46,6 +46,12 @@ public:
     // 按名字取；未注册返回 nullptr
     const T* find(const std::string& name) const;
 
+    // 单条注册（引擎内置条目用，如 noise 的 flat 兜底）。
+    // 已存在则返回 false 且不覆盖 —— 与 load 的"先到先得"一致，模组提供的定义优先。
+    bool add(const std::string& name, T value, const std::string& owner) {
+        return items_.emplace(name, DataEntry<T>{std::move(value), std::move(owner)}).second;
+    }
+
     // 提供者名；未注册返回空串
     std::string ownerOf(const std::string& name) const;
 

@@ -29,6 +29,23 @@ bool readJsonFile(const fs::path& path, std::string& text, rapidjson::Document& 
     return !doc.Parse(text.c_str()).HasParseError();
 }
 
+// 内置默认预设（平地自举）：data/ 目录缺失时的 "default"。
+// 内容等价于原 data/worldgen/presets/default.json：
+//   seed 0、flat 噪声、baseHeight 3.0、amplitude 0.0、grass/dirt/stone 三层。
+WorldPreset makeBuiltinDefaultPreset() {
+    WorldPreset p;
+    p.seed = 0;
+    p.heightType = "flat";
+    p.baseHeight = 3.0;
+    p.amplitude = 0.0;
+    p.strata = {
+        Stratum{"grass", 0, 0},
+        Stratum{"dirt",  1, 2},
+        Stratum{"stone", 3, 3},
+    };
+    return p;
+}
+
 } // namespace
 
 // name：预设名（不带 .json）；失败返回 false 且不改动 out
@@ -39,6 +56,13 @@ bool PresetLoader::load(const std::string& name, WorldPreset& out) {
     const std::string presetRel = "worldgen/presets/" + name + ".json";
     fs::path presetPath;
     if (!resource::g_resourceIndex.find(resource::ResourceKind::Data, presetRel, presetPath)) {
+        // 内置兜底：data/ 目录不存在时 "default" 仍可启动（平地世界）。
+        // 其它预设名没有内置内容，照常报错。
+        if (name == "default") {
+            out = makeBuiltinDefaultPreset();
+            ENGINE_LOG_INFO("Preset", "使用内置默认预设（data/ 未提供 worldgen/presets）");
+            return true;
+        }
         ENGINE_LOG_ERROR("Preset", "预设未找到：" + presetRel);
         return false;
     }

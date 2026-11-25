@@ -3,7 +3,7 @@
 
 namespace engine::input {
 
-// 输入线程的**数据层**：键盘状态 + 待消费视角增量 + 模式位 + 玩家体尺寸/速度。
+// 渲染线程的**数据层**：键盘状态 + 待消费视角增量 + 模式位 + 玩家体尺寸/速度。
 //
 // 分工与其它线程一致（规则5「数据层/逻辑层分开」）：
 //      InputState    ≙  business::World / physics::PhysicsState / worldgen::StreamState
@@ -14,8 +14,8 @@ namespace engine::input {
 // CameraState / PlayerControlState —— 回调与逻辑之间不再直接耦合。
 //
 // 线程模型：
-//   · 键盘原子 + 视角增量：**GLFW 回调（main 线程）写**，输入线程读/取走 → 原子。
-//   · 模式位 / spaceHeldPrev_ / 尺寸常量：输入线程独占 → 普通字段。
+//   · 键盘原子 + 视角增量：**GLFW 回调（main 线程）写**，渲染线程读/取走 → 原子。
+//   · 模式位 / spaceHeldPrev_ / 尺寸常量：渲染线程独占 → 普通字段。
 class InputState {
 public:
     // ---- 键盘（GLFW 回调写，输入逻辑读）----
@@ -26,7 +26,7 @@ public:
     std::atomic<double> yawDelta_{0.0};
     std::atomic<double> pitchDelta_{0.0};
 
-    // ---- 相机模式（输入线程独占）----
+    // ---- 相机模式（渲染线程独占）----
     // false = 自由相机（WASD 飞行），true = 玩家模式（位置跟随玩家体）。
     bool playerMode_ = false;
     // 玩家模式下的视角：false = 第一人称（相机在眼位），true = 第三人称（沿视线后退）。

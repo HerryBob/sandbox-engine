@@ -232,7 +232,7 @@ private:
     
 
     // GLFW 回调（static 成员：可作 C 函数指针传参，同时能访问私有成员）。
-    // 键盘/鼠标回调已移交 input::InputSampler（真实输入归输入线程），
+    // 键盘/鼠标回调已移交 input::InputSampler（输入并入渲染帧，无独立输入线程），
     // 本类只保留窗口尺寸回调（swapchain 重建触发）。
     static void framebufferResizeCallback(GLFWwindow* w, int width, int height);
 
@@ -312,7 +312,7 @@ private:
     std::uint64_t        framesPresented_ = 0;
 
     // ---- 相机（MVP uniform）----
-    // 相机状态由输入线程（InputSampler）维护并写 PlayerInput；
+    // 相机状态由渲染线程（每帧调 InputSampler::tick）维护并写 PlayerInput；
     // 本类不再持有 camPos/yaw/pitch，updateViewProj 从 CameraState 只读。
 
     std::vector<engine::shared::Block> pendingRebuildBlocks_;  // 待重建快照

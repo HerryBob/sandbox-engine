@@ -12,14 +12,15 @@ struct GLFWwindow; // 前向声明：回调签名只用到指针
 
 namespace engine::input {
 
-// 输入线程：真实键盘/鼠标输入（125Hz 采样，墙钟原生，不受 time_scale 影响）。
+// 输入采样：真实键盘/鼠标输入（自 2026-11-24 并入渲染帧，每渲染帧采样一次；
+// 墙钟原生，不受 time_scale 影响）。
 // 职责划分：
 //   ① attach() 注册 GLFW 回调（键盘/鼠标）——回调在主线程 pollEvents 时触发，
 //      只写原子状态（按键状态/视角增量/点击序号），不做相机运算；
-//   ② 输入线程每 tick 调 tick()：消费回调增量 → 更新相机 → 写 CameraState；
+//   ② 渲染线程每 tick 调 tick()：消费回调增量 → 更新相机 → 写 CameraState；
 //   ③ 鼠标点击回调直接写 PlayerInput（clickSeq/clickButton，业务线程消费）。
 // 输出槽按职责拆分：
-//   · CameraState：相机位置/视角（输入线程写；渲染算 MVP、业务做射线，只读）；
+//   · CameraState：相机位置/视角（渲染线程写；渲染算 MVP、业务做射线，只读）；
 //   · PlayerInput：点击事件（鼠标回调写；业务消费做 DDA）。
 // 单窗口单实例（引擎现状）：回调经静态 s_self_ 取本对象，多窗口再改查表。
 class InputSampler {
@@ -35,14 +36,14 @@ public:
                 engine::shared::PlayerBodyState* player,
                 engine::shared::PlayerControlState* control);
 
-    // 输入线程每 tick 调用：消费视角增量 + 键盘状态 → 更新相机 → 写 CameraState。
+    // 渲染线程每 tick 调用：消费视角增量 + 键盘状态 → 更新相机 → 写 CameraState。
     void tick();
 
     // 装配期设置出生点（生成地形后由 main 按实际地表高度设定；R 键回到这里）。
     // 同时覆盖当前位置，立即生效（渲染首帧前调用）。
     void setSpawn(double x, double y, double z, double yawRad, double pitchRad);
 
-    // 按实体类型定义注入体型数值（装配期调用，输入线程未启动时安全）。
+    // 按实体类型定义注入体型数值（装配期调用，渲染线程未启动时安全）。
     // 只在值为正数时覆盖，无效值保留默认。
     void setBodyMetrics(double eyeHeight, double walkSpeed);
 
@@ -59,11 +60,11 @@ private:
     struct LookBasis { double fwdX, fwdZ, rgtX, rgtZ; };
 
     bool consumeModeToggles();                      // ① F4/F5 请求（返回是否切换了模式）
-    void updateLook();                              // ② 消费视角增量 + 俯仰 clamp
+    void updateLook();                              // ② 视角：tick 边界采样 + 帧内线性插值
     LookBasis lookBasis() const;                    // ③ 由 yaw_ 算四个基向量
     void updatePlayerCamera(const LookBasis& b);    // ④a 相机跟随玩家体（第一/第三人称）
     void writeControlIntent(const LookBasis& b, bool space);  // ④c WASD → 操控意图 + 跳跃边沿
-    void updateFreeCamera(const LookBasis& b, bool space);    // ⑤ 自由相机移动
+    void updateFreeCamera(const LookBasis& b, bool space, double dt); // ⑤ 自由相机移动（按本帧 dt 积分）
     void logModeChange(bool modeChanged);           // 模式切换日志
     bool spaceDown() const;                         // 空格当前是否按下
 
@@ -80,24 +81,35 @@ private:
     // GLFW 回调只写 state_，tick 只读 state_ —— 回调与逻辑之间不再直接耦合。
     InputState state_;
 
-    // 调试顶视相机（F9）：相机固定跟玩家正上方 5 格、垂直向下看。
-    // 用途：把相机运动从画面里去掉，单独观察玩家模型是否还有残留抖动。
     // 第三人称相机的后退距离（格）与瞄准点抬高（格）—— 属**逻辑层调参**，不是世界状态。
     static constexpr double kThirdPersonDist_ = 4.0;
     static constexpr double kThirdPersonAim_ = 1.35;
+
     std::atomic<double> lastCursorX_{0.0}; // 光标上次位置（增量计算基准）
     std::atomic<double> lastCursorY_{0.0};
 
-    // ---- 相机状态（输入线程独占写）----
+    // ---- 相机状态（渲染线程独占写）----
     // 出生点：装配期由 main 按生成地形实际高度设定（不写死世界高度）；R 键回到这里。
     double spawnX_ = 0.0, spawnY_ = 1.5, spawnZ_ = 3.5;
     double spawnYaw_ = 0.0, spawnPitch_ = -0.35;
 
     double camX_ = 0.0, camY_ = 1.5, camZ_ = 3.5; // 当前位置（初始 = 出生点默认值）
-    double yaw_ = 0.0;                            // 左右旋转（弧度）
+    double yaw_ = 0.0;                            // 当前视角：相邻两 tick 的插值结果，写进 CameraState 与玩家体朝向
     double pitch_ = -0.35;                        // 上下旋转（弧度，clamp ±83°；略低头看地形）
 
+    // 视角的两级累加：每帧取走的鼠标增量先进 accum_，跨 tick 边界时才结算进 tick 值，
+    // 渲染帧再用 alpha 在 prev/当前两个 tick 值之间插值。
+    double yawTick_ = 0.0;                        // 本 tick 结算到的视角
+    double yawTickPrev_ = 0.0;                    // 上一 tick 的视角（插值起点）
+    double pitchTick_ = -0.35;                    // 本 tick 结算到的俯仰
+    double pitchTickPrev_ = -0.35;                // 上一 tick 的俯仰（插值起点）
+    double yawAccum_ = 0.0;                       // 自上次 tick 边界以来累积的鼠标 yaw 增量
+    double pitchAccum_ = 0.0;                     // 同上，pitch
+    long long lookTickIdx_ = 0;                   // 上一帧所在的整数 tick 号（变化即跨 tick 边界）
+    bool lookAxisReady_ = false;                  // 是否已接入物理时间轴（首条快照发布前为假）
+
     std::chrono::steady_clock::time_point lastLog_;
+    std::chrono::steady_clock::time_point lastTick_{}; // 上一帧 tick 时刻；默认空值表示尚未 tick
 };
 
 } // namespace engine::input

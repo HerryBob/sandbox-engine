@@ -56,10 +56,49 @@ bool InputSampler::consumeModeToggles() {
 }
 
 void InputSampler::updateLook() {
-    // 消费视角增量（回调累加 / 本线程取走），clamp 俯仰防翻跟头。
-    yaw_   += state_.yawDelta_.exchange(0.0, std::memory_order_relaxed);
-    pitch_ += state_.pitchDelta_.exchange(0.0, std::memory_order_relaxed);
-    pitch_ = std::clamp(pitch_, -1.45, 1.45); // ±83°
+    // 每帧取走回调累积的增量，放进"待结算"池。
+    // 不能只在 tick 边界取一次，否则帧内的增量分配全被压成一个台阶。
+    yawAccum_   += state_.yawDelta_.exchange(0.0, std::memory_order_relaxed);
+    pitchAccum_ += state_.pitchDelta_.exchange(0.0, std::memory_order_relaxed);
+
+    // 物理时间轴：与玩家模型、刚体共用同一条（renderTickF 已含 1 tick 延迟）。
+    const double rt = (playerOut_ != nullptr) ? playerOut_->renderTickF() : 0.0;
+    if (rt <= 0.0) {
+        // 时间轴尚未建立（物理还没发布首条快照）：增量直接用掉，不做插值。
+        yaw_   += yawAccum_;
+        pitch_ += pitchAccum_;
+        pitch_  = std::clamp(pitch_, -1.45, 1.45);
+        yawAccum_   = 0.0;
+        pitchAccum_ = 0.0;
+        yawTickPrev_ = yaw_;   yawTick_ = yaw_;
+        pitchTickPrev_ = pitch_; pitchTick_ = pitch_;
+        lookAxisReady_ = false;
+        return;
+    }
+
+    const long long idx = static_cast<long long>(std::floor(rt));
+    if (!lookAxisReady_) {
+        // 首次接入时间轴：以当前视角为基准，避免第一帧跳变。
+        yawTickPrev_ = yaw_;   yawTick_ = yaw_;
+        pitchTickPrev_ = pitch_; pitchTick_ = pitch_;
+        lookTickIdx_ = idx;
+        lookAxisReady_ = true;
+    } else if (idx != lookTickIdx_) {
+        // 跨过 tick 边界：上一 tick 的值成为插值起点，本 tick 结算累积增量。
+        yawTickPrev_ = yawTick_;
+        yawTick_    += yawAccum_;
+        yawAccum_    = 0.0;
+        pitchTickPrev_ = pitchTick_;
+        pitchTick_    += pitchAccum_;
+        pitchAccum_    = 0.0;
+        pitchTick_     = std::clamp(pitchTick_, -1.45, 1.45);
+        lookTickIdx_   = idx;
+    }
+
+    // 本帧落在这一 tick 内的比例（0..1）：在两个 tick 值之间线性插值。
+    const double alpha = rt - static_cast<double>(idx);
+    yaw_   = yawTickPrev_ + (yawTick_ - yawTickPrev_) * alpha;
+    pitch_ = pitchTickPrev_ + (pitchTick_ - pitchTickPrev_) * alpha;
 }
 
 InputSampler::LookBasis InputSampler::lookBasis() const {
@@ -101,6 +140,9 @@ void InputSampler::updatePlayerCamera(const LookBasis& b) {
 
     if (state_.keyR_.load(std::memory_order_relaxed)) { // R：只重置朝向（位置归玩家体）
         yaw_ = spawnYaw_; pitch_ = spawnPitch_;
+        yawTick_ = spawnYaw_; yawTickPrev_ = spawnYaw_;
+        pitchTick_ = spawnPitch_; pitchTickPrev_ = spawnPitch_;
+        yawAccum_ = 0.0; pitchAccum_ = 0.0;
     }
 }
 
@@ -124,10 +166,10 @@ void InputSampler::writeControlIntent(const LookBasis& b, bool space) {
     }
 }
 
-void InputSampler::updateFreeCamera(const LookBasis& b, bool space) {
-    // 自由相机模式：原逻辑（速度 8 格/s；125Hz → 每 tick 0.064 格）。
+void InputSampler::updateFreeCamera(const LookBasis& b, bool space, double dt) {
+    // 自由相机模式：速度 8 格/秒，按本帧实际 dt 积分（与帧率无关）。
     // 这里空格仍是"按住上升"，不是跳跃。
-    const double speed = 8 * 0.008;
+    const double step = 8.0 * dt;
 
     // 自由相机不驱动玩家体：必须每帧清零操控意图。
     // 否则从玩家模式切过来时，物理线程会继续读到上一帧残留的走速，人一直滑不停。
@@ -137,22 +179,25 @@ void InputSampler::updateFreeCamera(const LookBasis& b, bool space) {
     }
 
     if (state_.keyW_.load(std::memory_order_relaxed)) {
-        camX_ += b.fwdX * speed; camZ_ += b.fwdZ * speed;
+        camX_ += b.fwdX * step; camZ_ += b.fwdZ * step;
     }
     if (state_.keyS_.load(std::memory_order_relaxed)) {
-        camX_ -= b.fwdX * speed; camZ_ -= b.fwdZ * speed;
+        camX_ -= b.fwdX * step; camZ_ -= b.fwdZ * step;
     }
     if (state_.keyD_.load(std::memory_order_relaxed)) {
-        camX_ += b.rgtX * speed; camZ_ += b.rgtZ * speed;
+        camX_ += b.rgtX * step; camZ_ += b.rgtZ * step;
     }
     if (state_.keyA_.load(std::memory_order_relaxed)) {
-        camX_ -= b.rgtX * speed; camZ_ -= b.rgtZ * speed;
+        camX_ -= b.rgtX * step; camZ_ -= b.rgtZ * step;
     }
-    if (space) camY_ += speed;
-    if (state_.keyShift_.load(std::memory_order_relaxed)) camY_ -= speed;
+    if (space) camY_ += step;
+    if (state_.keyShift_.load(std::memory_order_relaxed)) camY_ -= step;
     if (state_.keyR_.load(std::memory_order_relaxed)) { // 重置视角（回出生点：生成地形的地表上方）
         camX_ = spawnX_; camY_ = spawnY_; camZ_ = spawnZ_;
         yaw_ = spawnYaw_; pitch_ = spawnPitch_;
+        yawTick_ = spawnYaw_; yawTickPrev_ = spawnYaw_;
+        pitchTick_ = spawnPitch_; pitchTickPrev_ = spawnPitch_;
+        yawAccum_ = 0.0; pitchAccum_ = 0.0;
     }
 }
 
@@ -170,8 +215,18 @@ void InputSampler::logModeChange(bool modeChanged) {
 }
 
 void InputSampler::tick() {
+    // 本帧实际时长：自由相机位移按它积分（不再按固定帧率假设步长）。
+    // 首帧没有上一时刻 → dt = 0；长停顿（最小化 / 断点）钳到 50ms，避免恢复后瞬移。
+    const auto now = std::chrono::steady_clock::now();
+    double dt = 0.0;
+    if (lastTick_.time_since_epoch().count() != 0) {
+        dt = std::chrono::duration<double>(now - lastTick_).count();
+        if (dt > 0.05) dt = 0.05;
+    }
+    lastTick_ = now;
+
     const bool modeChanged = consumeModeToggles();   // ① F4/F5
-    updateLook();                                    // ② 视角增量 + clamp
+    updateLook();                                    // ② 视角：tick 边界采样 + 帧内插值
 
     const LookBasis b = lookBasis();                 // ③ 朝向基向量
     const bool space = spaceDown();
@@ -187,7 +242,7 @@ void InputSampler::tick() {
 
         writeControlIntent(b, space);                // ④c WASD → 操控意图 + 跳跃边沿
     } else {
-        updateFreeCamera(b, space);                  // ⑤ 自由相机
+        updateFreeCamera(b, space, dt);              // ⑤ 自由相机
     }
 
     writeCameraState();
@@ -200,6 +255,9 @@ void InputSampler::setSpawn(double x, double y, double z, double yawRad, double 
     spawnYaw_ = yawRad; spawnPitch_ = pitchRad;
     camX_ = x; camY_ = y; camZ_ = z;
     yaw_ = yawRad; pitch_ = pitchRad;
+    yawTick_ = yawRad; yawTickPrev_ = yawRad;
+    pitchTick_ = pitchRad; pitchTickPrev_ = pitchRad;
+    yawAccum_ = 0.0; pitchAccum_ = 0.0;
     writeCameraState(); // 立即生效（渲染首帧前调用，避免首帧还在旧位置）
 }
 
@@ -241,7 +299,7 @@ void InputSampler::keyboardCb(GLFWwindow* w, int key, int scancode, int action, 
         return;
     }
 
-    // F4 同上：只认按下边沿，模式状态由输入线程翻转。
+    // F4 同上：只认按下边沿，模式状态由渲染线程翻转。
     if (key == GLFW_KEY_F4) {
         if (action != GLFW_PRESS) return;
         if (self->clickOut_) {
@@ -251,7 +309,7 @@ void InputSampler::keyboardCb(GLFWwindow* w, int key, int scancode, int action, 
     }
 
     // F5：玩家模式下切换第一/第三人称（自由相机模式下按了无效，直接忽略）。
-    // 状态只在输入线程改，这里只置请求位。
+    // 状态只在渲染线程改，这里只置请求位。
     if (key == GLFW_KEY_F5) {
         if (action != GLFW_PRESS) return;
         if (self->clickOut_) {
@@ -287,7 +345,7 @@ void InputSampler::mouseButtonCb(GLFWwindow* w, int button, int action, int) {
     }
 }
 
-// 鼠标移动回调：增量 × 灵敏度 → 累加视角增量（输入线程消费）。
+// 鼠标移动回调：增量 × 灵敏度 → 累加视角增量（渲染线程消费）。
 void InputSampler::cursorPosCb(GLFWwindow* w, double x, double y) {
     auto* self = s_self_;
     if (!self || !w) return;

@@ -1,7 +1,9 @@
 #pragma once
-// 纹理图集（texture atlas）：一张 128² 大纹理装所有方块小纹理（每格 16²）。
+// 纹理图集（texture atlas）：一张 N² 大纹理装所有方块小纹理（每格 16²）。
 // 职责：① 从方块注册表 + 模型注册表收集纹理名 → 按索引查 textures/block/<name>.png → 拼进图集
 //       ② 名字 → 格（row,col）→ UV 区间（供 meshing 填顶点 UV）
+// 格序由引擎自动决定：先按方块 id 升序取注册表纹理名，再补模型表里没被方块引用的槽位，
+// 同名只占一格；第 0 格恒为 default.png（缺失纹理兜底）。
 // 渲染时只绑定一张大纹理，每面 UV 指向自己那一格 → 免频繁切换绑定。
 #include <cstdint>
 #include <string>
@@ -12,7 +14,7 @@
 
 namespace engine::assets {
 
-// 图集常量：格 16²，每边格数与图集边长由声明条目数在运行期算出
+// 图集常量：格 16²，每边格数与图集边长由纹理条目数在运行期算出
 constexpr std::uint32_t kAtlasTile = 16;   // 每格边长（像素）
 // 通道数：RGBA 四通道 × 1 字节/通道 = 每像素 4 字节（PNG 解码 / Vulkan 导入均按此）
 constexpr std::uint32_t kAtlasChannels = 4;
@@ -25,8 +27,7 @@ struct AtlasSlot {
 
 class TextureAtlas {
 public:
-    // 读 assets/atlases/blocks.json 的 textures 数组逐格铺图（第 0 格恒 default.png）。
-    // 声明缺失时回退为「遍历注册表收集纹理名」。每边格数按条目数取 sqrt 上整。
+    // 自动收集纹理名并逐格铺图（第 0 格恒 default.png）。每边格数按条目数取 sqrt 上整。
     bool build();
 
     // 名字 → 格（未注册返回 false）
@@ -46,19 +47,18 @@ public:
     glm::vec4 fallbackUV() const { return slotUV(AtlasSlot{0, 0}); }
 
 private:
-    // ---- build() 的六段（规则1 拆分）----
-    std::vector<std::string> readDeclaredTextures() const;   // ① 读 atlases/blocks.json
-    std::vector<std::string> collectUsedTextures() const;    // ② 注册表 + 模型表实际引用
-    void layoutGrid(std::size_t declaredCount);              // ④ 每边格数 + 像素缓冲
-    bool placeDefaultSlot();                                 // ⑤ 第 0 格 = default.png
-    // ⑥ 按声明顺序铺格的结果（供汇总日志）
+    // ---- build() 的四段（规则1 拆分）----
+    std::vector<std::string> collectUsedTextures() const;   // ① 方块 + 模型引用的纹理名（顺序确定）
+    void layoutGrid(std::size_t count);                     // ② 每边格数 + 像素缓冲
+    bool placeDefaultSlot();                                // ③ 第 0 格 = default.png
+
+    // ④ 铺格结果（供汇总日志）
     struct Placement {
         std::size_t loaded = 0;     // 成功进格的张数
         std::size_t failed = 0;     // 读取/尺寸失败的张数
         std::size_t occupied = 1;   // 已占用格数（含第 0 格）
     };
-    Placement placeDeclaredSlots(const std::vector<std::string>& declared);
-    void warnMissingTextures(const std::vector<std::string>& used) const;   // ⑦ 被引用但未声明
+    Placement placeSlots(const std::vector<std::string>& names);
 
     // 按索引查 textures/block/<name>.png → 直拷入格（失败则格留空，不崩引擎）
     bool addFromFile(std::string_view name, AtlasSlot slot);

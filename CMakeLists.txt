@@ -129,8 +129,8 @@ add_custom_target(compile_shaders ALL
 )
 add_dependencies(sandbox_engine compile_shaders)
 # 引擎自带资源（可选：公开仓库不含 MC 版权纹理，缺省不影响编译）
-# assets/ 编排：assets/models/block/*.json + assets/textures/{block,font}/*.png
-# data/ 编排：data/worldgen/presets/*.json
+# assets/ 编排：assets/textures/{block,font}/*.png（方块模型已归内置 blocks 模组）
+# data/ 编排：已空（默认预设内置在 PresetLoader）
 #
 # 用 ALL 目标而不是 sandbox_engine 的 POST_BUILD —— POST_BUILD 只在 exe 重链时执行，
 # 只改 JSON/贴图不动代码时资源不会同步到输出目录。

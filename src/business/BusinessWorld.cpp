@@ -157,10 +157,10 @@ bool BusinessWorld::removeBlock(const engine::shared::BlockPos& p) {
 }
 
 //// 玩家输入：逐条消费点击队列 → DDA 射线检测 → 放置/破坏
-// 相机来自 CameraState（输入线程写），点击来自 PlayerInput 的 SPSC 队列（鼠标回调 push）。
+// 相机来自 CameraState（渲染线程写），点击来自 PlayerInput 的 SPSC 队列（鼠标回调 push）。
 void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
                                        engine::shared::PlayerInput& clicks){
-    // 相机槽（输入线程写）在本次 tick 内只读一次：同一 tick 的多次点击共享同一视角。
+    // 相机槽（渲染线程写）在本次 tick 内只读一次：同一 tick 的多次点击共享同一视角。
     const double cx = cam.camX.load(std::memory_order_relaxed);
     const double cy = cam.camY.load(std::memory_order_relaxed);
     const double cz = cam.camZ.load(std::memory_order_relaxed);

@@ -3,51 +3,18 @@
 #include "registry/BlockRegistry.hpp"
 #include "render/assets/ModelRegistry.hpp"
 #include "resource/ResourceIndex.hpp"
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <set>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
-#include <cstring>
 #include <stb_image.h>
-#include <rapidjson/document.h>
 
 namespace engine::assets {
-
-std::vector<std::string> TextureAtlas::readDeclaredTextures() const {
-    // 声明文件 assets/atlases/blocks.json 的 textures 数组：有序，逐格铺
-    // 第 0 格恒为 default.png，声明里不用写（写了也跳过）
-    std::vector<std::string> declared;
-    std::filesystem::path declPath;
-    if (!resource::g_resourceIndex.find(resource::ResourceKind::Assets,
-                                        "atlases/blocks.json", declPath)) {
-        ENGINE_LOG_WARN("Atlas", "图集声明 atlases/blocks.json 缺失 → 回退按注册表收集");
-        return declared;
-    }
-    std::ifstream in(declPath);
-    if (!in) {
-        ENGINE_LOG_WARN("Atlas", "图集声明打开失败：atlases/blocks.json");
-        return declared;
-    }
-    const std::string text{std::istreambuf_iterator<char>(in),
-                           std::istreambuf_iterator<char>()};
-    rapidjson::Document doc;
-    doc.Parse(text.c_str());
-    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("textures") ||
-        !doc["textures"].IsArray()) {
-        ENGINE_LOG_WARN("Atlas", "图集声明解析失败或缺 textures 数组：atlases/blocks.json");
-        return declared;
-    }
-    std::set<std::string> uniq;
-    for (const auto& v : doc["textures"].GetArray()) {
-        if (!v.IsString()) continue;
-        const std::string name = v.GetString();
-        if (name.empty() || name == "default") continue;
-        if (uniq.insert(name).second) declared.push_back(name);
-    }
-    return declared;
-}
 
 std::vector<std::string> TextureAtlas::collectUsedTextures() const {
     // 方块引用了别的模组提供的贴图：该模组没带全资源，或两个模组用了同一个纹理名。
@@ -62,16 +29,27 @@ std::vector<std::string> TextureAtlas::collectUsedTextures() const {
                           " 提供，方块（" + blockOwner + "）正在使用");
     };
 
-    // 注册表实际引用到的纹理名：既是声明缺失时的回退来源，也用于检查「引用了却没声明」
-    std::vector<std::string> used;
-    std::set<std::string> uniq;
+    // 方块纹理名：先按方块 id 升序收集。注册表底层是 unordered_map，直接遍历的顺序
+    // 不可复现；格序要求每次启动一致，所以排好 id 再入表。
+    std::vector<std::pair<std::uint16_t, std::string>> byId;
     for (const auto& [id, info] : engine::registry::g_blockRegistry) {
         if (info.texture.empty()) continue;
         if (info.texture == "default") continue;              // 第 0 格固定给它
-        if (!uniq.insert(info.texture).second) continue;      // 去重：同名只填一次
-        warnCrossOwner(info.texture, engine::registry::g_blockRegistry.ownerOf(id));
-        used.push_back(info.texture);
+        byId.emplace_back(id, info.texture);
     }
+    std::sort(byId.begin(), byId.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::vector<std::string> used;
+    std::set<std::string> uniq;
+    for (const auto& entry : byId) {
+        if (!uniq.insert(entry.second).second) continue;      // 去重：同名只填一次
+        warnCrossOwner(entry.second, engine::registry::g_blockRegistry.ownerOf(entry.first));
+        used.push_back(entry.second);
+    }
+
+    // 模型纹理槽位（g_modelRegistry 底层是 std::map，字典序确定）：
+    // 补方块层没引用到的槽位，如原木顶面 log_top、草方块侧面 grass_side。
     for (const auto& [modelName, entry] : engine::assets::g_modelRegistry) {
         (void)modelName;
         for (const auto& [var, tex] : entry.value.textures) {
@@ -84,9 +62,9 @@ std::vector<std::string> TextureAtlas::collectUsedTextures() const {
     return used;
 }
 
-void TextureAtlas::layoutGrid(std::size_t declaredCount) {
-    // 每边格数：能放下「default + 声明条目」的最小方阵
-    const std::uint32_t need = 1 + static_cast<std::uint32_t>(declaredCount);
+void TextureAtlas::layoutGrid(std::size_t count) {
+    // 每边格数：能放下「default + 纹理条目」的最小方阵
+    const std::uint32_t need = 1 + static_cast<std::uint32_t>(count);
     grid_ = 1;
     while (grid_ * grid_ < need) ++grid_;
     size_ = kAtlasTile * grid_;
@@ -98,10 +76,10 @@ bool TextureAtlas::placeDefaultSlot() {
     return addFromFile("default", AtlasSlot{0, 0});
 }
 
-TextureAtlas::Placement TextureAtlas::placeDeclaredSlots(const std::vector<std::string>& declared) {
+TextureAtlas::Placement TextureAtlas::placeSlots(const std::vector<std::string>& names) {
     Placement p;
-    // 按声明顺序铺格（第 0 格已被 default 占用，从第 1 格起）
-    for (const std::string& name : declared) {
+    // 按收集顺序铺格（第 0 格已被 default 占用，从第 1 格起）
+    for (const std::string& name : names) {
         if (p.occupied >= grid_ * grid_) break;                   // 容量已满
         const AtlasSlot slot{
             static_cast<std::uint8_t>(p.occupied / grid_),
@@ -118,35 +96,18 @@ TextureAtlas::Placement TextureAtlas::placeDeclaredSlots(const std::vector<std::
     return p;
 }
 
-void TextureAtlas::warnMissingTextures(const std::vector<std::string>& used) const {
-    // 注册表引用了但声明没列 → 显示兜底格，汇总一条告警
-    std::string missing;
-    for (const std::string& name : used) {
-        if (slots_.find(name) != slots_.end()) continue;
-        if (!missing.empty()) missing += ",";
-        missing += name;
-    }
-    if (!missing.empty())
-        ENGINE_LOG_WARN("Atlas", "以下纹理被引用但不在图集声明中，显示兜底格：" + missing);
-}
-
 bool TextureAtlas::build() {
-    const std::vector<std::string> declared0 = readDeclaredTextures();   // ①
-    const std::vector<std::string> used = collectUsedTextures();         // ②
+    const std::vector<std::string> used = collectUsedTextures();   // ① 自动收集（顺序确定）
 
-    // ③ 没有声明 → 用注册表收集结果（与改造前行为一致）
-    const std::vector<std::string>& declared = declared0.empty() ? used : declared0;
+    layoutGrid(used.size());                                       // ② 格数 + 像素缓冲
 
-    layoutGrid(declared.size());                                        // ④
-
-    if (!placeDefaultSlot())                                            // ⑤
+    if (!placeDefaultSlot())                                       // ③ 第 0 格 = default.png
         ENGINE_LOG_WARN("Atlas", "兜底纹理 default.png 缺失 → 第 0 格透明黑");
 
-    const Placement p = placeDeclaredSlots(declared);                   // ⑥
-    warnMissingTextures(used);                                          // ⑦
+    const Placement p = placeSlots(used);                          // ④ 按收集顺序铺格
 
     ENGINE_LOG_INFO("Atlas", "图集 " + std::to_string(size_) + "²（" + std::to_string(grid_) + "×" +
-                      std::to_string(grid_) + " 格）：声明 " + std::to_string(declared.size()) +
+                      std::to_string(grid_) + " 格）：自动 " + std::to_string(used.size()) +
                       " 张，成功 " + std::to_string(p.loaded) + " 张，失败 " +
                       std::to_string(p.failed) + " 张，占用 " + std::to_string(p.occupied) + "/" +
                       std::to_string(grid_ * grid_) + " 格");

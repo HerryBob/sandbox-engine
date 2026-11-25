@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "core/AtomicGuarantees.hpp"
+
 namespace engine::shared {
 
 // 玩家体状态（共享槽）：物理线程每 tick 写快照，输入/渲染线程按**本地单调时钟**插值。
@@ -30,8 +32,7 @@ struct PlayerBodyState {
     // 渲染延迟（1 tick = 40ms）。物理直接写共享环/快照表，没有中间跳数，
     // 所以玩家与刚体都能用同一个最小延迟（原来刚体走两跳队列时曾需要 2 tick）。
     static constexpr double kDelayTicks = 1.0;
-    static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
-                  "PlayerBodyState requires lock-free atomic<uint64_t>");
+    // 无锁原子保证见 core/AtomicGuarantees.hpp
 
     // 环形缓冲：位置 + 该快照的**整数 tick 号**
     std::atomic<double>       ringX[kRingSize] = {};
