@@ -68,9 +68,17 @@ bool VulkanContext::init(int width, int height, const char* title) {
     if (!createDepthResources()) return false;
     if (!createFramebuffers()) return false;      // ← framebuffers 不依赖 descLayout_，可留前
     if (!createCommandObjects()) return false;
-    if (!createTextureImage()) return false;
-    if (!createTextureImageView()) return false;
-    if (!createTextureSampler()) return false;
+    // 图集（CPU 侧）由本类构建，GPU 侧资源交给 TextureSet（S3 抽出的独立类）
+    if (!textureAtlas_.build()) {
+        ENGINE_LOG_ERROR("Vulkan", "图集构建失败");
+        return false;
+    }
+    texWidth_  = textureAtlas_.size();
+    texHeight_ = textureAtlas_.size();
+    if (!blockTextures_.init(physicalDevice_, device_, graphicsQueue_, cmdPool_,
+                             textureAtlas_.rgba().data(), texWidth_, texHeight_)) {
+        return false;
+    }
     if (!createUniformObjects()) return false;    // descLayout_ 就绪
     // 实体贴图不在这里加载：贴图路径由模组的实体类型定义决定，而类型表要等
     // 模组 onLoad 跑完才齐。init 之后由装配层遍历类型表调 loadEntityModel，
@@ -1052,77 +1060,14 @@ bool VulkanContext::createCommandObjects() {
 
 // 纹理图像：staging 搬运（构建图集 → 上传显存 → 转 SHADER_READ_ONLY）
 // 图集 = 一张大纹理装所有方块小纹理（每格 16²，边长由声明条目数算出）
-bool VulkanContext::createTextureImage() {
-    if (!textureAtlas_.build()) {   // 自动收集纹理名 → 拼图集（CPU 内存 RGBA）
-        ENGINE_LOG_ERROR("Vulkan", "图集构建失败");
-        return false;
-    }
-    const auto& pixels = textureAtlas_.rgba();
-    const std::uint32_t w = textureAtlas_.size();
-    const std::uint32_t h = textureAtlas_.size();
-    texWidth_ = w;
-    texHeight_ = h;
-    const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * engine::assets::kAtlasChannels; // RGBA×4字节
 
-    if (!util::createImage(device_, physicalDevice_, w, h, VK_FORMAT_R8G8B8A8_SRGB,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        1, VK_SAMPLE_COUNT_1_BIT, textureImage_, textureImageMemory_)) {
-        return false;
-    }
-
-    VkBuffer staging = VK_NULL_HANDLE;
-    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
-    if (!util::createBuffer(device_, physicalDevice_, imageSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        staging, stagingMem)) {
-        return false;
-    }
-    void* data = nullptr;
-    vkMapMemory(device_, stagingMem, 0, imageSize, 0, &data);
-    std::memcpy(data, pixels.data(), static_cast<std::size_t>(imageSize));  // ← 图集像素进 staging
-    vkUnmapMemory(device_, stagingMem);
-
-    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, textureImage_,
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    util::copyBufferToImage(device_, graphicsQueue_, cmdPool_, staging, textureImage_, w, h);
-    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, textureImage_,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-    vkDestroyBuffer(device_, staging, nullptr);
-    vkFreeMemory(device_, stagingMem, nullptr);
-    return true;
-}
 
  
 
 // 纹理图像 → 可采样视图
-bool VulkanContext::createTextureImageView() {
-    // 视图：固定样板走通用工具（2D、颜色 aspect、全 mip 全层）
-    if (!util::createImageView(device_, textureImage_, VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_ASPECT_COLOR_BIT, textureImageView_)) {
-        ENGINE_LOG_ERROR("Vulkan", "纹理视图创建失败");
-        return false;
-    }
-    return true;
-}
+
 // 创建采样器（线性过滤 + REPEAT 寻址）
-bool VulkanContext::createTextureSampler() {
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_NEAREST;      // 放大最近邻：16² 像素风硬块（线性会糊）
-    samplerInfo.minFilter = VK_FILTER_NEAREST;      // 缩小最近邻
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;  // 图集防相邻格泄漏
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;   // 1 级占位
-    samplerInfo.maxLod = 1.0f;
-    if (vkCreateSampler(device_, &samplerInfo, nullptr, &textureSampler_) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "纹理采样器创建失败");
-        return false;
-    }
-    return true;
-}
+
 
 // 确保某张实体贴图已加载：图像 + 视图 + 最近邻采样器 + 自己的 descriptor set。
 // 按路径缓存——同一张贴图被多个实体类型引用时只建一次。
@@ -1314,7 +1259,7 @@ bool VulkanContext::createUniformObjects() {
     descSet_ = sets[0];        // 方块图集那套
 
     VkDescriptorBufferInfo binfo{uboBuffer_, 0, sizeof(UniformBufferObject)};
-    VkDescriptorImageInfo iinfo{ textureSampler_, textureImageView_,
+    VkDescriptorImageInfo iinfo{ blockTextures_.sampler(), blockTextures_.view(),
     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };       // ← 新增：采样器+视图
     VkWriteDescriptorSet write[2]{};
     write[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1760,10 +1705,7 @@ void VulkanContext::destroyRenderObjects() {
         if (tex.memory)  vkFreeMemory(device_, tex.memory, nullptr);
     }
     entityTextures_.clear();
-    if (textureSampler_) { vkDestroySampler(device_, textureSampler_, nullptr); textureSampler_ = VK_NULL_HANDLE; }
-    if (textureImageView_) { vkDestroyImageView(device_, textureImageView_, nullptr); textureImageView_ = VK_NULL_HANDLE; }
-    if (textureImage_) { vkDestroyImage(device_, textureImage_, nullptr); textureImage_ = VK_NULL_HANDLE; }
-    if (textureImageMemory_) { vkFreeMemory(device_, textureImageMemory_, nullptr); textureImageMemory_ = VK_NULL_HANDLE; }
+    blockTextures_.shutdown();   // 方块图集（S3 抽出的 TextureSet）
     if (pipeline_) { vkDestroyPipeline(device_, pipeline_, nullptr); pipeline_ = VK_NULL_HANDLE; }
     if (cutoutPipeline_) { vkDestroyPipeline(device_, cutoutPipeline_, nullptr); cutoutPipeline_ = VK_NULL_HANDLE; }
     if (pipelineLayout_) { vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr); pipelineLayout_ = VK_NULL_HANDLE; }

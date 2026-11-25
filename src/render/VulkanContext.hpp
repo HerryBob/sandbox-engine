@@ -16,6 +16,7 @@
 #include "shared/chunk/ChunkPos.hpp"
 #include "render/assets/TextureAtlas.hpp"
 #include "render/HudRenderer.hpp"
+#include "render/TextureSet.hpp"
 #include "render/hud/HudInfo.hpp"
 #include "render/hud/HudTextBuilder.hpp"
 
@@ -215,9 +216,6 @@ private:
     void destroyRenderObjects();
     void destroyDepthResources();
     bool createColorResources();
-    bool createTextureImage();      // staging 搬运：CPU 写临时缓冲 → GPU 拷进显存
-    bool createTextureImageView();  // 视图：图像 → 可采样视图
-    bool createTextureSampler();    // 采样器：告诉 GPU 怎么取样（过滤/寻址）
     // 确保某张实体贴图已加载（图像/视图/采样器 + 自己的 descriptor set）。
     // 按路径去重：重复调用同一路径只建一次。返回 false 表示该贴图不可用。
     bool ensureEntityTexture(const std::string& texturePath);
@@ -336,9 +334,8 @@ private:
     VkDescriptorSet      descSet_ = VK_NULL_HANDLE;
 
     //加入纹理链
-    VkImage         textureImage_ = VK_NULL_HANDLE;
-    VkDeviceMemory  textureImageMemory_ = VK_NULL_HANDLE;
-    VkImageView     textureImageView_ = VK_NULL_HANDLE;
+    // 方块图集的 GPU 侧资源（S3 抽出的 TextureSet：图 + 视图 + 采样器）
+    TextureSet      blockTextures_;
     VkSampler       textureSampler_ = VK_NULL_HANDLE;
     uint32_t        texWidth_ = 0;
     uint32_t        texHeight_ = 0;
