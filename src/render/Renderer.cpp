@@ -17,11 +17,14 @@ void Renderer::tick() {
         changeEventsReceived_.fetch_add(1, std::memory_order_relaxed);
         for (const auto& cp : ev.dirtyChunks) dirtyChunks_.insert(cp);
     }
-    // 有脏 chunk → 请求增量重建（取数只导 dirty ∪ 6 邻居，drawFrame 在 GPU 安全点执行）
+    // 有脏 chunk → 交给调度器排队（P20）：每帧只按预算重建一批，其余留到下一帧。
+    // 取数只导 dirty ∪ 6 邻居（面剔除要用邻居方块）。
     if (!dirtyChunks_.empty()) {
-        vk_.requestChunkRebuild(world_.chunkSnapshot(dirtyChunks_), dirtyChunks_);
+        meshScheduler_.request(world_.chunkSnapshot(dirtyChunks_), dirtyChunks_);
         dirtyChunks_.clear();
     }
+    // 在录制本帧命令之前做一批重建（旧 buffer 走"按帧槽延迟销毁"，无需等 GPU）
+    meshScheduler_.drain(vk_);
 
     // ---- HUD 开关：F3 按下边沿（键盘回调置位，渲染线程 exchange 消费后清零）----
     if (input_.toggleHud.exchange(false, std::memory_order_relaxed)) {

@@ -1450,11 +1450,8 @@ bool VulkanContext::drawFrame() {
     collectRetiredMeshes(frame);
 
     // 增量重建请求：只重建脏 chunk（∪6 邻居由 rebuildChunkMeshes 内部展开）
-    if (chunkRebuildRequested_.exchange(false, std::memory_order_relaxed)) {
-        rebuildChunkMeshes(pendingRebuildBlocks_, pendingDirtyChunks_);
-        pendingRebuildBlocks_.clear();
-        pendingDirtyChunks_.clear();
-    }
+    // 注：脏 chunk 重建已移交 ChunkMeshScheduler（每帧按预算取一批），
+    // 由 Renderer 在 drawFrame 之前驱动；这里不再"一次重建全部"。
 
     uint32_t imageIndex = 0;
     VkResult r = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,

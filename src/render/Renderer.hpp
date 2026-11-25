@@ -3,6 +3,7 @@
 #include "shared/chunk/ChunkPos.hpp"
 #include "shared/protocol/Protocol.hpp"
 #include "shared/state/PlayerInput.hpp"
+#include "ChunkMeshScheduler.hpp"
 #include "VulkanContext.hpp"
 #include <atomic>
 #include <chrono>
@@ -48,6 +49,8 @@ private:
     // 明确表达"已构建"，避免将来把条件改错方向。
     bool fullMeshBuilt_ = false;
     engine::render::VulkanContext& vk_;
+    // 脏 chunk 网格重建排队（P20：每帧按预算取一批，避免一次重建全部导致长帧）
+    ChunkMeshScheduler meshScheduler_;
     engine::business::BusinessWorld& world_;
     engine::core::SPSCQueue<engine::shared::BlockChangeEvent>& changeQueue_;
     engine::shared::PlayerInput& input_;                       // F3 开关请求来源（只消费，不回写）
