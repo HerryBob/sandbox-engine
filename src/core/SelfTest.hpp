@@ -30,6 +30,9 @@ bool bodyMesh();
   // 存档格式：ChunkData 序列化 round-trip（全空 / 4 位 / 8 位 / 16 位）+ 损坏拒绝。
   bool chunkSerialize();
 
+  // 存档目录：创建/写 chunk/读回比对/level.json 往返/缺失与损坏都拒绝。
+  bool saveDir();
+
 // 模组排序：批次倒序依赖拒绝、跨批放行、缺失依赖拒绝、同批环双方拒绝。
 bool modSorter();
 

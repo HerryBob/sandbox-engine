@@ -7,9 +7,11 @@
 #include "render/VulkanMesh.hpp"
 #include "render/assets/ModelDef.hpp"
 #include "render/assets/TextureAtlas.hpp"
+#include "save/SaveDir.hpp"
 #include "shared/chunk/ChunkData.hpp"
 
 #include <cmath>
+#include <filesystem>
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -352,6 +354,89 @@ bool chunkSerialize() {
 
     std::cout << "chunk 存档：全空/4位/8位/16位 round-trip + 损坏拒绝 自检通过\n";
     return true;
+}
+// 存档目录（SaveDir）：写 chunk → 读回 → 比对；level.json 往返；不存在/损坏都返回 false。
+// 会在工作目录下建一个临时目录，验完删掉（不污染真实存档）。
+bool saveDir() {
+    using engine::save::LevelInfo;
+    using engine::save::SaveDir;
+    using engine::shared::ChunkData;
+
+    const std::string tmpRoot = "savetest_tmp";
+    SaveDir dir(tmpRoot);
+    dir.removeAll();                     // 上次残留（中断的测试）
+    if (!dir.ensureDirs()) return false;
+    if (!dir.exists()) return false;
+
+    // ① 无存档 → 读必须返回 false（调用方据此走生成）
+    {
+        ChunkData out;
+        if (dir.readChunk(0, 0, 0, out)) return false;
+    }
+
+    // ② 写 → 读 → 逐格比对（含负坐标，验证文件名编码）
+    {
+        ChunkData src;
+        for (int y = 0; y < 16; ++y)
+            for (int z = 0; z < 16; ++z)
+                for (int x = 0; x < 16; ++x)
+                    src.paletteSet(x, y, z, static_cast<std::uint16_t>(1 + (x * y + z) % 5));
+        const int cx = -2, cy = 1, cz = -3;
+        if (!dir.writeChunk(cx, cy, cz, src)) return false;
+        if (!dir.hasChunk(cx, cy, cz)) return false;
+        ChunkData dst;
+        if (!dir.readChunk(cx, cy, cz, dst)) return false;
+        if (dst.paletteSize() != src.paletteSize()) return false;
+        if (dst.chunkNonAirCount() != src.chunkNonAirCount()) return false;
+        for (int y = 0; y < 16; ++y)
+            for (int z = 0; z < 16; ++z)
+                for (int x = 0; x < 16; ++x)
+                    if (dst.paletteGet(x, y, z) != src.paletteGet(x, y, z)) return false;
+        // 文件名放错位置必须读不出来（坐标写在头里，双重校验）
+        ChunkData other;
+        if (dir.readChunk(cx + 1, cy, cz, other)) return false;
+    }
+
+    // ③ level.json 往返
+    {
+        LevelInfo in;
+        in.formatVersion = 1;
+        in.generatorVersion = 7;
+        in.seed = 0x1234567890ABCDEFull;
+        in.presetName = "default";
+        in.worldName = "world";
+        in.spawnX = 0.5; in.spawnY = 6.25; in.spawnZ = -3.75;
+        in.simTime = 12.5;
+        if (!dir.writeLevel(in)) return false;
+
+        LevelInfo out;
+        if (!dir.readLevel(out)) return false;
+        if (out.generatorVersion != 7) return false;
+        if (out.seed != in.seed) return false;
+        if (out.presetName != "default" || out.worldName != "world") return false;
+        if (out.spawnY != 6.25 || out.spawnZ != -3.75) return false;
+        if (out.simTime != 12.5) return false;
+    }
+
+    // ④ 损坏的 chunk 文件必须读不出来（截断）
+    {
+        ChunkData src;
+        src.paletteSet(0, 0, 0, 3);
+        if (!dir.writeChunk(5, 0, 5, src)) return false;
+        const std::string path = dir.chunkPath(5, 0, 5);
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec) return false;
+        std::filesystem::resize_file(path, size > 10 ? size - 10 : 0, ec);
+        if (ec) return false;
+        ChunkData out;
+        if (dir.readChunk(5, 0, 5, out)) return false;
+    }
+
+    const bool cleaned = dir.removeAll();
+    std::cout << "存档目录：写读 chunk/level.json + 缺失与损坏拒绝 自检"
+              << ((cleaned) ? "通过" : "失败") << "\n";
+    return cleaned;
 }
 // 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
 bool modSorter() {

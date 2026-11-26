@@ -37,3 +37,6 @@ docs/通读记录/
 
 # 学习用参考代码（vulkanStudy 等），本地保留、不入库
 reference/
+
+# 存档目录（原型：saves/world/，不提交）
+saves/

@@ -157,6 +157,9 @@ static void initNoiseAndRunSelfTests() {
     //存档格式（ChunkData 序列化 round-trip + 损坏拒绝）：纯内存，不碰磁盘。
     const bool chunkSaveOk = engine::selftest::chunkSerialize();
 
+    //存档目录（SaveDir）：写读 chunk / level.json 往返 / 缺失与损坏都拒绝；在临时目录里跑，验完删除。
+    const bool saveDirOk = engine::selftest::saveDir();
+
     //刚体物理内核（Jolt）：初始化 + 地面/箱子跑 100 步 → 箱子落在地面顶面上。
     //验的是"内核能不能起来"（编译/链接/初始化顺序/分配器/精度），不碰引擎物理与渲染。
     const bool joltKernelOk = engine::physics::selfTestJoltKernel();
@@ -195,6 +198,8 @@ static void initNoiseAndRunSelfTests() {
               << (chunkMeshOk ? "通过" : "失败") << "\n";
     std::cout << "chunk 存档：序列化 round-trip + 损坏拒绝自检"
               << (chunkSaveOk ? "通过" : "失败") << "\n";
+    std::cout << "存档目录：写读 chunk / level.json 往返 + 拒绝损坏自检"
+              << (saveDirOk ? "通过" : "失败") << "\n";
     std::cout << "物理内核：Jolt 初始化 + 地面/箱子 100 步落地自检"
               << (joltKernelOk ? "通过" : "失败") << "\n";
     std::cout << "模组排序：跨批次依赖方向 + 缺失依赖 + 同批环自检"
