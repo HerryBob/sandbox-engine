@@ -611,7 +611,6 @@ static int run(const std::string& presetName) {
             if (!frameGate.waitPoll()) break;
 
             renderer.tick();
-
             // 输入：**每渲染帧消费一次**鼠标/键盘增量（MC 同款）。
             // 放在 renderer.tick 之后、取实体位姿之前 —— 相机与实体用同一帧的插值结果。
             inputSampler.tick();

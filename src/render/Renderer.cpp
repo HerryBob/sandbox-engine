@@ -1,7 +1,13 @@
 #include "render/Renderer.hpp"
+
+#include "core/Log.hpp"
+
+#include <algorithm>
+#include <sstream>
 #include "business/BusinessWorld.hpp"
 
 namespace engine::render {
+
 
 void Renderer::tick() {
     // 首帧：把整个世界一次性建好网格（此后只走增量）。
@@ -17,15 +23,26 @@ void Renderer::tick() {
         changeEventsReceived_.fetch_add(1, std::memory_order_relaxed);
         for (const auto& cp : ev.dirtyChunks) dirtyChunks_.insert(cp);
     }
-    // 有脏 chunk → 交给调度器排队（P20）：每帧只按预算重建一批，其余留到下一帧。
-    // 取数只导 dirty ∪ 6 邻居（面剔除要用邻居方块）。
+    // 有脏 chunk → 每帧最多取 kMaxChunksPerTick 个做**快照 + 排队**。
+    // 为什么限制在快照这一步（而不只是重建）：world_.chunkSnapshot() 要抢世界锁并
+    // 拷贝几千个 Block（含邻居），实测流式加载时它单独就能吃掉 10~16ms —— 而 P20 的
+    // 预算只约束"重建"，管不到"取数"。把批量限制提前到取数，tick 的 p99 才真正下来。
+    // 剩下的脏 chunk 留在 dirtyChunks_ 里，下一帧继续（不丢）。
+    constexpr std::size_t kMaxChunksPerTick = 1;
     if (!dirtyChunks_.empty()) {
-        meshScheduler_.request(world_.chunkSnapshot(dirtyChunks_), dirtyChunks_);
-        dirtyChunks_.clear();
+        std::unordered_set<engine::shared::ChunkPos> batch;
+        batch.reserve(kMaxChunksPerTick);
+        auto it = dirtyChunks_.begin();
+        while (it != dirtyChunks_.end() && batch.size() < kMaxChunksPerTick) {
+            batch.insert(*it);
+            it = dirtyChunks_.erase(it);
+        }
+        // 取数只导 batch ∪ 6 邻居（面剔除要用邻居方块）
+        // 取数只导 batch ∪ 6 邻居（面剔除要用邻居方块）
+        meshScheduler_.request(world_.chunkSnapshot(batch), batch);
     }
     // 在录制本帧命令之前做一批重建（旧 buffer 走"按帧槽延迟销毁"，无需等 GPU）
     meshScheduler_.drain(vk_);
-
     // ---- HUD 开关：F3 按下边沿（键盘回调置位，渲染线程 exchange 消费后清零）----
     if (input_.toggleHud.exchange(false, std::memory_order_relaxed)) {
         hudVisible_ = !hudVisible_;

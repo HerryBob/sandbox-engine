@@ -63,8 +63,10 @@ private:
     // 兜底：job 溢出时的一次性请求（整体做完，不排队）
     std::vector<engine::shared::Block>           immediate_;
     std::unordered_set<engine::shared::ChunkPos> immediateChunks_;
-    double budgetMs_ = 4.0;
-    int    maxChunks_ = 2;
+    // 每帧只重建 1 个 chunk：实测单 chunk 的"建剔除集合 + 顶点生成 + 4 组缓冲上传"
+    // 就要 3~7ms，两个就会撞穿 6ms 帧预算（表现为流式加载时的偶发卡顿）。
+    double budgetMs_ = 2.5;
+    int    maxChunks_ = 1;
     // job 太多（流式猛加载）时不再排队，直接一次性做完新请求——
     // 宁可偶尔长一帧，也不要无限堆积快照/延迟。
     static constexpr std::size_t kMaxJobs = 8;
