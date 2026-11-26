@@ -101,7 +101,10 @@ function Invoke-Measure {
     $log = Join-Path $logDir ('smoke_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
     $err = $log + '.err'
 
+    # --no-save：冒烟/基线必须跑"纯净世界"。否则玩家存档（他挖过/建过的世界）会让
+    # blocks/chunks 指标偏离基线 —— 那不是回归，是"你玩过"，基线就失去意义了。
     $proc = Start-Process -FilePath $exe -WorkingDirectory $BuildDir `
+            -ArgumentList '--no-save' `
             -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
     Start-Sleep -Seconds $Seconds
     if (-not $proc.HasExited) {

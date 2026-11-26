@@ -1,5 +1,6 @@
 #include "shared/chunk/ChunkData.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #include "shared/chunk/ChunkFormat.hpp"
@@ -97,24 +98,64 @@ void ChunkData::serialize(std::vector<std::uint8_t>& out,
     }
     const std::size_t bodyAt = out.size();
 
+    // ---- 规范化：调色板按类型 id 排序 + 重映射索引 ----
+    // 为什么必须做：内存里的调色板顺序取决于"方块被写入的先后"，而存档应该只取决于
+    // **世界内容**。不规范化的话，同一个世界存两次字节可能不同（实测：加载后重存有
+    // 2 个 chunk 的字节变了），既没法做存档 diff，也没法用"字节相等"当回归判据。
+    // 代价：写盘时一次 4096 遍历 + 8KB 临时表（只在写盘时发生，可忽略）。
+    std::vector<PaletteEntry> canonPalette;
+    canonPalette.reserve(palette_.size());
+    for (const PaletteEntry e : palette_) canonPalette.push_back(e);
+    std::sort(canonPalette.begin(), canonPalette.end());
+    canonPalette.erase(std::unique(canonPalette.begin(), canonPalette.end()), canonPalette.end());
+    if (canonPalette.empty()) canonPalette.push_back(0);   // 兜底：至少要有 Air
+
+    // 旧索引 → 新索引
+    std::vector<std::uint16_t> remap(palette_.size(), 0);
+    for (std::size_t oldIdx = 0; oldIdx < palette_.size(); ++oldIdx) {
+        const auto it = std::lower_bound(canonPalette.begin(), canonPalette.end(), palette_[oldIdx]);
+        remap[oldIdx] = static_cast<std::uint16_t>(it - canonPalette.begin());
+    }
+
+    // 位宽按**规范化后**的调色板大小决定（可能比内存里的更小，例如内存留了废弃条目）
+    std::uint8_t writeBits = 4;
+    if (canonPalette.size() > 256) writeBits = 16;
+    else if (canonPalette.size() > 16) writeBits = 8;
+
     // ---- 段 1：Palette ----
     const std::size_t paletteLenAt = out.size();
-    putU16(out, static_cast<std::uint16_t>(palette_.size()));
-    for (const PaletteEntry e : palette_) putU16(out, e);
+    putU16(out, static_cast<std::uint16_t>(canonPalette.size()));
+    for (const PaletteEntry e : canonPalette) putU16(out, e);
     const std::uint32_t paletteLen = static_cast<std::uint32_t>(out.size() - paletteLenAt);
 
     // ---- 段 2：Indices（与内存布局逐字节一致，不做重打包）----
     // 段正文 = bits u16 + pad u16 + dataLen u32 + data（段表里的 tag/len 是另一处，
     // 这里**不能**再写一份段头 —— 第一版多写了 8 字节占位，读回时 bits 读到 0）。
     const std::size_t idxLenAt = out.size();
-    putU16(out, static_cast<std::uint16_t>(bits_));
+    putU16(out, static_cast<std::uint16_t>(writeBits));
     putU16(out, 0);                                       // pad
-    if (bits_ == 16) {
-        putU32(out, static_cast<std::uint32_t>(wide_.size() * sizeof(std::uint16_t)));
-        for (const std::uint16_t v : wide_) putU16(out, v);
+    // 按 writeBits 逐格重打包（不再"逐字节搬内存"：因为规范化可能改变位宽）
+    if (writeBits == 16) {
+        putU32(out, static_cast<std::uint32_t>(CHUNK_VOLUME * 2));
+        for (std::int32_t i = 0; i < CHUNK_VOLUME; ++i)
+            putU16(out, remap[paletteIndexAt(i)]);
     } else {
-        putU32(out, static_cast<std::uint32_t>(packed_.size()));
-        out.insert(out.end(), packed_.begin(), packed_.end());
+        std::vector<std::uint8_t> packed;
+        if (writeBits == 4) {
+            packed.assign(static_cast<std::size_t>(CHUNK_VOLUME) / 2, 0);
+            for (std::int32_t i = 0; i < CHUNK_VOLUME; ++i) {
+                const std::uint16_t v = remap[paletteIndexAt(i)] & 0x0F;
+                std::uint8_t& b = packed[static_cast<std::size_t>(i >> 1)];
+                if (i & 1) b = static_cast<std::uint8_t>((b & 0x0F) | (v << 4));
+                else       b = static_cast<std::uint8_t>((b & 0xF0) | v);
+            }
+        } else {
+            packed.resize(static_cast<std::size_t>(CHUNK_VOLUME));
+            for (std::int32_t i = 0; i < CHUNK_VOLUME; ++i)
+                packed[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(remap[paletteIndexAt(i)]);
+        }
+        putU32(out, static_cast<std::uint32_t>(packed.size()));
+        out.insert(out.end(), packed.begin(), packed.end());
     }
     const std::uint32_t idxLen = static_cast<std::uint32_t>(out.size() - idxLenAt);
 

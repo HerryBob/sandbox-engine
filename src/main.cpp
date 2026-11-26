@@ -41,6 +41,7 @@
 #include "worldgen/preset/WorldPreset.hpp"
 #include "worldgen/generator/ColumnGenerator.hpp"
 #include "save/SaveDir.hpp"
+#include "save/SaveSession.hpp"
 #include "worldgen/streaming/ChunkStreamer.hpp"
 
 #include <algorithm>
@@ -91,6 +92,23 @@ static void chdirToExeDir() {
 #endif
 }
 
+// 存档根目录：从 exe 所在目录向上找仓库根（有 .git 或 tools 的那一级）→ <repo>/saves。
+// 为什么不用相对 CWD：CWD 在 build/Debug 下，clean build 会连玩家存档一起删掉。
+// 找不到仓库根（例如单独拷出去的 exe）就退回 exe 旁边的 saves/。
+static std::filesystem::path resolveSaveRoot() {
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::current_path(ec);
+    if (ec) return std::filesystem::path("saves");
+    for (int i = 0; i < 4; ++i) {
+        if (std::filesystem::exists(dir / ".git", ec) ||
+            std::filesystem::exists(dir / "tools", ec)) {
+            return dir / "saves";
+        }
+        if (!dir.has_parent_path()) break;
+        dir = dir.parent_path();
+    }
+    return std::filesystem::current_path(ec) / "saves";
+}
 // 引擎主流程：装配三条轨 → 启动 → 主线程事件循环 → 优雅停止。
 // presetName：世界预设名（不带 .json），由启动参数 --preset 决定。
 // ============================================================================
@@ -211,8 +229,16 @@ static void initNoiseAndRunSelfTests() {
 // 把一批流式结果落地到世界（业务线程 / 装配期单线程调用）。
 // 规则5：ChunkStreamer 只产数据（它不持有 World），"写 World"留在唯一写者这一侧。
 static void applyStreamBatch(engine::business::World& world,
-                             const engine::worldgen::ChunkStreamer::StreamBatch& batch) {
-    if (!batch.deadChunks.empty()) world.unloadChunks(batch.deadChunks);
+                             const engine::worldgen::ChunkStreamer::StreamBatch& batch,
+                             engine::save::SaveSession* save = nullptr) {
+    // 卸载前先落盘（数据马上要删了）。用"写→删"而不是"删→写"，
+    // 因为 copyChunk 读的是世界里的数据。
+    if (!batch.deadChunks.empty()) {
+        if (save != nullptr) {
+            for (const auto& cp : batch.deadChunks) save->saveNow(world, cp);
+        }
+        world.unloadChunks(batch.deadChunks);
+    }
     for (const auto& col : batch.columns) {
         const auto& blocks = *col.blocks;
         for (int level = 0; level < engine::worldgen::kGenChunkLevels; ++level) {
@@ -221,6 +247,9 @@ static void applyStreamBatch(engine::business::World& world,
                 (engine::worldgen::kGenMinY / engine::shared::CHUNK_SIZE) + level,
                 col.pos.z};
             world.applyGeneratedChunk(cp, blocks.chunks[level]);
+            // 整列 4 层都标待写：全空气层不建 chunk，但**磁盘上必须有**它（32 字节），
+            // 否则重新加载时"4 层齐全"这条约束永远满足不了 → 每次都要重新生成。
+            if (save != nullptr) save->markPending(cp);
         }
     }
 }
@@ -229,14 +258,15 @@ static void applyStreamBatch(engine::business::World& world,
 // 刻意走和运行期完全同一条路径（tick → 后台生成 → takeBatch → World）。
 static void warmupWindow(engine::worldgen::ChunkStreamer& streamer,
                          engine::business::World& world,
-                         std::size_t warmupColumns) {
+                         std::size_t warmupColumns,
+                         engine::save::SaveSession* save = nullptr) {
     const double spawnX = 0.0;
     const double spawnZ = 8.0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (streamer.stats().applied < warmupColumns &&
            std::chrono::steady_clock::now() < deadline) {
         streamer.tick(spawnX, spawnZ);
-        applyStreamBatch(world, streamer.takeBatch(engine::worldgen::ChunkStreamer::kMaxApplyPerTick));
+        applyStreamBatch(world, streamer.takeBatch(engine::worldgen::ChunkStreamer::kMaxApplyPerTick), save);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
@@ -345,7 +375,7 @@ struct FrameGate {
     }
 };
 
-static int run(const std::string& presetName) {
+static int run(const std::string& presetName, bool noSave) {
     initConsole();
     std::cout << "=== 沙盒引擎 ===\n";
 
@@ -451,6 +481,8 @@ static int run(const std::string& presetName) {
     engine::worldgen::ColumnGenerator columnGen(preset);
     bool genOk = false;
     std::unique_ptr<engine::worldgen::ChunkStreamer> streamer;
+    // 存档会话（原型 step ④）：作用域要覆盖"装配 → 预热 → 业务循环 → 退出"
+    engine::save::SaveSession saveSession;
 
     if (presetOk && columnGen.prepare()) {
         genOk = true;
@@ -463,21 +495,30 @@ static int run(const std::string& presetName) {
         // 用回调注入而不是让 worldgen 依赖 save/ —— worldgen 保持"不碰磁盘"的边界，
         // 由装配层（这里）决定存档位置。
         {
-            const std::string saveRoot = "saves/world";
-            engine::save::SaveDir saveDir(saveRoot);
-            saveDir.ensureDirs();   // 目录不存在就建（写盘在 step ④）
-            // 路径是相对**工作目录**的（现为 build/Debug）→ 打一次绝对路径，避免以后找不到存档
-            ENGINE_LOG_INFO("Save", "存档目录：" +
-                std::filesystem::absolute(saveRoot).string() +
-                (saveDir.exists() ? "（存在，将优先读盘）" : "（不存在，全部现场生成）"));
-            if (saveDir.exists()) {
+            // 存档会话（原型 step ④）：根目录 = <repo>/saves，存档名先固定 "world"。
+            // 多存档（新建/选择/删除）后续只需换 worldName，格式与目录结构不用动。
+            const std::string worldName = "world";
+            engine::save::LevelInfo meta;
+            meta.formatVersion = 1;
+            meta.generatorVersion = 1;
+            meta.seed = static_cast<std::uint64_t>(preset.seed);
+            meta.presetName = presetName;
+            meta.worldName = worldName;
+            meta.spawnX = 0.0; meta.spawnY = 0.0; meta.spawnZ = 0.0;
+
+            const std::filesystem::path saveRoot = resolveSaveRoot();
+            if (!noSave) saveSession.init(saveRoot, worldName, meta);
+            if (saveSession.active()) {
+                const std::string worldDir = saveSession.worldDir().string();
+                ENGINE_LOG_INFO("Save", "存档目录：" + worldDir +
+                    "（已写 " + std::to_string(saveSession.savedChunkCount()) + " 个 chunk）");
+                // 读路径：同一目录。一列 = kGenChunkLevels 个竖直 chunk，
+                // **任一缺失即整列 miss**（不能半列从盘、半列生成：地形会在层交界处错位）
                 streamer->setColumnLoader(
-                    [saveRoot](const engine::worldgen::ColPos& pos,
+                    [worldDir](const engine::worldgen::ColPos& pos,
                                engine::worldgen::ColumnBlocks& out) {
-                        engine::save::SaveDir dir(saveRoot);
+                        engine::save::SaveDir dir(worldDir);
                         out.pos = pos;
-                        // 一列 = kGenChunkLevels 个竖直 chunk；**任一缺失即整列 miss**
-                        // （不能半列从盘、半列生成：地形会在层交界处错位）
                         for (int level = 0; level < engine::worldgen::kGenChunkLevels; ++level) {
                             const int cy = (engine::worldgen::kGenMinY /
                                             engine::shared::CHUNK_SIZE) + level;
@@ -494,9 +535,14 @@ static int run(const std::string& presetName) {
         }
         streamer->start();
 
-        warmupWindow(*streamer, businessWorld.world(), warmupColumns);
+        warmupWindow(*streamer, businessWorld.world(), warmupColumns, &saveSession);
         // 首帧渲染走全量快照重建：装配期的脏标记清掉，避免首帧后再重复重建一遍
         businessWorld.world().clearDirtyChunks();
+
+        // 诊断（P1 存档）：本会话预热里"从盘加载 / 现场生成"各多少列
+        ENGINE_LOG_INFO("Save", "预热来源：从盘加载 " +
+            std::to_string(streamer->loadedColumnCount()) + " 列，现场生成 " +
+            std::to_string(streamer->generatedColumnCount()) + " 列");
     } else {
         std::cout << "流式预热：失败（预设未加载或地层校验未通过）\n";
     }
@@ -564,7 +610,7 @@ static int run(const std::string& presetName) {
                 // 策略按变化数量分流：>8 个走全量重建（下方 requestPhysicsResync，一次建完），
                 // 少量走增量、只发这批 chunk 的新内容。稳态 batch 为空，不触发。
                 if (!batch.empty()) {
-                    applyStreamBatch(businessWorld.world(), batch);
+                    applyStreamBatch(businessWorld.world(), batch, &saveSession);
                     // 增量同步：只发这批 chunk 的新内容（不再全量重发 8 万方块）。
                     std::unordered_set<engine::shared::ChunkPos> changed;
                     for (const auto& cp : batch.deadChunks) changed.insert(cp);
@@ -734,6 +780,11 @@ static int run(const std::string& presetName) {
 
     // 优雅停止：模拟两条轨先停（业务 → 生成 → 物理），渲染轨最后停（只读，不阻塞模拟停止）。
     businessLoop.stop();
+    // 业务线程已停 → World 不再有人写 → 可以安全地把待写 chunk 落盘。
+    // 必须在 streamer->stop() 之前：那时世界是稳定的（没有并发写入）。
+    if (saveSession.active()) {
+        saveSession.flush(businessWorld.world(), businessWorld.simTime());
+    }
     if (streamer) streamer->stop();   // 业务线程已停（不再 receiveResults），再停生成线程
     physicsLoop.stop();
     renderLoop.stop();
@@ -766,6 +817,16 @@ static engine::core::LogLevel parseLogLevelArg(int argc, char** argv) {
         }
     }
     return level;
+}
+
+// 解析启动参数 --no-save：本次运行**不读也不写**存档。
+// 用途：冒烟/基线必须跑"纯净世界"，否则玩家存档会让 blocks/chunks 指标变化，
+// 基线就失去意义（那不是回归，是"你玩过"）。
+static bool hasNoSaveArg(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--no-save") return true;
+    }
+    return false;
 }
 
 // 解析启动参数 --preset <name>（缺省 default）：决定跑哪个世界预设。
@@ -816,7 +877,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    const int code = run(parsePresetArg(argc, argv));
+    const int code = run(parsePresetArg(argc, argv), hasNoSaveArg(argc, argv));
 
     engine::core::logShutdown();   // 停止后台线程并 flush 剩余队列
     return code;

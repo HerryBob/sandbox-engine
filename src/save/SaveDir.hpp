@@ -31,6 +31,7 @@ struct LevelInfo {
 
 class SaveDir {
 public:
+    SaveDir() = default;                 // 空目录（SaveSession 未激活时用）
     explicit SaveDir(std::string root);
 
     const std::string& root() const noexcept { return root_; }

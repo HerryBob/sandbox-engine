@@ -55,6 +55,9 @@ public:
                            engine::shared::BlockType& outType) const;
     // 已加载的非空 chunk 数量。
     std::size_t chunkCount() const;
+    // 拷出一个 chunk 的数据（存档写盘用）：不存在返回 false。
+    // 只拷数据、不暴露内部引用 —— 调用方（存档）在别的线程/别的时机使用。
+    bool copyChunk(const engine::shared::ChunkPos& cp, engine::shared::ChunkData& out) const;
 
     // 调色板统计（验收用）：索引位宽分布、字典项数、实际占用字节。
     // 验收/诊断专用：不属于 World 的核心职责。

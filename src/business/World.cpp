@@ -129,6 +129,14 @@ World::LookupResult World::lookupBlock(const engine::shared::BlockPos& p,
     return LookupResult::Occupied;
 }
 
+bool World::copyChunk(const engine::shared::ChunkPos& cp,
+                      engine::shared::ChunkData& out) const {
+    std::lock_guard<std::mutex> lock(chunksLock_);
+    const auto it = chunks_.find(cp);
+    if (it == chunks_.end()) return false;
+    out = it->second;
+    return true;
+}
 std::size_t World::chunkCount() const {
     std::lock_guard<std::mutex> lock(chunksLock_);
     return chunks_.size();
