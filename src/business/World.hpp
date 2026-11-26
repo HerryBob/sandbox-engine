@@ -2,7 +2,6 @@
 #include "shared/chunk/ChunkData.hpp"
 
 #include <cstdint>
-#include <functional> // std::function（forEachBlockInAABB 回调）
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -72,11 +71,24 @@ public:
         double avgPalette = 0.0;
     };
     PaletteStats paletteStats() const;
-    // 遍历 [min, max] 闭区间内的非空气方块；回调在锁内执行，不可重入。
+    // 遍历 [min, max] 闭区间内的非空气方块；回调在锁内执行，**不可重入**。
+    // P11：模板化（原来是 std::function）——每块一次间接调用 → 编译期内联。
+    // 调用方传 lambda 即可；模组 API 侧仍只收集、不回调（锁内回调会死锁，见 WorldApi）。
+    template <typename Fn>
     void forEachBlockInAABB(const engine::shared::BlockPos& min,
-                            const engine::shared::BlockPos& max,
-                            const std::function<void(const engine::shared::BlockPos&,
-                                                     engine::shared::BlockType)>& fn) const;
+                            const engine::shared::BlockPos& max, Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(chunksLock_);
+        for (int x = min.x; x <= max.x; ++x)
+            for (int y = min.y; y <= max.y; ++y)
+                for (int z = min.z; z <= max.z; ++z) {
+                    const engine::shared::BlockPos p{x, y, z};
+                    const auto it = chunks_.find(engine::shared::toChunkOf(p));
+                    if (it == chunks_.end()) continue;
+                    const engine::shared::PaletteEntry t = it->second.paletteGet(p);
+                    if (t == engine::shared::kAirEntry) continue;
+                    fn(p, static_cast<engine::shared::BlockType>(t));
+                }
+    }
 
     // ---- 修改入口（内部加锁）----
     // 放置方块；规则校验在 base::tryPlace，返回 false = 被拒绝。
@@ -114,6 +126,10 @@ public:
 private:
     // chunk 数据表：key = chunk 坐标，value = 16³ 方块数据（调色板 + 索引）；空 chunk 不入表。
     std::unordered_map<engine::shared::ChunkPos, engine::shared::ChunkData> chunks_;
+    // P2：非空气方块总数（增量维护）。原来 blockCount() 每秒持锁遍历 81 个 chunk 累加，
+    // 与业务/流式线程抢锁；现在增删时 ±，读是 O(1)。
+    // 只有业务线程（和装配期主线程）改它 —— 与 chunks_ 同锁保护，故用普通 std::size_t。
+    std::size_t nonAirTotal_ = 0;
     mutable std::mutex chunksLock_; // 保护 chunks_；const 成员函数也要加锁
 
     // 本 tick 变脏的 chunk 集合（写操作插入，自动去重）；flushChanges 消费后清空。

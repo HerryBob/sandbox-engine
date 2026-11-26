@@ -40,12 +40,10 @@ World::World() {
 }
 
 std::size_t World::blockCount() const {
-    // main 线程只读（日志/断言）与业务线程结构性修改可能并发——加锁读。
-    // 区块化后 = chunk 非空气方块数。
+    // P2：读增量维护的计数（O(1)）。原来每秒持锁遍历所有 chunk 累加，
+    // 与业务线程/流式加载抢同一把 chunksLock_（81 chunk ≈ 33 万次/秒）。
     std::lock_guard<std::mutex> lock(chunksLock_);
-    std::size_t n = 0;
-    for (const auto& kv : chunks_) n += kv.second.chunkNonAirCount();
-    return n;
+    return nonAirTotal_;
 }
 
 std::vector<engine::shared::Block> World::renderSnapshot() const {
@@ -53,7 +51,9 @@ std::vector<engine::shared::Block> World::renderSnapshot() const {
     // 数据层 ② 区块化：遍历所有已加载 chunk 的非空气方块。
     std::lock_guard<std::mutex> lock(chunksLock_);
     std::vector<engine::shared::Block> out;
-    out.reserve(chunks_.size() * 64); // 粗略预留，减少扩容
+    // P9：按**实际**非空气方块数精确预留（原来是 chunks × 64 的粗估，10k chunk 时
+    // 预留 640k 项 ≈ 18MB 却只用得到 1/3）——P2 的计数让这个估计变成精确值。
+    out.reserve(nonAirTotal_);
     for (const auto& [cp, data] : chunks_) {
         appendChunkBlocks(cp, data, out);
     }
@@ -86,7 +86,13 @@ std::vector<engine::shared::Block> World::chunkSnapshot(
 
     std::lock_guard<std::mutex> lock(chunksLock_);
     std::vector<engine::shared::Block> out;
-    out.reserve(targets.size() * 512); // 实测约 3156 非空气/chunk，512 起步留扩容余量
+    // P9：按目标的实际方块数精确预留（原来 targets × 512 是粗估，会多预留一倍以上）
+    std::size_t targetBlocks = 0;
+    for (const auto& cp : targets) {
+        const auto it = chunks_.find(cp);
+        if (it != chunks_.end()) targetBlocks += it->second.chunkNonAirCount();
+    }
+    out.reserve(targetBlocks);
     for (const auto& cp : targets) {
         const auto it = chunks_.find(cp);
         if (it == chunks_.end()) continue; // 未加载：跳过（面保持暴露）
@@ -168,37 +174,23 @@ World::PaletteStats World::paletteStats() const {
 // 与 renderSnapshot/chunkSnapshot 风格一致——无回调、无锁内执行、无死锁风险。
 // 当前 forEachBlockInAABB 的"回调在锁内"对模组作者是隐性陷阱：签名看不出约束，
 // 模组作者最可能写的"回调里查/改别的方块"都会死锁且无错误信息。
-void World::forEachBlockInAABB(
-    const engine::shared::BlockPos& min, const engine::shared::BlockPos& max,
-    const std::function<void(const engine::shared::BlockPos&,
-                             engine::shared::BlockType)>& fn) const {
-    // 区域查询（跨 chunk；同步/LOD 生成/变更广播共用）：遍历区域内每个坐标，
-    // chunk 定位 O(1)。原型按坐标遍历（区域通常 = chunk 级 16³=4096 次查询，可接受；
-    // 渲染端想烘焙 mesh 时扩展 1 格拉邻居即可，Minetest retrieveBlocks 同思想）。
-    std::lock_guard<std::mutex> lock(chunksLock_);
-    for (int x = min.x; x <= max.x; ++x)
-        for (int y = min.y; y <= max.y; ++y)
-            for (int z = min.z; z <= max.z; ++z) {
-                const engine::shared::BlockPos p{x, y, z};
-                const auto it = chunks_.find(engine::shared::toChunkOf(p));
-                if (it == chunks_.end()) continue;
-                const engine::shared::PaletteEntry t = it->second.paletteGet(p);
-                if (t == engine::shared::kAirEntry) continue;
-                fn(p, static_cast<engine::shared::BlockType>(t));
-            }
-}
+
 
 bool World::placeBlock(const engine::shared::BlockPos& p,
                        engine::shared::BlockType type) {
     std::lock_guard<std::mutex> lock(chunksLock_);
     // 裁决 + 写入 + 标脏在 base（占用拒绝）；锁在此处（数据修改的唯一合法入口）。
-    return base::tryPlace(chunks_, dirtyChunksThisTick_, p, type);
+    const bool ok = base::tryPlace(chunks_, dirtyChunksThisTick_, p, type);
+    if (ok) ++nonAirTotal_;   // P2：占用裁决已保证该格原来是空的
+    return ok;
 }
 
 bool World::removeBlock(const engine::shared::BlockPos& p) {
     std::lock_guard<std::mutex> lock(chunksLock_);
     // 裁决 + 写入 + 标脏在 base（不存在拒绝）；锁在此处。
-    return base::tryRemove(chunks_, dirtyChunksThisTick_, p);
+    const bool ok = base::tryRemove(chunks_, dirtyChunksThisTick_, p);
+    if (ok && nonAirTotal_ > 0) --nonAirTotal_;   // P2
+    return ok;
 }
 
 void World::applyGeneratedChunk(const engine::shared::ChunkPos& cp,
@@ -210,7 +202,9 @@ void World::applyGeneratedChunk(const engine::shared::ChunkPos& cp,
     if (data.isAllAir() && chunks_.find(cp) == chunks_.end()) return;
 
     auto& slot = chunks_[cp];   // 已有则取用、没有则缺省构造
+    nonAirTotal_ -= slot.chunkNonAirCount();   // P2：覆盖前先扣掉旧值
     slot = data;                // 整体覆盖：生成是权威写入，不做旧值合并
+    nonAirTotal_ += slot.chunkNonAirCount();   // P2：加入新值
     slot.markDirty(base::DIRTY_GENERATED); // 修改跟踪：生成装载
 
     // 运行期必须进脏集合：渲染端只按它请求增量重建
@@ -230,7 +224,10 @@ std::size_t World::unloadChunks(const std::unordered_set<engine::shared::ChunkPo
     std::lock_guard<std::mutex> lock(chunksLock_);
     std::size_t removed = 0;
     for (const auto& cp : cps) {
-        if (chunks_.erase(cp) == 0) continue;   // 本来就没加载：不标脏、不计数
+        auto it = chunks_.find(cp);
+        if (it == chunks_.end()) continue;      // 本来就没加载：不标脏、不计数
+        nonAirTotal_ -= it->second.chunkNonAirCount();   // P2
+        chunks_.erase(it);
         ++removed;
         dirtyChunksThisTick_.insert(cp);        // 自身：让渲染端把旧 mesh 删掉
         for (const auto& off : kNeighborOffsets) {

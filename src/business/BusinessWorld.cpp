@@ -30,8 +30,9 @@ void BusinessWorld::tick(double scale) {
     // 25TPS：每个业务 tick 推进 dt=0.04s，受 time_scale 缩放（与物理线程统一 25/25）。
     // simTime_ 是跨线程共享（main 线程读取），必须走原子读改写。
     // 本类只负责世界状态推进与裁决；事件由调用方在 tick 边界自行驱动。
-    simTime_.store(simTime_.load(std::memory_order_relaxed) + 0.04 * scale,
-                   std::memory_order_relaxed);
+    // P8：C++20 的 atomic<double>::fetch_add —— 原来 store(load()+x) 是两次原子操作，
+    // 读改写之间可能被别的读者看到中间态。
+    simTime_.fetch_add(0.04 * scale, std::memory_order_relaxed);
     tickCount_.fetch_add(1, std::memory_order_relaxed);
     maybeLog();
 }
