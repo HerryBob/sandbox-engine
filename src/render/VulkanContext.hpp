@@ -16,6 +16,7 @@
 #include "shared/chunk/ChunkPos.hpp"
 #include "render/assets/TextureAtlas.hpp"
 #include "render/BodyMeshStore.hpp"
+#include "render/EntityRenderer.hpp"
 #include "render/MeshTypes.hpp"
 #include "render/FrameInfra.hpp"
 #include "render/HudRenderer.hpp"
@@ -47,42 +48,6 @@ struct UniformBufferObject {
 // 全量接口保留为"重建全部 chunk"（首帧/世界重建用）。
 // 分桶：一个 chunk 可同时持有 Solid 桶 + Cutout 桶两组网格（玻璃等），
 //       重建/销毁同一个对象，生命周期原子化（不拆两个 map）。
-
-// 一根骨骼的 GPU 网格：与 ChunkMesh 的 Solid 桶同构（实体不需要 Cutout 桶）。
-struct EntityBoneGpu {
-    VkBuffer       vertexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
-    VkBuffer       indexBuffer  = VK_NULL_HANDLE;
-    VkDeviceMemory indexMemory  = VK_NULL_HANDLE;
-    uint32_t       indexCount   = 0;
-};
-
-// 一个实体的全部骨骼资源与骨骼树。
-// order 是拓扑序（父一定排在子前面），每帧按它顺序累乘世界矩阵。
-struct EntityGpu {
-    std::vector<EntityBoneGpu> bones;
-    std::vector<int>           parents;   // -1 = 根
-    std::vector<glm::vec3>     pivots;    // 模型局部空间（世界单位）
-    std::vector<int>           order;
-    VkDescriptorSet            textureSet = VK_NULL_HANDLE; // 该实体用的贴图 descriptor
-};
-
-// 实体的每帧状态：位置 + 绕 y 轴朝向（度）+ 可见性。
-// visible 属于实例而不是资源：同一个模型可以被多个实例共用，隐藏其中一个不该连带隐藏别人。
-struct EntityPose {
-    glm::dvec3 pos{0.0, 0.0, 0.0};
-    float      yawDeg = 0.0f;
-    bool       visible = true;
-};
-
-// 一张实体贴图及其 descriptor set。按贴图路径建一次，多个实体可共用同一张。
-struct EntityTextureRes {
-    VkImage         image   = VK_NULL_HANDLE;
-    VkDeviceMemory  memory  = VK_NULL_HANDLE;
-    VkImageView     view    = VK_NULL_HANDLE;
-    VkSampler       sampler = VK_NULL_HANDLE;
-    VkDescriptorSet set     = VK_NULL_HANDLE;
-};
 
 class VulkanContext {
 public:
@@ -184,7 +149,6 @@ private:
     void destroyRenderObjects();
     // 确保某张实体贴图已加载（图像/视图/采样器 + 自己的 descriptor set）。
     // 按路径去重：重复调用同一路径只建一次。返回 false 表示该贴图不可用。
-    bool ensureEntityTexture(const std::string& texturePath);
     void updateViewProj(double dt); // 从 CameraState 读相机状态 → 算 viewProj（drawFrame 开头调用，只读不处理输入）
     // 推送「模型矩阵 + 相机矩阵」共 128 字节到 push constant（两个 mat4，正好是规范保证的下限）。
     // 相机矩阵以前放在单份 UBO 里，而 kMaxFramesInFlight=2 → CPU 写第 N 帧会覆盖第 N-1 帧
@@ -244,6 +208,8 @@ private:
     FrameInfra infra_;
     // 刚体网格 + 位姿（S6a 抽出的 BodyMeshStore）
     BodyMeshStore bodies_;
+    // 实体模型/贴图/位姿（S6b 抽出的 EntityRenderer）
+    EntityRenderer entities_;
     // FPS/帧耗时统计（渲染线程自己算，喂给 HUD 显示）
     std::chrono::steady_clock::time_point fpsWindowStart_{};
     std::chrono::steady_clock::time_point lastFrameStart_{};
@@ -301,9 +267,6 @@ private:
     // ---- 实体（带骨骼的模型）----
     // 贴图独立于方块图集：角色是整张 64×64，不参与图集打包。
     // 按路径缓存：同一张贴图只建一次，多个实体实例共用同一份 image/view/set。
-    std::unordered_map<std::string, EntityTextureRes> entityTextures_;
-    std::unordered_map<int, EntityGpu>  entityMeshes_;
-    std::unordered_map<int, EntityPose> entityPose_;
 
     // FPS 统计（0.5 秒窗口 + 指数平滑）
 };
