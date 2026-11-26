@@ -205,8 +205,8 @@
 
 | # | 类型 | 位置 | 现象 | 根因 | 严重度 | 状态 |
 |---|---|---|---|---|---|---|
-| B135 | 请求单槽覆盖 | `VulkanContext::requestChunkRebuild` | `pendingDirtyChunks_ = dirtyChunks` 是**覆盖**而非并集；`chunkRebuildRequested_` 只是一个 bool | 两次变更事件落在同一次重建之前时，前一批脏 chunk 永久丢失 → 那个 chunk 的网格停在旧状态 | 🔴 | ⏳ 待验证 |
-| B136 | 范围不一致 | `VulkanContext::rebuildChunkMeshes:685` | 剔除依据是「脏 chunk ∪ 1 环邻居」（`chunkSnapshot(expandNeighbors=true)`），但重建集合只有脏 chunk（`rebuildSet = dirtyChunks`） | 用邻居的数据剔掉了面，却不重建邻居的网格 → **接缝一侧缺面，看穿墙体**。第 1376 行注释写"∪6 邻居由内部展开"，**实现里没有** | 🔴 | ⏳ 待验证 |
+| B135 | 请求单槽覆盖 | `VulkanContext::requestChunkRebuild` | `pendingDirtyChunks_ = dirtyChunks` 是**覆盖**而非并集；`chunkRebuildRequested_` 只是一个 bool | 两次变更事件落在同一次重建之前时，前一批脏 chunk 永久丢失 → 那个 chunk 的网格停在旧状态 | 🔴 | ❌ **已销案（2026-11-26）**：所指的 `requestChunkRebuild` 已无调用者（调度器承接），死代码本次删除；真实症状根因是相机 UBO 竞态，见第八节核实结论 |
+| B136 | 范围不一致 | `VulkanContext::rebuildChunkMeshes:685` | 剔除依据是「脏 chunk ∪ 1 环邻居」（`chunkSnapshot(expandNeighbors=true)`），但重建集合只有脏 chunk（`rebuildSet = dirtyChunks`） | 用邻居的数据剔掉了面，却不重建邻居的网格 → **接缝一侧缺面，看穿墙体**。第 1376 行注释写"∪6 邻居由内部展开"，**实现里没有** | 🔴 | ❌ **已销案（2026-11-26）**：非缺陷 —— 剔除用「脏∪1环邻居」快照、重建只做脏 chunk，邻居由 markDirtyWithBoundary 单独标脏，范围不同是分工 |
 
 ## 九、渲染全量重建的入口问题（读代码发现，2026-11-23）
 
@@ -378,8 +378,9 @@
 
 | 项 | 数量 |
 |---|---|
-| 核实条目 | **138 条**（B1–B138；B135/B136 待验证，B137/B138 为 2026-11-23 读代码/实测发现） |
-| 其中 🔴 | **15 条**（含 B135/B136） |
+| 核实条目 | **138 条**（B1–B138；B135/B136 于 2026-11-26 销案；B137 已记录、B138 已修） |
+| **当前未结缺陷** | **0 条** —— 其余为 ✅已修 / ⏸已评估不改 / ❌文档误记。B98、B137 属「未实现的新功能」；B94/B103/B116 等落在近期会重做的代码里（Jolt 多刚体 / 区块重建+LOD / AO） |
+| 其中 🔴 | **15 条**（含已销案的 B135/B136） |
 | 文档误记（❌ 不实） | **8 条**（TimeManager ×2、ChunkData ×1、PlayerBodyState ×1、ChunkPos ×1、Protocol ×3） |
 | 已被重构修复（🔧） | **3 条**（BodyPose 缺旋转、`queue*` 命名、"事件流语义"） |
 | 归类为性能（→ `性能问题记录.md`） | 8 条（P1–P8）→ 现共 14 条（P1–P14） |
