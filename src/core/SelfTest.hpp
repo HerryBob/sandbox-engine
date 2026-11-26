@@ -27,6 +27,9 @@ bool bodyMesh();
   // 这是渲染层拆分后第一个**可单测**的点（不需要窗口/GPU）。
   bool chunkMesh();
 
+  // 存档格式：ChunkData 序列化 round-trip（全空 / 4 位 / 8 位 / 16 位）+ 损坏拒绝。
+  bool chunkSerialize();
+
 // 模组排序：批次倒序依赖拒绝、跨批放行、缺失依赖拒绝、同批环双方拒绝。
 bool modSorter();
 

@@ -56,6 +56,20 @@ public:
     // 变更原因位掩码（0 = 干净）；位值见 BlockActions.hpp 的 DIRTY_*
     std::uint32_t dirty() const noexcept { return dirty_; }
 
+    // ---- 存档序列化（格式见 docs\DOCS自制版\存档系统设计.md）----
+    // 序列化：把调色板 + 索引按**内存里的原始位宽**逐位写出（不做重打包），
+    // 全空气 chunk 只写头（flags 置位、零段）。
+    // 实现放在 ChunkDataIO.cpp（格式知识留在本类内，调用方不需要知道布局）。
+    void serialize(std::vector<std::uint8_t>& out,
+                   int chunkX, int chunkY, int chunkZ, std::uint32_t genVer) const;
+
+    // 反序列化：校验 magic/版本/坐标/段表边界/checksum。
+    // 任何一步失败都返回 false —— 调用方视为"无存档"，走生成路径。
+    // genVerOut（可选）：文件里记录的生成器版本，调用方据此决定是否告警。
+    static bool deserialize(const std::uint8_t* data, std::size_t size,
+                            int chunkX, int chunkY, int chunkZ,
+                            ChunkData& out, std::uint32_t* genVerOut = nullptr);
+
     // 块内坐标 → 数组索引（x/y/z 低 4 位各占一段）。
     // 与 chunkLocalOf 严格互逆：改其中一处必须同步改另一处，否则快照遍历会坐标错位。
     static std::int32_t chunkIndexOf(int x, int y, int z) {

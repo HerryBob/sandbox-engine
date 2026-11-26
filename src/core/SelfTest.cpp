@@ -254,6 +254,105 @@ bool chunkMesh() {
         return ok;
     }
 }
+// 存档序列化：ChunkData round-trip。四种位宽/内容各存一次再读回，逐格比对。
+// 这是"存档格式"的唯一自动防线 —— 格式一改这里就会炸，比手动开游戏验快得多。
+bool chunkSerialize() {
+    using engine::shared::BlockPos;
+    using engine::shared::ChunkData;
+
+    auto roundTrip = [](const ChunkData& src, ChunkData& dst) {
+        std::vector<std::uint8_t> buf;
+        src.serialize(buf, 3, -1, 7, /*genVer=*/42);
+        std::uint32_t genVer = 0;
+        if (!ChunkData::deserialize(buf.data(), buf.size(), 3, -1, 7, dst, &genVer)) return false;
+        if (genVer != 42) return false;
+        return true;
+    };
+    auto sameAs = [](const ChunkData& a, const ChunkData& b) {
+        if (a.paletteSize() != b.paletteSize()) return false;
+        if (a.chunkIndexBits() != b.chunkIndexBits()) return false;
+        if (a.chunkNonAirCount() != b.chunkNonAirCount()) return false;
+        for (int y = 0; y < 16; ++y)
+            for (int z = 0; z < 16; ++z)
+                for (int x = 0; x < 16; ++x)
+                    if (a.paletteGet(x, y, z) != b.paletteGet(x, y, z)) return false;
+        return true;
+    };
+
+    // ① 全空气（走 flags 快路径：零段）
+    {
+        ChunkData src, dst;
+        const bool ok = roundTrip(src, dst) && sameAs(src, dst) && dst.isAllAir();
+        std::cout << "  [①全空] " << (ok ? "通过" : "失败") << "\n";
+        if (!ok) return false;
+    }
+
+    // ② 单材质（4 位索引）
+    {
+        ChunkData src;
+        for (int y = 0; y < 16; ++y)
+            for (int z = 0; z < 16; ++z)
+                for (int x = 0; x < 16; ++x)
+                    src.paletteSet(x, y, z, 7);
+        src.markDirty(0x2u);
+        ChunkData dst;
+        const bool ok = roundTrip(src, dst) && sameAs(src, dst) &&
+                        dst.chunkIndexBits() == 4 && dst.dirty() == 0u;
+        std::cout << "  [②单材质4位] " << (ok ? "通过" : "失败") << "\n";
+        if (!ok) return false;    }
+
+    // ③ 20 种材质（索引扩到 8 位）
+    {
+        ChunkData src;
+        for (int y = 0; y < 16; ++y)
+            for (int z = 0; z < 16; ++z)
+                for (int x = 0; x < 16; ++x)
+                    src.paletteSet(x, y, z, static_cast<std::uint16_t>(1 + (x + y + z) % 20));
+        ChunkData dst;
+        const bool ok = roundTrip(src, dst) && sameAs(src, dst) && dst.chunkIndexBits() == 8;
+        std::cout << "  [③20材质8位] " << (ok ? "通过" : "失败") << "\n";
+        if (!ok) return false;
+    }
+
+    // ④ 300 种材质（索引扩到 16 位）
+    {
+        ChunkData src;
+        for (int i = 0; i < 4096; ++i) {
+            const BlockPos p = ChunkData::chunkLocalOf(static_cast<std::int32_t>(i));
+            src.paletteSet(p.x, p.y, p.z, static_cast<std::uint16_t>(1 + i % 300));
+        }
+        ChunkData dst;
+        const bool ok = roundTrip(src, dst) && sameAs(src, dst) && dst.chunkIndexBits() == 16;
+        std::cout << "  [④300材质16位] " << (ok ? "通过" : "失败") << "\n";
+        if (!ok) return false;
+    }
+
+    // ⑤ 损坏必须被拒（checksum / magic / 坐标不符）
+    {
+        ChunkData src, dst;
+        src.paletteSet(1, 2, 3, 5);
+        std::vector<std::uint8_t> buf;
+        src.serialize(buf, 0, 0, 0, 1);
+        if (buf.empty()) return false;
+        // 坐标不符
+        if (ChunkData::deserialize(buf.data(), buf.size(), 1, 0, 0, dst)) return false;
+        // 翻转正文一个字节 → checksum 不符
+        std::vector<std::uint8_t> bad = buf;
+        bad[bad.size() - 1] ^= 0xFF;
+        if (ChunkData::deserialize(bad.data(), bad.size(), 0, 0, 0, dst)) return false;
+        // 截断
+        if (ChunkData::deserialize(buf.data(), buf.size() - 1, 0, 0, 0, dst)) return false;
+        // magic 被改
+        std::vector<std::uint8_t> badMagic = buf;
+        badMagic[0] = 0;
+        if (ChunkData::deserialize(badMagic.data(), badMagic.size(), 0, 0, 0, dst)) return false;
+        // 原样仍可读
+        if (!ChunkData::deserialize(buf.data(), buf.size(), 0, 0, 0, dst)) return false;
+    }
+
+    std::cout << "chunk 存档：全空/4位/8位/16位 round-trip + 损坏拒绝 自检通过\n";
+    return true;
+}
 // 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
 bool modSorter() {
     using engine::modhost::ModManifest;
