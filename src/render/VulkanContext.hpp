@@ -15,6 +15,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include "shared/chunk/ChunkPos.hpp"
 #include "render/assets/TextureAtlas.hpp"
+#include "render/FrameInfra.hpp"
 #include "render/HudRenderer.hpp"
 #include "render/PipelineSet.hpp"
 #include "render/TextureSet.hpp"
@@ -168,7 +169,7 @@ public:
     VkRenderPass  renderPass() const { return pipelines_.renderPass(); }
     VkPipeline    pipeline() const { return pipelines_.pipeline(); }
     VkPipeline    cutoutPipeline() const { return pipelines_.cutoutPipeline(); }
-    VkDescriptorSet descriptorSet() const { return descSet_; }
+    VkDescriptorSet descriptorSet() const { return infra_.descSet(); }
     bool rebuildMeshFromBlocks(const std::vector<engine::shared::Block>& blocks); // 修改为增量重建chunk
     void requestChunkRebuild(const std::vector<engine::shared::Block>& blocks,
         const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks); // 请求 mesh 重建
@@ -206,10 +207,7 @@ private:
     bool createSwapchain();
     void destroySwapchain();
     bool recreateSwapchain();        // 窗口尺寸变化：销毁重建尺寸相关资源
-    bool createUniformObjects();
     bool createFramebuffers();
-    bool createCommandObjects();
-    bool createSyncObjects();
     void destroyRenderObjects();
     // 确保某张实体贴图已加载（图像/视图/采样器 + 自己的 descriptor set）。
     // 按路径去重：重复调用同一路径只建一次。返回 false 表示该贴图不可用。
@@ -220,7 +218,17 @@ private:
     // 还在读的内容，偶发一帧的相机矩阵错乱（表现为一片地形变天空色）。改走 push constant 后
     // 每个命令缓冲自带一份，不再有跨帧共享。
     void pushDrawMatrices(VkCommandBuffer cmd, const glm::mat4& bodyModel) const;
-    void destroyUniformObjects();
+
+    // ---- 每帧录制的拆分（S7a：drawFrame 268 行 → 帧首/录制/提交 + 5 个 pass）----
+    void updateFrameStats();                                   // FPS/帧耗时窗口
+    bool beginFrame(uint32_t frame, uint32_t& imageIndex);      // 等 fence → 回收 → acquire
+    bool recordFrame(uint32_t frame, uint32_t imageIndex);      // begin cmd → renderPass → 五趟 → end
+    void recordChunkSolidPass(VkCommandBuffer cmd);             // ① Solid（不透明）
+    void recordBodyPass(VkCommandBuffer cmd);                   // ② 刚体
+    void recordEntityPass(VkCommandBuffer cmd);                 // ③ 实体（骨骼）
+    void recordChunkCutoutPass(VkCommandBuffer cmd);            // ④ Cutout（镂空/双面）
+    void recordHudPass(VkCommandBuffer cmd, uint32_t frame);    // ⑤ HUD
+    bool submitFrame(uint32_t frame, uint32_t imageIndex);      // submit + present
 
     
 
@@ -259,6 +267,8 @@ private:
     HudRenderer hud_;
     // renderPass + MSAA/深度附件 + 主管线（S4a 抽出的 PipelineSet）
     PipelineSet pipelines_;
+    // 命令池/同步/UBO/描述符（S4b 抽出的 FrameInfra）
+    FrameInfra infra_;
     // FPS/帧耗时统计（渲染线程自己算，喂给 HUD 显示）
     std::chrono::steady_clock::time_point fpsWindowStart_{};
     std::chrono::steady_clock::time_point lastFrameStart_{};
@@ -296,11 +306,6 @@ private:
     // 取插值后的位姿（alpha = 现在距上一次到达 / 两次到达间隔，钳到 [0,1]）。
     // 返回 false 表示该 id 还没有位姿数据。
     bool interpolatedBodyPose(int contraptionId, glm::dvec3& outPos, glm::quat& outRot);
-    VkCommandPool        cmdPool_ = VK_NULL_HANDLE;
-    VkCommandBuffer      cmdBuffers_[kMaxFramesInFlight]{}; // 每帧槽一条（2 组轮转）
-    VkSemaphore          imageAvailable_[kMaxFramesInFlight]{}; // acquire 信号量：2 组轮转
-    std::vector<VkSemaphore> renderFinished_;
-    VkFence              inFlightFences_[kMaxFramesInFlight]{};
     bool                 renderObjectsReady_ = false;
     std::uint64_t        framesPresented_ = 0;
 
@@ -313,12 +318,7 @@ private:
     std::unordered_set<engine::shared::ChunkPos> pendingDirtyChunks_; // 待重建的脏 chunk 集
     std::atomic<bool> chunkRebuildRequested_{ false };                // 增量重建请求标志
 
-    VkBuffer             uboBuffer_ = VK_NULL_HANDLE;   // 已废弃：相机矩阵改走 push constant（见 pushDrawMatrices）
-    VkDeviceMemory       uboMemory_ = VK_NULL_HANDLE;   // 同上；layout/set 保留仅为兼容旧的 binding 0
     glm::mat4            viewProj_{1.0f};               // 本帧的 proj*view（updateViewProj 写，pushDrawMatrices 读）
-    VkDescriptorSetLayout descLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool     descPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet      descSet_ = VK_NULL_HANDLE;
 
     //加入纹理链
     // 方块图集的 GPU 侧资源（S3 抽出的 TextureSet：图 + 视图 + 采样器）

@@ -67,7 +67,7 @@ bool VulkanContext::init(int width, int height, const char* title) {
     if (!pipelines_.initAttachmentsAndPass(device_, physicalDevice_, swapchainFormat_,
                                            swapchainExtent_, msaaSamples_, depthFormat_)) return false;
     if (!createFramebuffers()) return false;      // ← framebuffers 不依赖 descLayout_，可留前
-    if (!createCommandObjects()) return false;
+
     // 图集（CPU 侧）由本类构建，GPU 侧资源交给 TextureSet（S3 抽出的独立类）
     if (!textureAtlas_.build()) {
         ENGINE_LOG_ERROR("Vulkan", "图集构建失败");
@@ -75,20 +75,24 @@ bool VulkanContext::init(int width, int height, const char* title) {
     }
     texWidth_  = textureAtlas_.size();
     texHeight_ = textureAtlas_.size();
-    if (!blockTextures_.init(physicalDevice_, device_, graphicsQueue_, cmdPool_,
+    // ① 命令池 + 同步对象（S4b）：纹理上传要先有命令池
+    if (!infra_.initCommandAndSync(device_, physicalDevice_, graphicsQueue_, graphicsQueueFamily_,
+                                   static_cast<uint32_t>(swapchainImages_.size()))) return false;
+    if (!blockTextures_.init(physicalDevice_, device_, graphicsQueue_, infra_.commandPool(),
                              textureAtlas_.rgba().data(), texWidth_, texHeight_)) {
         return false;
     }
-    if (!createUniformObjects()) return false;    // descLayout_ 就绪
-    // ② 主图形管线（要 descLayout，必须在上面之后）
-    if (!pipelines_.initPipeline(descLayout_)) return false;
+    // ② UBO + 描述符（binding 1 绑图集，必须在图集之后）
+    if (!infra_.initDescriptors(blockTextures_.view(), blockTextures_.sampler())) return false;
+    // ② 主图形管线（要 descLayout，必须在 infra_.init 之后）
+    if (!pipelines_.initPipeline(infra_.descLayout())) return false;
     // 实体贴图不在这里加载：贴图路径由模组的实体类型定义决定，而类型表要等
     // 模组 onLoad 跑完才齐。init 之后由装配层遍历类型表调 loadEntityModel，
     // 那里再按需 ensureEntityTexture（按路径缓存，同一张只建一次）。
     // HUD（S2 抽出的独立类）：字体纹理 / 描述符 / 管线 / 每帧顶点缓冲
-    if (!hud_.init(physicalDevice_, device_, graphicsQueue_, cmdPool_, pipelines_.renderPass(),
+    if (!hud_.init(physicalDevice_, device_, graphicsQueue_, infra_.commandPool(), pipelines_.renderPass(),
                    swapchainExtent_, msaaSamples_)) return false;
-    if (!createSyncObjects()) return false;
+
     renderObjectsReady_ = true;
     return true;
 }
@@ -768,41 +772,6 @@ void VulkanContext::destroyEntityModel(int entityId) {
 
 
 // 创建命令池 + 每帧命令缓冲（2 条轮转）
-bool VulkanContext::createCommandObjects() {
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; // 允许每帧 reset
-    poolInfo.queueFamilyIndex = graphicsQueueFamily_;
-    if (vkCreateCommandPool(device_, &poolInfo, nullptr, &cmdPool_) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "vkCreateCommandPool 失败");
-        return false;
-    }
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = cmdPool_;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = kMaxFramesInFlight;
-    if (vkAllocateCommandBuffers(device_, &allocInfo, cmdBuffers_) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "vkAllocateCommandBuffers 失败");
-        return false;
-    }
-    ENGINE_LOG_INFO("Vulkan", "命令池 + 命令缓冲就绪（每帧槽一条，2 条轮转）");
-    return true;
-}
-
-// 纹理图像：staging 搬运（构建图集 → 上传显存 → 转 SHADER_READ_ONLY）
-// 图集 = 一张大纹理装所有方块小纹理（每格 16²，边长由声明条目数算出）
-
-
- 
-
-// 纹理图像 → 可采样视图
-
-// 创建采样器（线性过滤 + REPEAT 寻址）
-
-
-// 确保某张实体贴图已加载：图像 + 视图 + 最近邻采样器 + 自己的 descriptor set。
-// 按路径缓存——同一张贴图被多个实体类型引用时只建一次。
 bool VulkanContext::ensureEntityTexture(const std::string& path) {
     // 空路径 = 类型定义没给贴图，也没做模型自寻址：直接判无贴图，不占描述符额度。
     if (path.empty()) return false;
@@ -815,9 +784,10 @@ bool VulkanContext::ensureEntityTexture(const std::string& path) {
     // 先占一个 descriptor set：池里按 kMaxEntityTextures 预留了额度
     VkDescriptorSetAllocateInfo setAlloc{};
     setAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    setAlloc.descriptorPool = descPool_;
+    setAlloc.descriptorPool = infra_.descPool();
     setAlloc.descriptorSetCount = 1;
-    setAlloc.pSetLayouts = &descLayout_;
+    VkDescriptorSetLayout atlasLayout = infra_.descLayout();
+    setAlloc.pSetLayouts = &atlasLayout;
     if (vkAllocateDescriptorSets(device_, &setAlloc, &res.set) != VK_SUCCESS) {
         ENGINE_LOG_ERROR("Vulkan", "实体贴图描述符集分配失败：" + path);
         return false;
@@ -854,11 +824,11 @@ bool VulkanContext::ensureEntityTexture(const std::string& path) {
     vkUnmapMemory(device_, stagingMem);
     stbi_image_free(src);
 
-    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, res.image,
+    util::transitionImageLayout(device_, graphicsQueue_, infra_.commandPool(), res.image,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    util::copyBufferToImage(device_, graphicsQueue_, cmdPool_, staging, res.image,
+    util::copyBufferToImage(device_, graphicsQueue_, infra_.commandPool(), staging, res.image,
         static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, res.image,
+    util::transitionImageLayout(device_, graphicsQueue_, infra_.commandPool(), res.image,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(device_, staging, nullptr);
@@ -886,7 +856,7 @@ bool VulkanContext::ensureEntityTexture(const std::string& path) {
     }
 
     // binding 0 = 与方块共用的同一个 UBO；binding 1 = 这张贴图
-    VkDescriptorBufferInfo binfo{ uboBuffer_, 0, sizeof(UniformBufferObject) };
+    VkDescriptorBufferInfo binfo{ infra_.uboBuffer(), 0, sizeof(UniformBufferObject) };
     VkDescriptorImageInfo  ii{ res.sampler, res.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet wr[2]{};
     wr[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -910,136 +880,6 @@ bool VulkanContext::ensureEntityTexture(const std::string& path) {
 
 // ---- GLFW 输入回调（static 成员定义；经 user pointer 转发到 this）----
 // 描述符集：UBO（binding 0）+ 纹理 sampler（binding 1）
-bool VulkanContext::createUniformObjects() {
-    VkBufferCreateInfo bi{};
-    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bi.size = sizeof(UniformBufferObject);
-    bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(device_, &bi, nullptr, &uboBuffer_) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "UBO vkCreateBuffer 失败");
-        return false;
-    }
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(device_, uboBuffer_, &req);
-    uint32_t memIdx = util::findMemoryType(physicalDevice_, req.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (memIdx == UINT32_MAX) {
-        ENGINE_LOG_ERROR("Vulkan", "UBO 无 host 可见内存类型");
-        return false;
-    }
-    VkMemoryAllocateInfo ai{};
-    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    ai.allocationSize = req.size;
-    ai.memoryTypeIndex = memIdx;
-    if (vkAllocateMemory(device_, &ai, nullptr, &uboMemory_) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "UBO vkAllocateMemory 失败");
-        return false;
-    }
-    vkBindBufferMemory(device_, uboBuffer_, uboMemory_, 0);
-
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; // 只有顶点着色器用 MVP
-    VkDescriptorSetLayoutBinding samplerBinding{};     // ← 新增
-    samplerBinding.binding = 1;
-    samplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    samplerBinding.descriptorCount = 1;
-    samplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutBinding bindings[2] = { binding, samplerBinding };
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 2;
-    layoutInfo.pBindings = bindings;
-    if (vkCreateDescriptorSetLayout(device_, &layoutInfo, nullptr, &descLayout_) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "vkCreateDescriptorSetLayout 失败");
-        return false;
-    }
-
-    // 一套 set 的组成：binding 0 = UBO，binding 1 = 贴图。
-    // 额度 = 方块图集 1 套 + 实体贴图各 1 套。实体贴图数量上限 6 张，
-    // 超出的 ensureEntityTexture 会在分配 set 时报错返回 false（不是崩溃）。
-    constexpr uint32_t kMaxEntityTextures = 6;
-    VkDescriptorPoolSize poolSizes[2] = {
-    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 + kMaxEntityTextures},
-    {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 + kMaxEntityTextures},   // 图集 + 各实体贴图
-    };
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 1 + kMaxEntityTextures;         // 方块一套 + 每个实体贴图一套
-    poolInfo.poolSizeCount = 2;
-    poolInfo.pPoolSizes = poolSizes;
-    if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descPool_) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "vkCreateDescriptorPool 失败");
-        return false;
-    }
-
-    // 方块图集那一套在这里一次性分配；实体贴图的 set 由 ensureEntityTexture 按需分配
-    VkDescriptorSetLayout setLayouts[1] = { descLayout_ };
-    VkDescriptorSetAllocateInfo setAllocInfo{};
-    setAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    setAllocInfo.descriptorPool = descPool_;
-    setAllocInfo.descriptorSetCount = 1;
-    setAllocInfo.pSetLayouts = setLayouts;
-    VkDescriptorSet sets[1]{};
-    if (vkAllocateDescriptorSets(device_, &setAllocInfo, sets) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "vkAllocateDescriptorSets 失败");
-        return false;
-    }
-    descSet_ = sets[0];        // 方块图集那套
-
-    VkDescriptorBufferInfo binfo{uboBuffer_, 0, sizeof(UniformBufferObject)};
-    VkDescriptorImageInfo iinfo{ blockTextures_.sampler(), blockTextures_.view(),
-    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };       // ← 新增：采样器+视图
-    VkWriteDescriptorSet write[2]{};
-    write[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write[0].dstSet = descSet_; 
-    write[0].dstBinding = 0;   // 现有 UBO 写
-    write[0].descriptorCount = 1; 
-    write[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    write[0].pBufferInfo = &binfo;
-    write[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write[1].dstSet = descSet_; 
-    write[1].dstBinding = 1;   // ← 新增 sampler 写
-    write[1].descriptorCount = 1; 
-    write[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write[1].pImageInfo = &iinfo;
-    vkUpdateDescriptorSets(device_, 2, write, 0, nullptr);
-
-    ENGINE_LOG_INFO("Vulkan", "MVP uniform 就绪（descriptor set + UBO，相机可操作）");
-    return true;
-}
-
-// 同步对象：acquire/renderFinished 信号量 + 栅栏（每帧轮转）
-bool VulkanContext::createSyncObjects() {
-    VkSemaphoreCreateInfo semaphoreInfo{};
-    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // 初始已 signaled：第一帧 wait 直接过
-
-    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
-        if (vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &imageAvailable_[i]) != VK_SUCCESS ||
-            vkCreateFence(device_, &fenceInfo, nullptr, &inFlightFences_[i]) != VK_SUCCESS) {
-            ENGINE_LOG_ERROR("Vulkan", "同步对象创建失败");
-            return false;
-        }
-    }
-    renderFinished_.resize(swapchainImages_.size(), VK_NULL_HANDLE);
-    for (auto& sem : renderFinished_) {
-        if (vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &sem) != VK_SUCCESS) {
-            ENGINE_LOG_ERROR("Vulkan", "renderFinished 信号量创建失败");
-            return false;
-        }
-    }
-    ENGINE_LOG_INFO("Vulkan", "同步对象就绪（acquire×2 轮转 + renderFinished×图像数 + 栅栏×2）");
-    return true;
-}
-
-// 每帧从 CameraState 读相机状态 → 计算 MVP → 写 UBO。
-// 相机状态由渲染线程（每帧调 InputSampler::tick）维护；本函数只读，不再处理输入。
 void VulkanContext::updateViewProj(double /*dt*/) {
     double px = 0.0, py = 0.0, pz = 3.5, pyaw = 0.0, ppitch = 0.0;
     if (cameraState_) {
@@ -1092,35 +932,36 @@ void VulkanContext::pushDrawMatrices(VkCommandBuffer cmd, const glm::mat4& bodyM
 }
 
 // 每帧绘制：acquire → 录制 → submit → present
-bool VulkanContext::drawFrame() {
-    if (!renderObjectsReady_) return false;
-    updateViewProj(0.006); // 帧间隔 6.06ms（165Hz 目标；FIFO vsync 拉齐到显示器刷新）
-
-    // HUD 帧率统计：帧开始打点。FPS 用 0.5 秒窗口算（避免逐帧抖动），帧间隔做指数平滑。
-    {
-        const auto now = std::chrono::steady_clock::now();
-        if (lastFrameStart_.time_since_epoch().count() == 0) {   // 首帧：只初始化基准
-            lastFrameStart_ = now;
-            fpsWindowStart_ = now;
-        }
-        const double dtMs =
-            std::chrono::duration<double, std::milli>(now - lastFrameStart_).count();
-        if (dtMs > 0.0 && dtMs < 1000.0) {
-            frameMsSmoothed_ = (frameMsSmoothed_ == 0.0) ? dtMs : frameMsSmoothed_ * 0.9 + dtMs * 0.1;
-        }
+// ============================================================================
+// 帧统计（HUD 显示用：FPS 0.5 秒窗口 + 帧耗时指数平滑）
+// ============================================================================
+void VulkanContext::updateFrameStats() {
+    const auto now = std::chrono::steady_clock::now();
+    if (lastFrameStart_.time_since_epoch().count() == 0) {   // 首帧：只初始化基准
         lastFrameStart_ = now;
-        ++fpsFramesInWindow_;
-        const double windowSec = std::chrono::duration<double>(now - fpsWindowStart_).count();
-        if (windowSec >= 0.5) {
-            fpsSmoothed_ = static_cast<double>(fpsFramesInWindow_) / windowSec;
-            fpsFramesInWindow_ = 0;
-            fpsWindowStart_ = now;
-        }
+        fpsWindowStart_ = now;
     }
+    const double dtMs =
+        std::chrono::duration<double, std::milli>(now - lastFrameStart_).count();
+    if (dtMs > 0.0 && dtMs < 1000.0) {
+        frameMsSmoothed_ = (frameMsSmoothed_ == 0.0) ? dtMs : frameMsSmoothed_ * 0.9 + dtMs * 0.1;
+    }
+    lastFrameStart_ = now;
+    ++fpsFramesInWindow_;
+    const double windowSec = std::chrono::duration<double>(now - fpsWindowStart_).count();
+    if (windowSec >= 0.5) {
+        fpsSmoothed_ = static_cast<double>(fpsFramesInWindow_) / windowSec;
+        fpsFramesInWindow_ = 0;
+        fpsWindowStart_ = now;
+    }
+}
 
-    const uint32_t frame =
-        static_cast<uint32_t>(framesPresented_) % kMaxFramesInFlight;
-    vkWaitForFences(device_, 1, &inFlightFences_[frame], VK_TRUE, UINT64_MAX);
+// ============================================================================
+// 帧首：等 fence → 回收该帧槽的旧网格 → acquire → reset fence
+// ============================================================================
+bool VulkanContext::beginFrame(uint32_t frame, uint32_t& imageIndex) {
+    VkFence f = infra_.inFlightFence(frame);
+    vkWaitForFences(device_, 1, &f, VK_TRUE, UINT64_MAX);
     // 注意：vkResetFences 必须在 acquire 成功之后！
     // acquire 失败(OUT_OF_DATE)时 fence 保持 signaled → 下一帧 wait 直接通过
     // 若先 reset，失败帧没有 submit 触发 fence → 下一帧 wait 无限阻塞 → 渲染线程卡死
@@ -1129,13 +970,8 @@ bool VulkanContext::drawFrame() {
     currentFrameSlot_ = frame;
     collectRetiredMeshes(frame);
 
-    // 增量重建请求：只重建脏 chunk（∪6 邻居由 rebuildChunkMeshes 内部展开）
-    // 注：脏 chunk 重建已移交 ChunkMeshScheduler（每帧按预算取一批），
-    // 由 Renderer 在 drawFrame 之前驱动；这里不再"一次重建全部"。
-
-    uint32_t imageIndex = 0;
     VkResult r = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
-                                       imageAvailable_[frame], VK_NULL_HANDLE, &imageIndex);
+                                       infra_.imageAvailable(frame), VK_NULL_HANDLE, &imageIndex);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreateSwapchain();   // 返回 false 也无妨，本帧反正跳过
         return false;
@@ -1146,160 +982,135 @@ bool VulkanContext::drawFrame() {
         ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
-    vkResetFences(device_, 1, &inFlightFences_[frame]); // acquire 成功后才重置
+    VkFence f2 = infra_.inFlightFence(frame);
+    vkResetFences(device_, 1, &f2); // acquire 成功后才重置
+    return true;
+}
 
-    if (chunkMeshes_.empty()) {
-        return true; // 没有任何 chunk 网格 → 跳过本帧
-    }
+// ============================================================================
+// 录制各趟（顺序 = 绘制顺序，见 recordFrame）
+// ============================================================================
 
-    vkResetCommandBuffer(cmdBuffers_[frame], 0);
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    if (vkBeginCommandBuffer(cmdBuffers_[frame], &beginInfo) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "vkBeginCommandBuffer 失败");
-        return false;
-    }
-    VkRenderPassBeginInfo renderPassBeginInfo{};
-    renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassBeginInfo.renderPass = pipelines_.renderPass();
-    renderPassBeginInfo.framebuffer = framebuffers_[imageIndex];
-    renderPassBeginInfo.renderArea = {{0, 0}, swapchainExtent_};
-    VkClearValue clears[2]{};
-    clears[0].color = {{0.02f, 0.02f, 0.05f, 1.0f}}; // 颜色清屏：深蓝黑
-    clears[1].depthStencil = {1.0f, 0};             // 深度清屏：最远（1.0），stencil 0
-    renderPassBeginInfo.clearValueCount = 2;
-    renderPassBeginInfo.pClearValues = clears;
-    vkCmdBeginRenderPass(cmdBuffers_[frame], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-    // 动态 viewport/scissor：用当前交换链尺寸（resize 后自动适配，管线无需重建）
-    VkViewport vp{};
-    vp.x = 0.0f; vp.y = 0.0f;
-    vp.width  = static_cast<float>(swapchainExtent_.width);
-    vp.height = static_cast<float>(swapchainExtent_.height);
-    vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
-    vkCmdSetViewport(cmdBuffers_[frame], 0, 1, &vp);
-    VkRect2D scissor{{0, 0}, swapchainExtent_};
-    vkCmdSetScissor(cmdBuffers_[frame], 0, 1, &scissor);
-    // 描述符（UBO+纹理）：双管线共用同一 layout/descSet，绑定一次即可
-    vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelines_.pipelineLayout(), 0, 1, &descSet_, 0, nullptr);
-
-    // 刚体变换 push constant：静态两趟各推一次单位矩阵。
-    // Cutout 趟必须重推——push constant 是命令缓冲状态，不重推会沿用上一趟的值。
+// 第一趟：Solid 桶（不透明先画，写深度建立遮挡基准）
+void VulkanContext::recordChunkSolidPass(VkCommandBuffer cmd) {
     const glm::mat4 identityMatrix(1.0f);
-
-    // 第一趟：Solid 桶（不透明先画，写深度建立遮挡基准）
-    vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.pipeline());
-    pushDrawMatrices(cmdBuffers_[frame], identityMatrix);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.pipeline());
+    pushDrawMatrices(cmd, identityMatrix);
     for (const auto& [cp, m] : chunkMeshes_) {
         if (m.vertexCount == 0) continue;   // 无 Solid 面跳过
         VkDeviceSize vbOffset = 0;
-        vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &m.vertexBuffer, &vbOffset);
-        vkCmdBindIndexBuffer(cmdBuffers_[frame], m.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmdBuffers_[frame], m.indexCount, 1, 0, 0, 0);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vertexBuffer, &vbOffset);
+        vkCmdBindIndexBuffer(cmd, m.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
     }
+}
 
-    // 刚体趟：每刚体一次 draw，push constant 携带它的世界平移。
-    // ubo.view 已经含相机平移（lookAt(camPos, ...)），所以这里必须推"世界坐标"；
-    // 再减一次相机位置等于把偏移算两遍，刚体会飞到视野外。
-    // 精度：bodyPos 是 double，这里转 float；原型阶段世界只有 ±64 格，够用。
-    // 真正远离原点时要走"局部坐标 + 每对象偏移"，见 架构决策-精度方案.md。
-    {
-        // 首帧诊断：确认刚体趟真的拿到了网格与位姿
-        static bool bodyDrawLogged = false;
-        if (!bodyDrawLogged) {
-            bodyDrawLogged = true;
-            std::ostringstream os;
-            os << "刚体趟首帧 数量=" << bodyMeshes_.size();
-            const auto pit0 = bodyPos_.find(0);
-            if (pit0 != bodyPos_.end())
-                os << " 刚体0=(" << pit0->second.x << "," << pit0->second.y << "," << pit0->second.z << ")";
-            ENGINE_LOG_INFO("Vulkan", os.str());
+// 刚体趟：每刚体一次 draw，push constant 携带它的世界平移。
+// ubo.view 已经含相机平移（lookAt(camPos, ...)），所以这里必须推"世界坐标"；
+// 再减一次相机位置等于把偏移算两遍，刚体会飞到视野外。
+// 精度：bodyPos 是 double，这里转 float；原型阶段世界只有 ±64 格，够用。
+// 真正远离原点时要走"局部坐标 + 每对象偏移"，见 架构决策-精度方案.md。
+void VulkanContext::recordBodyPass(VkCommandBuffer cmd) {
+    // 首帧诊断：确认刚体趟真的拿到了网格与位姿
+    static bool bodyDrawLogged = false;
+    if (!bodyDrawLogged) {
+        bodyDrawLogged = true;
+        std::ostringstream os;
+        os << "刚体趟首帧 数量=" << bodyMeshes_.size();
+        const auto pit0 = bodyPos_.find(0);
+        if (pit0 != bodyPos_.end())
+            os << " 刚体0=(" << pit0->second.x << "," << pit0->second.y << "," << pit0->second.z << ")";
+        ENGINE_LOG_INFO("Vulkan", os.str());
+    }
+    for (const auto& [id, m] : bodyMeshes_) {
+        if (m.vertexCount == 0) continue;
+        // 位姿走插值：物理 25Hz 推，渲染 60~165Hz 画（见 interpolatedBodyPose）
+        glm::dvec3 posePos;
+        glm::quat  poseRot;
+        if (!interpolatedBodyPose(id, posePos, poseRot)) continue;
+        const glm::vec3 worldPos{
+            static_cast<float>(posePos.x),
+            static_cast<float>(posePos.y),
+            static_cast<float>(posePos.z)};
+        // 顶点在局部坐标（buildBodyVertices），所以旋转在 model matrix 里做：T(pos) × R(quat)。
+        const glm::mat4 bodyModel =
+            glm::translate(glm::mat4(1.0f), worldPos) * glm::mat4_cast(poseRot);
+        pushDrawMatrices(cmd, bodyModel);
+        VkDeviceSize vbOffset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vertexBuffer, &vbOffset);
+        vkCmdBindIndexBuffer(cmd, m.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+    }
+}
+
+// 实体趟：每个实体绑自己那张贴图的 descriptor，逐骨骼推世界矩阵后 draw
+void VulkanContext::recordEntityPass(VkCommandBuffer cmd) {
+    if (entityMeshes_.empty()) return;
+    std::vector<glm::mat4> boneWorld;
+    for (const auto& [id, em] : entityMeshes_) {
+        if (em.textureSet == VK_NULL_HANDLE) continue;    // 没贴图就不画
+        const auto pit = entityPose_.find(id);
+        if (pit == entityPose_.end()) continue;
+        if (!pit->second.visible) continue;               // 第一人称隐藏自身
+
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelines_.pipelineLayout(), 0, 1, &em.textureSet, 0, nullptr);
+
+        const glm::vec3 pos{static_cast<float>(pit->second.pos.x),
+                            static_cast<float>(pit->second.pos.y),
+                            static_cast<float>(pit->second.pos.z)};
+        const glm::mat4 rootWorld =
+            glm::translate(glm::mat4(1.0f), pos) *
+            glm::rotate(glm::mat4(1.0f), glm::radians(pit->second.yawDeg), glm::vec3(0.0f, 1.0f, 0.0f));
+
+        // 骨骼世界矩阵：父矩阵 × (平移到枢轴 → 局部旋转 → 平移回来)
+        // 目前局部旋转恒为单位矩阵（未做动画），骨骼顶点位置与建模时一致
+        boneWorld.assign(em.bones.size(), glm::mat4(1.0f));
+        for (std::size_t k = 0; k < em.order.size(); ++k) {
+            const int bi = em.order[k];
+            if (bi < 0 || bi >= static_cast<int>(em.bones.size())) continue;
+            const int par = em.parents[bi];
+            const glm::mat4& parentW = (par >= 0) ? boneWorld[par] : rootWorld;
+            const glm::vec3& piv = em.pivots[bi];
+            const glm::mat4 local =
+                glm::translate(glm::mat4(1.0f), piv) *
+                glm::translate(glm::mat4(1.0f), -piv);
+            boneWorld[bi] = parentW * local;
         }
-        for (const auto& [id, m] : bodyMeshes_) {
-            if (m.vertexCount == 0) continue;
-            // 位姿走插值：物理 25Hz 推，渲染 60~165Hz 画（见 interpolatedBodyPose）
-            glm::dvec3 posePos;
-            glm::quat  poseRot;
-            if (!interpolatedBodyPose(id, posePos, poseRot)) continue;
-            const glm::vec3 worldPos{
-                static_cast<float>(posePos.x),
-                static_cast<float>(posePos.y),
-                static_cast<float>(posePos.z)};
-            // 顶点在局部坐标（buildBodyVertices），所以旋转在 model matrix 里做：
-            // T(pos) × R(quat)。
-            const glm::mat4 bodyModel =
-                glm::translate(glm::mat4(1.0f), worldPos) * glm::mat4_cast(poseRot);
-            pushDrawMatrices(cmdBuffers_[frame], bodyModel);
+
+        for (std::size_t bi = 0; bi < em.bones.size(); ++bi) {
+            const EntityBoneGpu& g = em.bones[bi];
+            if (g.indexCount == 0) continue;
+            pushDrawMatrices(cmd, boneWorld[bi]);
             VkDeviceSize vbOffset = 0;
-            vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &m.vertexBuffer, &vbOffset);
-            vkCmdBindIndexBuffer(cmdBuffers_[frame], m.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmdBuffers_[frame], m.indexCount, 1, 0, 0, 0);
+            vkCmdBindVertexBuffers(cmd, 0, 1, &g.vertexBuffer, &vbOffset);
+            vkCmdBindIndexBuffer(cmd, g.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, g.indexCount, 1, 0, 0, 0);
         }
     }
 
-    // 实体趟：每个实体绑自己那张贴图的 descriptor，逐骨骼推世界矩阵后 draw
-    if (!entityMeshes_.empty()) {
-        std::vector<glm::mat4> boneWorld;
-        for (const auto& [id, em] : entityMeshes_) {
-            if (em.textureSet == VK_NULL_HANDLE) continue;    // 没贴图就不画
-            const auto pit = entityPose_.find(id);
-            if (pit == entityPose_.end()) continue;
-            if (!pit->second.visible) continue;               // 第一人称隐藏自身
+    // 换回图集那套：后面的 Cutout 趟还在用方块贴图
+    VkDescriptorSet atlasDesc = infra_.descSet();   // 方块图集那套
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipelines_.pipelineLayout(), 0, 1, &atlasDesc, 0, nullptr);
+}
 
-            vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    pipelines_.pipelineLayout(), 0, 1, &em.textureSet, 0, nullptr);
-
-            const glm::vec3 pos{static_cast<float>(pit->second.pos.x),
-                                static_cast<float>(pit->second.pos.y),
-                                static_cast<float>(pit->second.pos.z)};
-            const glm::mat4 rootWorld =
-                glm::translate(glm::mat4(1.0f), pos) *
-                glm::rotate(glm::mat4(1.0f), glm::radians(pit->second.yawDeg), glm::vec3(0.0f, 1.0f, 0.0f));
-
-            // 骨骼世界矩阵：父矩阵 × (平移到枢轴 → 局部旋转 → 平移回来)
-            // 目前局部旋转恒为单位矩阵（未做动画），骨骼顶点位置与建模时一致
-            boneWorld.assign(em.bones.size(), glm::mat4(1.0f));
-            for (std::size_t k = 0; k < em.order.size(); ++k) {
-                const int bi = em.order[k];
-                if (bi < 0 || bi >= static_cast<int>(em.bones.size())) continue;
-                const int par = em.parents[bi];
-                const glm::mat4& parentW = (par >= 0) ? boneWorld[par] : rootWorld;
-                const glm::vec3& piv = em.pivots[bi];
-                const glm::mat4 local =
-                    glm::translate(glm::mat4(1.0f), piv) *
-                    glm::translate(glm::mat4(1.0f), -piv);
-                boneWorld[bi] = parentW * local;
-            }
-
-            for (std::size_t bi = 0; bi < em.bones.size(); ++bi) {
-                const EntityBoneGpu& g = em.bones[bi];
-                if (g.indexCount == 0) continue;
-                pushDrawMatrices(cmdBuffers_[frame], boneWorld[bi]);
-                VkDeviceSize vbOffset = 0;
-                vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &g.vertexBuffer, &vbOffset);
-                vkCmdBindIndexBuffer(cmdBuffers_[frame], g.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(cmdBuffers_[frame], g.indexCount, 1, 0, 0, 0);
-            }
-        }
-
-        // 换回图集那套：后面的 Cutout 趟还在用方块贴图
-        vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipelines_.pipelineLayout(), 0, 1, &descSet_, 0, nullptr);
-    }
-
-    // 第二趟：Cutout 桶（透明/镂空后画，双面 cull NONE）
-    vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.cutoutPipeline());
-    pushDrawMatrices(cmdBuffers_[frame], identityMatrix);
+// 第二趟：Cutout 桶（透明/镂空后画，双面 cull NONE）
+void VulkanContext::recordChunkCutoutPass(VkCommandBuffer cmd) {
+    const glm::mat4 identityMatrix(1.0f);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.cutoutPipeline());
+    pushDrawMatrices(cmd, identityMatrix);
     for (const auto& [cp, m] : chunkMeshes_) {
         if (m.cutoutVertexCount == 0) continue;   // 无 Cutout 面跳过
         VkDeviceSize vbOffset = 0;
-        vkCmdBindVertexBuffers(cmdBuffers_[frame], 0, 1, &m.cutoutVertexBuffer, &vbOffset);
-        vkCmdBindIndexBuffer(cmdBuffers_[frame], m.cutoutIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmdBuffers_[frame], m.cutoutIndexCount, 1, 0, 0, 0);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &m.cutoutVertexBuffer, &vbOffset);
+        vkCmdBindIndexBuffer(cmd, m.cutoutIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, m.cutoutIndexCount, 1, 0, 0, 0);
     }
+}
 
-    // 第三趟：HUD 调试浮层（F3 切换）。屏幕空间、关深度、alpha 混合，
-    // 复用上面已设好的整窗 viewport/scissor，不影响 Solid/Cutout 两趟。
+// 第三趟：HUD 调试浮层（F3 切换）。屏幕空间、关深度、alpha 混合。
+void VulkanContext::recordHudPass(VkCommandBuffer cmd, uint32_t frame) {
     if (hud_.visible()) {
         // 网格统计：遍历一次 chunkMeshes_ 汇总（chunk 数 + 三角形数），供 HUD 显示
         int meshChunks = 0;
@@ -1310,27 +1121,85 @@ bool VulkanContext::drawFrame() {
             meshTris += static_cast<long long>(m.cutoutIndexCount / 3);
         }
         hud_.setMeshStats(meshChunks, meshTris);
-        hud_.drawHud(cmdBuffers_[frame], frame);
+        hud_.drawHud(cmd, frame);
     }
     hud_.setHudFrameStats(fpsSmoothed_, frameMsSmoothed_, framesPresented_);
+}
 
-    vkCmdEndRenderPass(cmdBuffers_[frame]);
-    if (vkEndCommandBuffer(cmdBuffers_[frame]) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "vkEndCommandBuffer 失败");
+// ============================================================================
+// 录制一整帧：begin cmd → renderPass → 五趟 → EndRenderPass → end cmd
+// 顺序就是绘制顺序，将来光影在这里插 shadow/post pass。
+// ============================================================================
+bool VulkanContext::recordFrame(uint32_t frame, uint32_t imageIndex) {
+    VkCommandBuffer cmd = infra_.cmdBuffer(frame);
+    vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
+        ENGINE_LOG_ERROR("Vulkan", "vkBeginCommandBuffer 失败");
         return false;
     }
 
+    VkRenderPassBeginInfo renderPassBeginInfo{};
+    renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassBeginInfo.renderPass = pipelines_.renderPass();
+    renderPassBeginInfo.framebuffer = framebuffers_[imageIndex];
+    renderPassBeginInfo.renderArea = {{0, 0}, swapchainExtent_};
+    VkClearValue clears[2]{};
+    clears[0].color = {{0.02f, 0.02f, 0.05f, 1.0f}}; // 颜色清屏：深蓝黑
+    clears[1].depthStencil = {1.0f, 0};             // 深度清屏：最远（1.0），stencil 0
+    renderPassBeginInfo.clearValueCount = 2;
+    renderPassBeginInfo.pClearValues = clears;
+    vkCmdBeginRenderPass(cmd, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+    // 动态 viewport/scissor：用当前交换链尺寸（resize 后自动适配，管线无需重建）
+    VkViewport vp{};
+    vp.x = 0.0f; vp.y = 0.0f;
+    vp.width  = static_cast<float>(swapchainExtent_.width);
+    vp.height = static_cast<float>(swapchainExtent_.height);
+    vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D scissor{{0, 0}, swapchainExtent_};
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // 描述符（UBO+纹理）：双管线共用同一 layout/descSet，绑定一次即可
+    VkDescriptorSet atlasDesc = infra_.descSet();   // 方块图集那套
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipelines_.pipelineLayout(), 0, 1, &atlasDesc, 0, nullptr);
+
+    recordChunkSolidPass(cmd);      // ① Solid（不透明）
+    recordBodyPass(cmd);            // ② 刚体（各自 push 世界矩阵）
+    recordEntityPass(cmd);          // ③ 实体（换贴图 → 画完换回图集）
+    recordChunkCutoutPass(cmd);     // ④ Cutout（镂空，双面）
+    recordHudPass(cmd, frame);      // ⑤ HUD（屏幕空间）
+
+    vkCmdEndRenderPass(cmd);
+    if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+        ENGINE_LOG_ERROR("Vulkan", "vkEndCommandBuffer 失败");
+        return false;
+    }
+    return true;
+}
+
+// ============================================================================
+// 提交 + 呈现
+// ============================================================================
+bool VulkanContext::submitFrame(uint32_t frame, uint32_t imageIndex) {
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = &imageAvailable_[frame];
+    VkSemaphore waitSem = infra_.imageAvailable(frame);
+    submitInfo.pWaitSemaphores = &waitSem;
     submitInfo.pWaitDstStageMask = &waitStage;
     submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmdBuffers_[frame];
+    VkCommandBuffer submitCmd = infra_.cmdBuffer(frame);
+    submitInfo.pCommandBuffers = &submitCmd;
     submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = &renderFinished_[imageIndex];
-    r = vkQueueSubmit(graphicsQueue_, 1, &submitInfo, inFlightFences_[frame]);
+    VkSemaphore signalSem = infra_.renderFinished(imageIndex);
+    submitInfo.pSignalSemaphores = &signalSem;
+    VkFence submitFence = infra_.inFlightFence(frame);
+    VkResult r = vkQueueSubmit(graphicsQueue_, 1, &submitInfo, submitFence);
     if (r != VK_SUCCESS) {
         std::ostringstream os;
         os << "vkQueueSubmit 失败 result=" << r;
@@ -1341,7 +1210,8 @@ bool VulkanContext::drawFrame() {
     VkPresentInfoKHR present{};
     present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     present.waitSemaphoreCount = 1;
-    present.pWaitSemaphores = &renderFinished_[imageIndex];
+    VkSemaphore presentSem = infra_.renderFinished(imageIndex);
+    present.pWaitSemaphores = &presentSem;
     present.swapchainCount = 1;
     present.pSwapchains = &swapchain_;
     present.pImageIndices = &imageIndex;
@@ -1357,6 +1227,25 @@ bool VulkanContext::drawFrame() {
         ENGINE_LOG_ERROR("Vulkan", os.str());
         return false;
     }
+    return true;
+}
+
+// ============================================================================
+// 一帧 = 帧首 → 录制 → 提交（20 行，原来的 268 行拆到上面的函数里）
+// ============================================================================
+bool VulkanContext::drawFrame() {
+    if (!renderObjectsReady_) return false;
+    updateViewProj(0.006); // 帧间隔 6.06ms（165Hz 目标；FIFO vsync 拉齐到显示器刷新）
+    updateFrameStats();
+
+    const uint32_t frame =
+        static_cast<uint32_t>(framesPresented_) % kMaxFramesInFlight;
+
+    uint32_t imageIndex = 0;
+    if (!beginFrame(frame, imageIndex)) return false;
+    if (chunkMeshes_.empty()) return true;   // 没有任何 chunk 网格 → 跳过本帧
+    if (!recordFrame(frame, imageIndex)) return false;
+    if (!submitFrame(frame, imageIndex)) return false;
     ++framesPresented_;
     return true;
 }
@@ -1372,30 +1261,14 @@ void VulkanContext::framebufferResizeCallback(GLFWwindow* w, int, int) {
     }
 }
 // 释放描述符池/布局/UBO 缓冲
-void VulkanContext::destroyUniformObjects() {
-    if (descPool_) { vkDestroyDescriptorPool(device_, descPool_, nullptr); descPool_ = VK_NULL_HANDLE; }
-    if (descLayout_) { vkDestroyDescriptorSetLayout(device_, descLayout_, nullptr); descLayout_ = VK_NULL_HANDLE; }
-    if (uboBuffer_) { vkDestroyBuffer(device_, uboBuffer_, nullptr); uboBuffer_ = VK_NULL_HANDLE; }
-    if (uboMemory_) { vkFreeMemory(device_, uboMemory_, nullptr); uboMemory_ = VK_NULL_HANDLE; }
-}
-
-
-
-
-
-// 逆创建序释放全部渲染对象
 void VulkanContext::destroyRenderObjects() {
     renderObjectsReady_ = false;
     for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
-        if (inFlightFences_[i]) { vkDestroyFence(device_, inFlightFences_[i], nullptr); inFlightFences_[i] = VK_NULL_HANDLE; }
-        if (imageAvailable_[i]) { vkDestroySemaphore(device_, imageAvailable_[i], nullptr); imageAvailable_[i] = VK_NULL_HANDLE; }
+
     }
-    for (auto& sem : renderFinished_) {
+    for (auto& sem : std::vector<VkSemaphore>{}) {
         if (sem) { vkDestroySemaphore(device_, sem, nullptr); sem = VK_NULL_HANDLE; }
     }
-    renderFinished_.clear();
-    if (cmdBuffers_[0]) { vkFreeCommandBuffers(device_, cmdPool_, kMaxFramesInFlight, cmdBuffers_); }
-    if (cmdPool_) { vkDestroyCommandPool(device_, cmdPool_, nullptr); cmdPool_ = VK_NULL_HANDLE; }
     for (auto fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
     framebuffers_.clear();
     // 增量重建：销毁所有 chunk 网格（每 chunk 的 GPU 资源）
@@ -1434,7 +1307,7 @@ void VulkanContext::destroyRenderObjects() {
     blockTextures_.shutdown();   // 方块图集（S3 抽出的 TextureSet）
     hud_.shutdown();        // HUD 管线引用 renderPass，必须早于 PipelineSet 销毁
     pipelines_.shutdown();  // 管线 → 布局 → 附件 → renderPass
-    destroyUniformObjects(); // UBO/描述符（在管线/命令之后释放）
+    infra_.shutdown();       // 命令池/同步/UBO/描述符（S4b 的 FrameInfra）
 }
 
 // 轮询 GLFW 事件（主线程调用）
