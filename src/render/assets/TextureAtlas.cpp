@@ -164,9 +164,19 @@ bool TextureAtlas::slotOf(std::string_view name, AtlasSlot& out) const {
     return true;
 }
 
+glm::vec4 atlasSlotUVPure(std::uint32_t grid, std::uint32_t size,
+                          std::uint32_t col, std::uint32_t row) {
+    const float f = 1.0f / static_cast<float>(grid);
+    // 半像素内缩（**关键**）：格子之间没有间隙，UV 正好落在格边界时，
+    // 最近邻/线性过滤会取到**隔壁格**的纹素 —— 隔壁若是 default.png（品红+黑的
+    // 缺失纹理兜底），方块边缘就会冒出一条条短紫线。内缩半像素让采样点始终在格内。
+    const float inset = (size > 0) ? (0.5f / static_cast<float>(size)) : 0.0f;
+    return { static_cast<float>(col) * f + inset, static_cast<float>(row) * f + inset,
+             static_cast<float>(col + 1) * f - inset, static_cast<float>(row + 1) * f - inset };
+}
+
 glm::vec4 TextureAtlas::slotUV(AtlasSlot s) const {
-    const float f = 1.0f / static_cast<float>(grid_);
-    return { s.col * f, s.row * f, (s.col + 1) * f, (s.row + 1) * f };
+    return atlasSlotUVPure(grid_, size_, s.col, s.row);
 }
 
 } // namespace engine::assets

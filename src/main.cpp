@@ -223,6 +223,9 @@ static void initNoiseAndRunSelfTests() {
     //存档菜单（新建/选择/删除）纯逻辑：临时目录，不碰真实存档。
     const bool saveMenuOk = engine::selftest::saveMenu();
 
+    //图集 UV 边界（纯数学）：各格 UV 必须整块在格内，防跨格采到隔壁纹理。
+    const bool atlasUvOk = engine::selftest::atlasUV();
+
     //刚体物理内核（Jolt）：初始化 + 地面/箱子跑 100 步 → 箱子落在地面顶面上。
     //验的是"内核能不能起来"（编译/链接/初始化顺序/分配器/精度），不碰引擎物理与渲染。
     const bool joltKernelOk = engine::physics::selfTestJoltKernel();
@@ -265,6 +268,8 @@ static void initNoiseAndRunSelfTests() {
               << (saveDirOk ? "通过" : "失败") << "\n";
     std::cout << "存档菜单：新建/选择/删除自检"
               << (saveMenuOk ? "通过" : "失败") << "\n";
+    std::cout << "图集 UV：各格 UV 不越界自检"
+              << (atlasUvOk ? "通过" : "失败") << "\n";
     std::cout << "物理内核：Jolt 初始化 + 地面/箱子 100 步落地自检"
               << (joltKernelOk ? "通过" : "失败") << "\n";
     std::cout << "模组排序：跨批次依赖方向 + 缺失依赖 + 同批环自检"

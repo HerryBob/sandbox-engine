@@ -25,6 +25,13 @@ struct AtlasSlot {
     std::uint8_t col = 0;
 };
 
+// 纯数学：图集某格的 UV 矩形（含半像素内缩）。
+// 抽成自由函数是为了可单测 —— 这条 UV 边界过去出过"方块边缘冒紫色短线"的 bug
+// （UV 正好落在格边界 → 最近邻采样取到隔壁格 default.png 的品红）。
+// grid = 每边格数；size = 图集像素边长。
+glm::vec4 atlasSlotUVPure(std::uint32_t grid, std::uint32_t size,
+                          std::uint32_t col, std::uint32_t row);
+
 class TextureAtlas {
 public:
     // 自动收集纹理名并逐格铺图（第 0 格恒 default.png）。每边格数按条目数取 sqrt 上整。
