@@ -602,75 +602,22 @@ void VulkanContext::collectRetiredMeshes(std::size_t slot) {
     bucket.clear();
 }
 
-// ---- 刚体网格（可动方块组）----
+// ---- 刚体网格 ----
+// 资源与位姿已抽成 BodyMeshStore（S6a）：上传/销毁/位姿都在那边，
+// 这里只保留少量转发（打包/解包/每帧位姿喂入仍由本类的公开接口承接）。
 
 bool VulkanContext::uploadBodyMesh(int contraptionId, const std::vector<engine::shared::Block>& blocks) {
-    // 同 id 已有网格：结构变了，先销毁旧缓冲再建新的
-    auto it = bodyMeshes_.find(contraptionId);
-    if (it != bodyMeshes_.end()) {
-        destroyChunkMesh(device_, it->second);
-        bodyMeshes_.erase(it);
-    }
-
-    // 局部坐标生成顶点（不查世界邻居）；图集与注册表由本层提供
-    const mesh::BodyMeshData data = mesh::buildBodyVertices(blocks, textureAtlas_);
-    if (data.vertices.empty() || data.indices.empty())
-        return true;   // 空刚体：不建缓冲
-
-    ChunkMesh m;
-    if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * data.vertices.size(),
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        m.vertexBuffer, m.vertexMemory)) return false;
-    util::mapAndCopy(device_, m.vertexMemory, sizeof(Vertex) * data.vertices.size(), data.vertices.data());
-
-    if (!util::createBuffer(device_, physicalDevice_, sizeof(std::uint32_t) * data.indices.size(),
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        m.indexBuffer, m.indexMemory)) return false;
-    util::mapAndCopy(device_, m.indexMemory, sizeof(std::uint32_t) * data.indices.size(), data.indices.data());
-
-    m.vertexCount = static_cast<std::uint32_t>(data.vertices.size());
-    m.indexCount  = static_cast<std::uint32_t>(data.indices.size());
-    bodyMeshes_[contraptionId] = m;
-
-    ENGINE_LOG_INFO("Vulkan", "刚体网格 id=" + std::to_string(contraptionId)
-        + " 顶点=" + std::to_string(m.vertexCount)
-        + " 索引=" + std::to_string(m.indexCount));
-    return true;
+    return bodies_.upload(contraptionId, blocks);
 }
 
 void VulkanContext::setBodyPoseDirect(int contraptionId, double x, double y, double z,
                                       float qx, float qy, float qz, float qw) {
-    bodyPos_[contraptionId] = glm::dvec3{x, y, z};
-    bodyRot_[contraptionId] = glm::quat{qw, qx, qy, qz};
-    BodyPoseAnim& a = bodyAnim_[contraptionId];
-    a.direct = true;
+    bodies_.setPose(contraptionId, x, y, z, qx, qy, qz, qw);
 }
 
-// 注：环式位姿插值已删除 —— 刚体位姿改由 PoseHistory（物理每 tick 发布一帧快照）
-// 插值后经 setBodyPoseDirect 喂进来。这里不再保留 pending/keys 那套相位猜测逻辑。
-// 取刚体当前位姿。位姿已由 PoseHistory 插值好（setBodyPoseDirect），这里不再插值。
-bool VulkanContext::interpolatedBodyPose(int contraptionId, glm::dvec3& outPos,
-                                         glm::quat& outRot) {
-    const auto pit = bodyPos_.find(contraptionId);
-    const auto rit = bodyRot_.find(contraptionId);
-    if (pit == bodyPos_.end() || rit == bodyRot_.end()) return false;
-    outPos = pit->second;
-    outRot = rit->second;
-    return true;
-}
 void VulkanContext::destroyBodyMesh(int contraptionId) {
-    auto it = bodyMeshes_.find(contraptionId);
-    if (it != bodyMeshes_.end()) {
-        destroyChunkMesh(device_, it->second);
-        bodyMeshes_.erase(it);
-    }
-    bodyPos_.erase(contraptionId);
-    bodyRot_.erase(contraptionId);
-    bodyAnim_.erase(contraptionId);
+    bodies_.destroy(contraptionId);
 }
-
 // ---- 实体模型（带骨骼，逐骨骼 draw）----
 
 bool VulkanContext::loadEntityModel(int entityId, const std::string& bbmodelPath,
@@ -1016,18 +963,19 @@ void VulkanContext::recordBodyPass(VkCommandBuffer cmd) {
     if (!bodyDrawLogged) {
         bodyDrawLogged = true;
         std::ostringstream os;
-        os << "刚体趟首帧 数量=" << bodyMeshes_.size();
-        const auto pit0 = bodyPos_.find(0);
-        if (pit0 != bodyPos_.end())
-            os << " 刚体0=(" << pit0->second.x << "," << pit0->second.y << "," << pit0->second.z << ")";
+        os << "刚体趟首帧 数量=" << bodies_.meshes().size();
+        glm::dvec3 p0;
+        glm::quat r0;
+        if (bodies_.pose(0, p0, r0))
+            os << " 刚体0=(" << p0.x << "," << p0.y << "," << p0.z << ")";
         ENGINE_LOG_INFO("Vulkan", os.str());
     }
-    for (const auto& [id, m] : bodyMeshes_) {
+    for (const auto& [id, m] : bodies_.meshes()) {
         if (m.vertexCount == 0) continue;
-        // 位姿走插值：物理 25Hz 推，渲染 60~165Hz 画（见 interpolatedBodyPose）
+        // 位姿由 PoseHistory 插值好后每帧喂进 BodyMeshStore，这里只读
         glm::dvec3 posePos;
         glm::quat  poseRot;
-        if (!interpolatedBodyPose(id, posePos, poseRot)) continue;
+        if (!bodies_.pose(id, posePos, poseRot)) continue;
         const glm::vec3 worldPos{
             static_cast<float>(posePos.x),
             static_cast<float>(posePos.y),
@@ -1280,11 +1228,7 @@ void VulkanContext::destroyRenderObjects() {
         bucket.clear();
     }
     // 刚体网格：与 chunk 网格同结构，同样逐个销毁
-    for (auto& [id, m] : bodyMeshes_) destroyChunkMesh(device_, m);
-    bodyMeshes_.clear();
-    bodyPos_.clear();
-    bodyRot_.clear();
-    bodyAnim_.clear();
+    bodies_.shutdown();   // 刚体网格（S6a 抽出的 BodyMeshStore）
     // 实体：逐骨骼释放缓冲，再释放贴图三件套
     for (auto& [id, em] : entityMeshes_) {
         for (auto& g : em.bones) {

@@ -15,6 +15,8 @@
 #include <glm/gtc/quaternion.hpp>
 #include "shared/chunk/ChunkPos.hpp"
 #include "render/assets/TextureAtlas.hpp"
+#include "render/BodyMeshStore.hpp"
+#include "render/MeshTypes.hpp"
 #include "render/FrameInfra.hpp"
 #include "render/HudRenderer.hpp"
 #include "render/PipelineSet.hpp"
@@ -36,19 +38,6 @@ namespace engine::render {
 
 // 体素顶点：位置 + 颜色（纹理阶段再扩展 UV）。
 // 布局必须与管线顶点输入描述（binding/attribute）一致。
-struct Vertex {
-    glm::vec3 pos;   // 方块局部坐标（-0.5..0.5 单位立方体）
-    glm::vec3 color; // 顶点颜色（本阶段逐面着色，代替纹理）
-    glm::vec2 uv; //  顶点纹理坐标（本阶段逐面着色，代替纹理）
-};
-
-// 顶点着色器 uniform：三个矩阵分开传（MVP 拆解）。
-// model=方块世界变换（目前单位矩阵），view=相机视角，proj=投影。
-// 每帧相机矩阵：CPU 预乘成 viewProj 一个矩阵再上传。
-// 着色器侧 gl_Position = viewProj * bodyModel * pos（bodyModel 走 push constant）。
-// 为什么合并：原来传 model/view/proj 三个 mat4（192 字节），而 model 恒为单位阵、
-// 每次绘制都要在 GPU 侧乘一遍；现在 CPU 一次乘法搞定，UBO 缩到 64 字节，
-// 顶点着色器的 uniform 读取从 3 个矩阵降到 1 个。
 struct UniformBufferObject {
     glm::mat4 viewProj;   // = proj * view  （model 恒为单位阵，已折进来）
 };
@@ -58,22 +47,6 @@ struct UniformBufferObject {
 // 全量接口保留为"重建全部 chunk"（首帧/世界重建用）。
 // 分桶：一个 chunk 可同时持有 Solid 桶 + Cutout 桶两组网格（玻璃等），
 //       重建/销毁同一个对象，生命周期原子化（不拆两个 map）。
-struct ChunkMesh {
-    // Solid 桶（不透明，默认桶）
-    VkBuffer       vertexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
-    VkBuffer       indexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
-    uint32_t       vertexCount = 0;
-    uint32_t       indexCount = 0;
-    // Cutout 桶（镂空/透明方块，如玻璃）：独立一组 GPU 资源 + 计数
-    VkBuffer       cutoutVertexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory cutoutVertexMemory = VK_NULL_HANDLE;
-    VkBuffer       cutoutIndexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory cutoutIndexMemory = VK_NULL_HANDLE;
-    uint32_t       cutoutVertexCount = 0;
-    uint32_t       cutoutIndexCount = 0;
-};
 
 // 一根骨骼的 GPU 网格：与 ChunkMesh 的 Solid 桶同构（实体不需要 Cutout 桶）。
 struct EntityBoneGpu {
@@ -269,6 +242,8 @@ private:
     PipelineSet pipelines_;
     // 命令池/同步/UBO/描述符（S4b 抽出的 FrameInfra）
     FrameInfra infra_;
+    // 刚体网格 + 位姿（S6a 抽出的 BodyMeshStore）
+    BodyMeshStore bodies_;
     // FPS/帧耗时统计（渲染线程自己算，喂给 HUD 显示）
     std::chrono::steady_clock::time_point fpsWindowStart_{};
     std::chrono::steady_clock::time_point lastFrameStart_{};
@@ -295,17 +270,12 @@ private:
     void collectRetiredMeshes(std::size_t slot);
 
     // 刚体网格：key = contraptionId。与 chunkMeshes_ 同结构，但生命周期跟刚体走（打包建、解包销）。
-    std::unordered_map<int, ChunkMesh>  bodyMeshes_;
     // 刚体世界原点（double：远离原点时 float 精度不足）。位姿更新只动这里。
-    std::unordered_map<int, glm::dvec3> bodyPos_;
     // 刚体姿态（四元数）。与 bodyPos_ 同生命周期（位姿更新只动这里，不碰缓冲）。
-    std::unordered_map<int, glm::quat>  bodyRot_;
     // 刚体位姿：由 PoseHistory（跨线程快照表）插值后经 setBodyPoseDirect 喂入。
     // 这里只做存储，本类不再做任何插值（原先的环 + pending 相位猜测已删除）。
-    struct BodyPoseAnim { bool direct = false; };    std::unordered_map<int, BodyPoseAnim> bodyAnim_;
     // 取插值后的位姿（alpha = 现在距上一次到达 / 两次到达间隔，钳到 [0,1]）。
     // 返回 false 表示该 id 还没有位姿数据。
-    bool interpolatedBodyPose(int contraptionId, glm::dvec3& outPos, glm::quat& outRot);
     bool                 renderObjectsReady_ = false;
     std::uint64_t        framesPresented_ = 0;
 
