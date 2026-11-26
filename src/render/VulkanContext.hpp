@@ -110,8 +110,6 @@ public:
     VkPipeline    cutoutPipeline() const { return pipelines_.cutoutPipeline(); }
     VkDescriptorSet descriptorSet() const { return infra_.descSet(); }
     bool rebuildMeshFromBlocks(const std::vector<engine::shared::Block>& blocks); // 修改为增量重建chunk
-    void requestChunkRebuild(const std::vector<engine::shared::Block>& blocks,
-        const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks); // 请求 mesh 重建
     bool rebuildChunkMeshes(const std::vector<engine::shared::Block>& blocks, const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks); // 增量重建：只重建 dirtyChunks 里的 chunk
 
     // ---- 刚体网格（可动方块组）----
@@ -250,8 +248,6 @@ private:
 
     std::vector<engine::shared::Block> pendingRebuildBlocks_;  // 待重建快照
 
-    std::unordered_set<engine::shared::ChunkPos> pendingDirtyChunks_; // 待重建的脏 chunk 集
-    std::atomic<bool> chunkRebuildRequested_{ false };                // 增量重建请求标志
 
     glm::mat4            viewProj_{1.0f};               // 本帧的 proj*view（updateViewProj 写，pushDrawMatrices 读）
 

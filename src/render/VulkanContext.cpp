@@ -410,12 +410,7 @@ bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Bloc
     return rebuildChunkMeshes(blocks, allChunks);
 }
 
-void VulkanContext::requestChunkRebuild(const std::vector<engine::shared::Block>& blocks,
-    const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks) {
-    pendingRebuildBlocks_ = blocks;   // 快照拷贝：重建时世界数据可能已变，必须定格
-    pendingDirtyChunks_ = dirtyChunks;
-    chunkRebuildRequested_.store(true, std::memory_order_relaxed);
-}
+
 
 //dirtychunks 更新
 bool VulkanContext::rebuildChunkMeshes(
