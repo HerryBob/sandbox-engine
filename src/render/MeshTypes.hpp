@@ -8,6 +8,8 @@
 
 #include <glm/glm.hpp>
 
+#include <vector>
+
 namespace engine::render {
 
 // ============================================================================
@@ -41,6 +43,17 @@ struct ChunkMesh {
     VkDeviceMemory cutoutIndexMemory = VK_NULL_HANDLE;
     uint32_t       cutoutVertexCount = 0;
     uint32_t       cutoutIndexCount = 0;
+};
+
+// 一个 chunk 的**CPU 侧**网格数据（构建器的输出、存储的输入）。
+// Solid 桶 = 不透明；Cutout 桶 = 镂空/透明（玻璃等）。两组分别上传。
+struct ChunkMeshData {
+    std::vector<Vertex>    verts;
+    std::vector<std::uint32_t> indices;
+    std::vector<Vertex>    cutoutVerts;
+    std::vector<std::uint32_t> cutoutIndices;
+
+    bool empty() const { return verts.empty() && cutoutVerts.empty(); }
 };
 
 // 销毁一个网格的两组缓冲（Solid + Cutout）并归零。

@@ -1,6 +1,7 @@
 // VulkanContext：GLFW 窗口 + Vulkan 实例/设备/交换链 + 渲染管线 + 每帧绘制循环。
 // 函数按 init 调用顺序排列；无状态工具在 VulkanUtils，网格在 VulkanMesh。
 #include "render/VulkanContext.hpp"
+#include "render/ChunkMeshBuilder.hpp"
 #include "render/VulkanMesh.hpp"
 #include "render/utils/Utils.hpp"
 #include "core/Log.hpp"
@@ -75,6 +76,8 @@ bool VulkanContext::init(int width, int height, const char* title) {
     }
     texWidth_  = textureAtlas_.size();
     texHeight_ = textureAtlas_.size();
+    // 世界 chunk 网格存储（S5）：只要有 device 就能建缓冲
+    if (!chunkMeshes_.init(device_, physicalDevice_)) return false;
     // 刚体网格存储（S6a）：需要在图集构建之后，构网格时要查 UV
     if (!bodies_.init(device_, physicalDevice_, textureAtlas_)) return false;
     // ① 命令池 + 同步对象（S4b）：纹理上传要先有命令池
@@ -414,50 +417,18 @@ void VulkanContext::requestChunkRebuild(const std::vector<engine::shared::Block>
     chunkRebuildRequested_.store(true, std::memory_order_relaxed);
 }
 
-//销毁一个chunk的GPU资源（Solid + Cutout 两组都销毁）
-static void destroyChunkMesh(VkDevice device, ChunkMesh& m) {
-    // Solid 组
-    if (m.vertexBuffer) vkDestroyBuffer(device, m.vertexBuffer, nullptr);
-    if (m.vertexMemory) vkFreeMemory(device, m.vertexMemory, nullptr);
-    if (m.indexBuffer)  vkDestroyBuffer(device, m.indexBuffer, nullptr);
-    if (m.indexMemory)  vkFreeMemory(device, m.indexMemory, nullptr);
-    // Cutout 组
-    if (m.cutoutVertexBuffer) vkDestroyBuffer(device, m.cutoutVertexBuffer, nullptr);
-    if (m.cutoutVertexMemory) vkFreeMemory(device, m.cutoutVertexMemory, nullptr);
-    if (m.cutoutIndexBuffer)  vkDestroyBuffer(device, m.cutoutIndexBuffer, nullptr);
-    if (m.cutoutIndexMemory)  vkFreeMemory(device, m.cutoutIndexMemory, nullptr);
-    m = {}; // 全部回零（Solid + Cutout 一并）
-}
-
 //dirtychunks 更新
 bool VulkanContext::rebuildChunkMeshes(
-    const std::vector<engine::shared::Block>& blocks, 
+    const std::vector<engine::shared::Block>& blocks,
     const std::unordered_set<engine::shared::ChunkPos>& dirtyChunks) {
-        
-    // P14：原来这里有 vkDeviceWaitIdle（等整条 GPU 流水空闲，实测平均被拖 6.18ms）。
-    // 现在改为"按帧槽延迟销毁"（retireChunkMesh / collectRetiredMeshes），
-    // 不再需要停 GPU —— 旧 buffer 会在引用它的命令缓冲执行完之后才释放。
-    //待重建集合
-    std::unordered_set<engine::shared::ChunkPos> rebuildSet = dirtyChunks;
-    //solid集合
+
+    // 构建器（纯 CPU）+ 存储（GPU）已分别抽成 ChunkMeshBuilder / ChunkMeshStore（S5）。
+    // 这里只做"按 chunk 分组 → 生成 → 上传"的编排。
     std::unordered_set<engine::shared::BlockPos> solid;
-    solid.reserve(blocks.size());
-    for (const auto& b : blocks) {
-        if (b.contraptionId == -1) {
-            //查询注册表: 注册过且 renderType == Solid（B59：改用 renderType 判定，
-            // BlockInfo 的 opaque 与它语义重叠，已删除）
-            const auto* info = engine::registry::g_blockRegistry.find(
-                static_cast<std::uint16_t>(b.type));
-            if (info && info->renderType == engine::registry::RenderType::Solid) {
-                solid.insert(b.pos);
-            }
-        }
-    }
-    //逐个chunk重建
-    for (const auto& cp : rebuildSet) {
-        const int bx = cp.x << 4,
-            by = cp.y << 4,
-            bz = cp.z << 4;
+    ChunkMeshBuilder::buildSolidSet(blocks, solid);   // 面剔除集：一次建好，多个 chunk 共用
+
+    for (const auto& cp : dirtyChunks) {
+        const int bx = cp.x << 4, by = cp.y << 4, bz = cp.z << 4;
         std::vector<engine::shared::Block> chunkBlocks;
         for (const auto& b : blocks) {
             if (b.type == engine::shared::BlockType::Air || b.contraptionId != -1) continue;
@@ -466,147 +437,11 @@ bool VulkanContext::rebuildChunkMeshes(
                 b.pos.z >= bz && b.pos.z < bz + 16)
                 chunkBlocks.push_back(b);
         }
-        //生成chunk的顶点和索引（分桶：Solid 默认组 / Cutout 透明组）
-        std::vector<Vertex> vertices;           // Solid 组顶点
-        std::vector<uint32_t> indices;          // Solid 组索引
-        std::vector<Vertex> cutoutVerts;        // Cutout 组顶点（玻璃等）
-        std::vector<uint32_t> cutoutIndices;    // Cutout 组索引
-        uint32_t vertexOffset = 0;
-        uint32_t cutoutVertexOffset = 0;
-
-        // P14-2a：渲染属性只取决于方块**类型**，而图中只有少数几种。
-        // 原来每块查 3 次表（注册表 / 图集按字符串 / 模型注册表按字符串），实测 0.76 µs/块，
-        // 首帧 82,944 块共烧 63 ms。这里在本次重建内按类型缓存一次，之后每块 1 次哈希。
-        struct BlockRenderProps {
-            bool  isCutout = false;
-            glm::vec4 uvRect{0.0f};
-            const engine::assets::ModelDef* model = nullptr;
-        };
-        std::unordered_map<std::uint16_t, BlockRenderProps> renderPropsCache;
-        renderPropsCache.reserve(16);
-
-        for (const auto& block : chunkBlocks) {
-            // 细插桩（P14-2 决策用）：① 三次查表  ② 面剔除  ③ 顶点生成+拷贝
-            const glm::vec3 center{block.pos.x + 0.5f, block.pos.y + 0.5f, block.pos.z + 0.5f};
-            // 类型 → 渲染属性（首次遇到该类型时查表，之后直接命中缓存）
-            const auto cacheSlot =
-                renderPropsCache.try_emplace(static_cast<std::uint16_t>(block.type));
-            if (cacheSlot.second) {
-                BlockRenderProps props;
-                const auto* info = engine::registry::g_blockRegistry.find(
-                    static_cast<std::uint16_t>(block.type));
-                // 查注册表：renderType 决定进哪个桶（认属性不认方块身份）
-                props.isCutout = info && info->renderType == engine::registry::RenderType::Cutout;
-                // 纹理 → UV：注册表纹理名 → 图集格 → UV 矩形（未注册 → default 兜底格）
-                props.uvRect = textureAtlas_.fallbackUV();
-                if (info && !info->texture.empty()) {
-                    engine::assets::AtlasSlot slot;
-                    if (textureAtlas_.slotOf(info->texture, slot))
-                        props.uvRect = textureAtlas_.slotUV(slot);
-                }
-                // 模型名查表（字符串键）
-                if (info && !info->model.empty())
-                    props.model = engine::assets::g_modelRegistry.find(info->model);
-                cacheSlot.first->second = props;
-            }
-            const BlockRenderProps& props = cacheSlot.first->second;
-            const bool isCutout = props.isCutout;
-            auto& dstVerts   = isCutout ? cutoutVerts : vertices;
-            auto& dstIndices = isCutout ? cutoutIndices : indices;
-            auto& dstOffset  = isCutout ? cutoutVertexOffset : vertexOffset;
-            // 玻璃整体淡蓝；solid 不传 tint 用默认逐面色
-            const std::uint8_t faceMask = optimization::meshing::computeFaceMask(block.pos, solid);
-            // 顶点生成：优先数据驱动模型（模型名注册且加载成功 → buildModelVertices；
-            // 无 model / 模型缺失 → 立方体兜底，仍用注册表纹理）
-            // P14-2b：直接追加进 dstVerts，不再每块新建 vector 再拷贝
-            const std::size_t vertsBefore = dstVerts.size();
-            if (props.model)
-                mesh::buildModelVertices(dstVerts, center, *props.model, faceMask, textureAtlas_);
-            if (dstVerts.size() == vertsBefore)
-                mesh::buildCubeVertices(dstVerts, center, faceMask, props.uvRect);
-            const uint32_t faceCount = static_cast<uint32_t>((dstVerts.size() - vertsBefore) / 4);
-            for (uint32_t f = 0; f < faceCount; ++f) {
-                const uint32_t b0 = dstOffset + f * 4;
-                dstIndices.push_back(b0 + 0); dstIndices.push_back(b0 + 1); dstIndices.push_back(b0 + 2);
-                dstIndices.push_back(b0 + 0); dstIndices.push_back(b0 + 2); dstIndices.push_back(b0 + 3);
-            }
-            dstOffset += static_cast<uint32_t>(dstVerts.size() - vertsBefore);
-        }
-        //无chunk 删除旧网格, 继续下一个
-        auto it =  chunkMeshes_.find(cp);
-        if (vertices.empty() && cutoutVerts.empty()) {
-            if (it != chunkMeshes_.end()) {
-                retireChunkMesh(std::move(it->second));   // P14：延迟销毁，不等 GPU
-                chunkMeshes_.erase(it);
-            }
-            continue;
-        }
-        //有网格
-        if (it != chunkMeshes_.end()) {
-            retireChunkMesh(std::move(it->second));       // P14：延迟销毁，不等 GPU
-            chunkMeshes_.erase(it);
-        }
-        ChunkMesh m;
-        // Solid 组 buffer
-        if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * vertices.size(),
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            m.vertexBuffer, m.vertexMemory)) return false;
-        util::mapAndCopy(device_, m.vertexMemory, sizeof(Vertex) * vertices.size(), vertices.data());
-        if (!util::createBuffer(device_, physicalDevice_, sizeof(uint32_t) * indices.size(),
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            m.indexBuffer, m.indexMemory)) return false;
-        util::mapAndCopy(device_, m.indexMemory, sizeof(uint32_t) * indices.size(), indices.data());
-        m.vertexCount = static_cast<uint32_t>(vertices.size());
-        m.indexCount = static_cast<uint32_t>(indices.size());
-        // Cutout 组 buffer（无 cutout 面则跳过，保持 NULL 句柄）
-        if (!cutoutVerts.empty()) {
-            if (!util::createBuffer(device_, physicalDevice_, sizeof(Vertex) * cutoutVerts.size(),
-                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                m.cutoutVertexBuffer, m.cutoutVertexMemory)) return false;
-            util::mapAndCopy(device_, m.cutoutVertexMemory, sizeof(Vertex) * cutoutVerts.size(), cutoutVerts.data());
-            if (!util::createBuffer(device_, physicalDevice_, sizeof(uint32_t) * cutoutIndices.size(),
-                VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                m.cutoutIndexBuffer, m.cutoutIndexMemory)) return false;
-            util::mapAndCopy(device_, m.cutoutIndexMemory, sizeof(uint32_t) * cutoutIndices.size(), cutoutIndices.data());
-            m.cutoutVertexCount = static_cast<uint32_t>(cutoutVerts.size());
-            m.cutoutIndexCount = static_cast<uint32_t>(cutoutIndices.size());
-        }
-        chunkMeshes_[cp] = m;
-
-        //重建日志（面数 = Solid + Cutout）
-        {
-            std::ostringstream os;
-            os << "重建 chunk=(" << cp.x << "," << cp.y << "," << cp.z
-                << ") 面=" << (m.indexCount + m.cutoutIndexCount) / 6
-                << " 顶点=" << (m.vertexCount + m.cutoutVertexCount);
-            ENGINE_LOG_INFO("Vulkan", os.str());
-        }
+        const ChunkMeshData data = ChunkMeshBuilder::buildChunk(chunkBlocks, solid, textureAtlas_);
+        if (!chunkMeshes_.upload(cp, data)) return false;   // 空数据内部删旧网格
     }
     return true;
 }
-
-// ---- 延迟销毁（P14）----
-// 把网格挂到"当前帧槽"的墓地：等下一次轮回到该帧槽（那时它的 fence 已经 wait 过），
-// 引用这个网格的提交必然全部执行完，才真正 vkDestroyBuffer。
-//
-// 安全性推导（kMaxFramesInFlight = 2）：
-//   在第 F 帧（槽 S）退休的网格，最后一次被引用是 F-1 帧（槽 1-S）；
-//   第 F+2 帧重新轮到槽 S 时，S 的 fence（F 帧）刚 wait 完，而 1-S 的 fence（F-1 帧）
-//   在第 F+1 帧已经 wait 过 —— 两者都完成，销毁安全。
-void VulkanContext::retireChunkMesh(ChunkMesh&& m) {
-    graveyard_[currentFrameSlot_ % kMaxFramesInFlight].push_back(std::move(m));
-}
-
-void VulkanContext::collectRetiredMeshes(std::size_t slot) {
-    auto& bucket = graveyard_[slot % kMaxFramesInFlight];
-    for (auto& m : bucket) destroyChunkMesh(device_, m);
-    bucket.clear();
-}
-
 // ---- 刚体网格 ----
 // 资源与位姿已抽成 BodyMeshStore（S6a）：上传/销毁/位姿都在那边，
 // 这里只保留少量转发（打包/解包/每帧位姿喂入仍由本类的公开接口承接）。
@@ -728,7 +563,8 @@ bool VulkanContext::beginFrame(uint32_t frame, uint32_t& imageIndex) {
 
     // P14：这个帧槽的 fence 刚 wait 完 → 上一轮挂在这里的旧网格可以真正销毁了。
     currentFrameSlot_ = frame;
-    collectRetiredMeshes(frame);
+    chunkMeshes_.setFrameSlot(currentFrameSlot_);
+    chunkMeshes_.collectRetired(frame);
 
     VkResult r = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
                                        infra_.imageAvailable(frame), VK_NULL_HANDLE, &imageIndex);
@@ -756,7 +592,7 @@ void VulkanContext::recordChunkSolidPass(VkCommandBuffer cmd) {
     const glm::mat4 identityMatrix(1.0f);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.pipeline());
     pushDrawMatrices(cmd, identityMatrix);
-    for (const auto& [cp, m] : chunkMeshes_) {
+    for (const auto& [cp, m] : chunkMeshes_.meshes()) {
         if (m.vertexCount == 0) continue;   // 无 Solid 面跳过
         VkDeviceSize vbOffset = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &m.vertexBuffer, &vbOffset);
@@ -861,7 +697,7 @@ void VulkanContext::recordChunkCutoutPass(VkCommandBuffer cmd) {
     const glm::mat4 identityMatrix(1.0f);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.cutoutPipeline());
     pushDrawMatrices(cmd, identityMatrix);
-    for (const auto& [cp, m] : chunkMeshes_) {
+    for (const auto& [cp, m] : chunkMeshes_.meshes()) {
         if (m.cutoutVertexCount == 0) continue;   // 无 Cutout 面跳过
         VkDeviceSize vbOffset = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &m.cutoutVertexBuffer, &vbOffset);
@@ -876,7 +712,7 @@ void VulkanContext::recordHudPass(VkCommandBuffer cmd, uint32_t frame) {
         // 网格统计：遍历一次 chunkMeshes_ 汇总（chunk 数 + 三角形数），供 HUD 显示
         int meshChunks = 0;
         long long meshTris = 0;
-        for (const auto& [cp, m] : chunkMeshes_) {
+        for (const auto& [cp, m] : chunkMeshes_.meshes()) {
             ++meshChunks;
             meshTris += static_cast<long long>(m.indexCount / 3);
             meshTris += static_cast<long long>(m.cutoutIndexCount / 3);
@@ -1024,22 +860,10 @@ void VulkanContext::framebufferResizeCallback(GLFWwindow* w, int, int) {
 // 释放描述符池/布局/UBO 缓冲
 void VulkanContext::destroyRenderObjects() {
     renderObjectsReady_ = false;
-    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
 
-    }
-    for (auto& sem : std::vector<VkSemaphore>{}) {
-        if (sem) { vkDestroySemaphore(device_, sem, nullptr); sem = VK_NULL_HANDLE; }
-    }
     for (auto fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
     framebuffers_.clear();
-    // 增量重建：销毁所有 chunk 网格（每 chunk 的 GPU 资源）
-    for (auto& [cp, m] : chunkMeshes_) destroyChunkMesh(device_, m);
-    chunkMeshes_.clear();
-    // P14：延迟销毁队列里可能还挂着旧网格，关停时一并释放（此处已 vkDeviceWaitIdle）
-    for (auto& bucket : graveyard_) {
-        for (auto& m : bucket) destroyChunkMesh(device_, m);
-        bucket.clear();
-    }
+    chunkMeshes_.shutdown();   // 世界 chunk 网格（S5 抽出的 ChunkMeshStore，含 P14 墓地）
     // 刚体网格：与 chunk 网格同结构，同样逐个销毁
     bodies_.shutdown();   // 刚体网格（S6a 抽出的 BodyMeshStore）
     // 实体：逐骨骼释放缓冲，再释放贴图三件套
@@ -1063,9 +887,8 @@ void VulkanContext::shutdown() {
     if (!window_ && !instance_ && !device_) return;
 
     if (device_) vkDeviceWaitIdle(device_);
-    destroyRenderObjects();
-    pipelines_.shutdown();                                            // 管线/布局/附件/renderPass
-    destroySwapchain();                                               // swapchain + 图像视图
+    destroyRenderObjects();   // 各 store / HUD / 管线 / 附件 / 帧基础设施
+    destroySwapchain();       // swapchain + 图像视图
     if (device_) { vkDestroyDevice(device_, nullptr); device_ = VK_NULL_HANDLE; }
     if (surface_) { vkDestroySurfaceKHR(instance_, surface_, nullptr); surface_ = VK_NULL_HANDLE; }
     if (instance_) { vkDestroyInstance(instance_, nullptr); instance_ = VK_NULL_HANDLE; }

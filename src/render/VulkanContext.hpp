@@ -16,6 +16,7 @@
 #include "shared/chunk/ChunkPos.hpp"
 #include "render/assets/TextureAtlas.hpp"
 #include "render/BodyMeshStore.hpp"
+#include "render/ChunkMeshStore.hpp"
 #include "render/EntityRenderer.hpp"
 #include "render/MeshTypes.hpp"
 #include "render/FrameInfra.hpp"
@@ -206,6 +207,8 @@ private:
     PipelineSet pipelines_;
     // 命令池/同步/UBO/描述符（S4b 抽出的 FrameInfra）
     FrameInfra infra_;
+    // 世界 chunk 网格表 + P14 延迟销毁（S5 抽出的 ChunkMeshStore）
+    ChunkMeshStore chunkMeshes_;
     // 刚体网格 + 位姿（S6a 抽出的 BodyMeshStore）
     BodyMeshStore bodies_;
     // 实体模型/贴图/位姿（S6b 抽出的 EntityRenderer）
@@ -219,7 +222,6 @@ private:
     bool                 framebufferResized_ = false; // 窗口尺寸变化标志（GLFW 回调置位）
     std::vector<VkFramebuffer> framebuffers_;
     // 增量重建：每 chunk 一份网格（旧全局 buffer 逐步替换；chunk 空则无条目）。
-    std::unordered_map<engine::shared::ChunkPos, ChunkMesh> chunkMeshes_;
 
     // ---- 延迟销毁（P14）----
     // 为什么要延迟：销毁 GPU buffer 前必须保证"引用它的命令缓冲已经执行完"。
@@ -227,13 +229,10 @@ private:
     // 现在改成按帧槽回收：第 N 帧退休的网格放进 graveyard_[N % kMaxFramesInFlight]，
     // 下一次轮到该帧槽时（已 wait 过它的 fence）才真正销毁。
     // 此时该槽上一次提交必然完成，而其它槽更早，引用关系全部失效 → 安全。
-    std::vector<ChunkMesh> graveyard_[kMaxFramesInFlight];
     std::size_t            currentFrameSlot_ = 0;   // drawFrame 当前帧槽（回收用）
 
     // 把一个 chunk 网格标记为"待销毁"（不立即释放，见上）。
-    void retireChunkMesh(ChunkMesh&& m);
     // 回收某个帧槽里所有可销毁的网格（在该槽 fence 已 wait 之后调用）。
-    void collectRetiredMeshes(std::size_t slot);
 
     // 刚体网格：key = contraptionId。与 chunkMeshes_ 同结构，但生命周期跟刚体走（打包建、解包销）。
     // 刚体世界原点（double：远离原点时 float 精度不足）。位姿更新只动这里。
