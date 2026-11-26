@@ -63,9 +63,9 @@ bool VulkanContext::init(int width, int height, const char* title) {
         return false;
     }
     msaaSamples_ = util::getMaxUsableSampleCount(physicalDevice_); // 先问出采样数（后面全用它）
-    if (!createColorResources()) return false;                     // 先造 MSAA 图（render pass 引用它）
-    if (!createRenderPass()) return false;
-    if (!createDepthResources()) return false;
+    // ① 附件 + 渲染通道（S4a）：不依赖描述符布局
+    if (!pipelines_.initAttachmentsAndPass(device_, physicalDevice_, swapchainFormat_,
+                                           swapchainExtent_, msaaSamples_, depthFormat_)) return false;
     if (!createFramebuffers()) return false;      // ← framebuffers 不依赖 descLayout_，可留前
     if (!createCommandObjects()) return false;
     // 图集（CPU 侧）由本类构建，GPU 侧资源交给 TextureSet（S3 抽出的独立类）
@@ -80,12 +80,13 @@ bool VulkanContext::init(int width, int height, const char* title) {
         return false;
     }
     if (!createUniformObjects()) return false;    // descLayout_ 就绪
+    // ② 主图形管线（要 descLayout，必须在上面之后）
+    if (!pipelines_.initPipeline(descLayout_)) return false;
     // 实体贴图不在这里加载：贴图路径由模组的实体类型定义决定，而类型表要等
     // 模组 onLoad 跑完才齐。init 之后由装配层遍历类型表调 loadEntityModel，
     // 那里再按需 ensureEntityTexture（按路径缓存，同一张只建一次）。
-    if (!createPipeline()) return false;          // ← 移到这：引用 descLayout_
     // HUD（S2 抽出的独立类）：字体纹理 / 描述符 / 管线 / 每帧顶点缓冲
-    if (!hud_.init(physicalDevice_, device_, graphicsQueue_, cmdPool_, renderPass_,
+    if (!hud_.init(physicalDevice_, device_, graphicsQueue_, cmdPool_, pipelines_.renderPass(),
                    swapchainExtent_, msaaSamples_)) return false;
     if (!createSyncObjects()) return false;
     renderObjectsReady_ = true;
@@ -315,12 +316,7 @@ void VulkanContext::destroySwapchain() {
     }
 }
 
-// 销毁 MSAA 颜色图三件套（顺序：视图→图像→显存；recreate 与 shutdown 共用）
-void VulkanContext::destroyColorResources() {
-    if (colorBufferView_) { vkDestroyImageView(device_, colorBufferView_, nullptr); colorBufferView_ = VK_NULL_HANDLE; }
-    if (colorBuffer_) { vkDestroyImage(device_, colorBuffer_, nullptr); colorBuffer_ = VK_NULL_HANDLE; }
-    if (colorBufferMemory_) { vkFreeMemory(device_, colorBufferMemory_, nullptr); colorBufferMemory_ = VK_NULL_HANDLE; }
-}
+
 
 // 窗口尺寸变化 → 销毁重建所有依赖尺寸的资源（swapchain/帧缓冲/深度/MSAA 图）
 bool VulkanContext::recreateSwapchain() {
@@ -344,295 +340,31 @@ bool VulkanContext::recreateSwapchain() {
     for (auto fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr); // 帧缓冲引用旧视图，必须销毁
     framebuffers_.clear();
     destroySwapchain();        // 交换链 + 图像视图
-    destroyColorResources();   // MSAA 颜色图（尺寸绑定）
-    destroyDepthResources();   // 深度图（尺寸绑定）
     if (!createSwapchain()) { ENGINE_LOG_ERROR("Vulkan", "重建失败：swapchain");     return false; }
-    if (!createColorResources()) { ENGINE_LOG_ERROR("Vulkan", "重建失败：MSAA 颜色图"); return false; }
-    if (!createDepthResources()) { ENGINE_LOG_ERROR("Vulkan", "重建失败：深度图");      return false; }
+    // 尺寸绑定的附件（MSAA/深度）由 PipelineSet 按新尺寸重建（S4a）
+    if (!pipelines_.recreateAttachments(swapchainExtent_)) {
+        ENGINE_LOG_ERROR("Vulkan", "重建失败：MSAA/深度附件");
+        return false;
+    }
+    if (!pipelines_.recreateAttachments(swapchainExtent_)) {
+        ENGINE_LOG_ERROR("Vulkan", "重建失败：MSAA/深度附件");
+        return false;
+    }
     if (!createFramebuffers()) { ENGINE_LOG_ERROR("Vulkan", "重建失败：帧缓冲");      return false; }
     framebufferResized_ = false;
     return true;
 }
 
 // 定义渲染规则：颜色 CLEAR→画→STORE，深度 CLEAR→画→丢弃
-bool VulkanContext::createRenderPass() {
-    //色彩附件
-    VkAttachmentDescription color{};
-    color.format = swapchainFormat_;
-    color.samples = msaaSamples_;
-    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;          // 进来不知道什么布局
-    color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;  // 停留在颜色附件布局    
-    //深度附件
-    VkAttachmentDescription depth{};
-    depth.format = depthFormat_;
-    depth.samples = msaaSamples_;
-    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;        // 每帧清为 1.0（最远）
-    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // 深度不呈现，无需保留
-    depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    //Resolve附件
-    VkAttachmentDescription colorResolve{};
-    colorResolve.format = swapchainFormat_;              // 与交换链同格式
-    colorResolve.samples = VK_SAMPLE_COUNT_1_BIT;        // 最终屏幕图必须 1x
-    colorResolve.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // 会被覆盖，不用清
-    colorResolve.storeOp = VK_ATTACHMENT_STORE_OP_STORE;    // 要显示！必须保留
-    colorResolve.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;  // 交给显示器
+// 注：renderPass / 深度·颜色附件 / 主管线 已抽成 PipelineSet（S4a）。
 
-    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference resolveAttachmentRef = {2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorRef;
-    subpass.pDepthStencilAttachment = &depthRef; // 深度附件挂进子pass
-    subpass.pResolveAttachments = &resolveAttachmentRef; // 多采样抗锯齿
-
-
-    VkSubpassDependency dep{};
-    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dep.dstSubpass = 0;
-    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.srcAccessMask = 0;
-    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    VkAttachmentDescription attachments[3] = { color, depth ,colorResolve };
-    VkRenderPassCreateInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = 3;
-    renderPassInfo.pAttachments = attachments;
-    renderPassInfo.subpassCount = 1;
-    renderPassInfo.pSubpasses = &subpass;
-    renderPassInfo.dependencyCount = 1;
-    renderPassInfo.pDependencies = &dep;
-
-    if (vkCreateRenderPass(device_, &renderPassInfo, nullptr, &renderPass_) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "vkCreateRenderPass 失败");
-        return false;
-    }
-    ENGINE_LOG_INFO("Vulkan", "RenderPass 创建成功（颜色 CLEAR→画→STORE 呈现 + 深度 CLEAR→画→丢弃）");
-    return true;
-}
-
-// 创建深度图像 + 显存 + 视图（帧缓冲的深度附件）
-// 图像+内存三连走通用工具（展开教学版：vkCreateImage→查需求→分配→绑定，已沉淀进 util::createImage）
-bool VulkanContext::createDepthResources() {
-    if (!util::createImage(device_, physicalDevice_,
-            swapchainExtent_.width, swapchainExtent_.height,
-            depthFormat_,
-            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-            1, msaaSamples_,
-            depthImage_, depthImageMemory_)) {
-        ENGINE_LOG_ERROR("Vulkan", "深度图像创建失败");
-        return false;
-    }
-
-    // 视图：固定样板走通用工具（2D、深度 aspect、全 mip 全层）
-    if (!util::createImageView(device_, depthImage_, depthFormat_,
-            VK_IMAGE_ASPECT_DEPTH_BIT, depthImageView_)) {
-        ENGINE_LOG_ERROR("Vulkan", "深度图像视图创建失败");
-        return false;
-    }
-    {
-        std::ostringstream os;
-        os << "深度缓冲就绪（格式 " << util::depthFormatName(depthFormat_)
-           << " " << swapchainExtent_.width << "x" << swapchainExtent_.height << "）";
-        ENGINE_LOG_INFO("Vulkan", os.str());
-    }
-    return true;
-}
-//创建mass图像
-bool VulkanContext::createColorResources() {
-    util::createImage(device_, physicalDevice_,
-        swapchainExtent_.width, swapchainExtent_.height,
-        swapchainFormat_,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
-        1,                                                  // 无 mipmap
-        msaaSamples_,                                       // ★ 8x 采样（差异在这）
-        colorBuffer_, colorBufferMemory_);
-    // ② 视图（通用工具：image=colorBuffer_、format=swapchainFormat_、aspect=COLOR）
-    if (!util::createImageView(device_, colorBuffer_, swapchainFormat_,
-            VK_IMAGE_ASPECT_COLOR_BIT, colorBufferView_)) {
-        ENGINE_LOG_ERROR("Vulkan", "MSAA 颜色视图创建失败");
-        return false;
-    }
-    {
-        std::ostringstream os;
-        os << "MSAA 颜色附件就绪（"
-            << swapchainExtent_.width << "x" << swapchainExtent_.height
-            << " @ " << msaaSamples_ << "x 采样）";
-        ENGINE_LOG_INFO("Vulkan", os.str());
-    }
-    return true;
-}
-
-// 创建图形管线：顶点输入 + 着色器 + 光栅化 + 深度测试 + 管线布局
-bool VulkanContext::createPipeline() {
-    VkShaderModule vert = util::loadShaderModule(device_, "shaders/vert.spv");
-    if (vert == VK_NULL_HANDLE) return false;
-    VkShaderModule frag = util::loadShaderModule(device_, "shaders/frag.spv");
-    if (frag == VK_NULL_HANDLE) return false;
-
-    VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vert;
-    stages[0].pName = "main";
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = frag;
-    stages[1].pName = "main";
-
-    VkVertexInputBindingDescription binding{};
-    binding.binding = 0;
-    binding.stride = sizeof(Vertex);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    VkVertexInputAttributeDescription attrs[3]{};
-    attrs[0].location = 0;
-    attrs[0].binding = 0;
-    attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrs[0].offset = static_cast<uint32_t>(offsetof(Vertex, pos));
-    attrs[1].location = 1;
-    attrs[1].binding = 0;
-    attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrs[1].offset = static_cast<uint32_t>(offsetof(Vertex, color));
-    attrs[2].location = 2;                                 // ② 新增
-    attrs[2].binding = 0;
-    attrs[2].format = VK_FORMAT_R32G32_SFLOAT;             // vec2 = 2 个 float
-    attrs[2].offset = static_cast<uint32_t>(offsetof(Vertex, uv));  // ← 关键
-
-    VkPipelineVertexInputStateCreateInfo vertexInput{};
-    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInput.vertexBindingDescriptionCount = 1;
-    vertexInput.pVertexBindingDescriptions = &binding;
-    vertexInput.vertexAttributeDescriptionCount = 3;
-    vertexInput.pVertexAttributeDescriptions = attrs;
-
-    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-    VkViewport viewport{};   // 动态状态：创建时的值会被忽略，每帧由 vkCmdSetViewport 设置
-    VkRect2D scissor{};
-    VkPipelineViewportStateCreateInfo viewportState{};
-    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewportState.viewportCount = 1;
-    viewportState.pViewports = &viewport;
-    viewportState.scissorCount = 1;
-    viewportState.pScissors = &scissor;
-    VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-    VkPipelineDynamicStateCreateInfo dynamicState{};
-    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynamicState.dynamicStateCount = 2;
-    dynamicState.pDynamicStates = dyn;
-
-    VkPipelineRasterizationStateCreateInfo rasterizer{};
-    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.depthClampEnable = VK_FALSE;
-    rasterizer.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;  // 背面剔除：省一半三角形（立方体只画 3 面）
-    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; // 绕序与顶点索引一致
-    rasterizer.depthBiasEnable = VK_FALSE;
-    rasterizer.lineWidth = 1.0f;
-
-    VkPipelineDepthStencilStateCreateInfo depthStencil{};
-    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_TRUE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-    depthStencil.depthBoundsTestEnable = VK_FALSE;
-    depthStencil.stencilTestEnable = VK_FALSE; // 模板测试留待将来（轮廓/特效）
-    depthStencil.minDepthBounds = 0.0f;
-    depthStencil.maxDepthBounds = 1.0f;
-
-    VkPipelineMultisampleStateCreateInfo multisample{};
-    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = msaaSamples_; // 先不开 MSAA
-
-    VkPipelineColorBlendAttachmentState blendAttach{};
-    blendAttach.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    blendAttach.blendEnable = VK_FALSE;
-    VkPipelineColorBlendStateCreateInfo colorBlend{};
-    colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlend.attachmentCount = 1;
-    colorBlend.pAttachments = &blendAttach;
-
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &descLayout_;
-
-    // 刚体变换：每趟绘制前推一次 4x4 矩阵（静态 chunk 推单位矩阵，矩阵乘上去等于没乘）
-    // 相机矩阵 viewProj 也一并推（总共 128 字节 = 2 个 mat4，正好是规范保证的下限）。
-    // 这样每个命令缓冲自带一份相机矩阵，不再跨帧共享 UBO。
-    VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    pushRange.offset = 0;
-    pushRange.size = sizeof(glm::mat4) * 2;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
-    if (vkCreatePipelineLayout(device_, &pipelineLayoutInfo, nullptr, &pipelineLayout_) != VK_SUCCESS) {
-        ENGINE_LOG_ERROR("Vulkan", "vkCreatePipelineLayout 失败");
-        vkDestroyShaderModule(device_, vert, nullptr);
-        vkDestroyShaderModule(device_, frag, nullptr);
-        return false;
-    }
-
-    VkGraphicsPipelineCreateInfo pipelineInfo{};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipelineInfo.stageCount = 2;
-    pipelineInfo.pStages = stages;
-    pipelineInfo.pVertexInputState = &vertexInput;
-    pipelineInfo.pInputAssemblyState = &inputAssembly;
-    pipelineInfo.pViewportState = &viewportState;
-    pipelineInfo.pRasterizationState = &rasterizer;
-    pipelineInfo.pMultisampleState = &multisample;
-    pipelineInfo.pDepthStencilState = &depthStencil; // 深度测试/写入挂进管线
-    pipelineInfo.pColorBlendState = &colorBlend;
-    pipelineInfo.pDynamicState = &dynamicState;      // viewport/scissor 每帧设置（resize 不变形）
-    pipelineInfo.layout = pipelineLayout_;
-    pipelineInfo.renderPass = renderPass_;
-    pipelineInfo.subpass = 0;
-
-    // 双管线批量创建：Solid（cull BACK）+ Cutout（cull NONE，双面——玻璃薄片两面可见）
-    VkPipelineRasterizationStateCreateInfo cutoutRasterizer = rasterizer;
-    cutoutRasterizer.cullMode = VK_CULL_MODE_NONE;
-    VkGraphicsPipelineCreateInfo pipelines[2] = { pipelineInfo, pipelineInfo };
-    pipelines[1].pRasterizationState = &cutoutRasterizer;
-    VkPipeline out[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-    const VkResult r = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 2, pipelines, nullptr, out);
-    vkDestroyShaderModule(device_, vert, nullptr);
-    vkDestroyShaderModule(device_, frag, nullptr);
-    if (r != VK_SUCCESS) {
-        std::ostringstream os;
-        os << "vkCreateGraphicsPipelines 失败 result=" << r;
-        ENGINE_LOG_ERROR("Vulkan", os.str());
-        return false;
-    }
-    pipeline_ = out[0];
-    cutoutPipeline_ = out[1];
-    ENGINE_LOG_INFO("Vulkan", "图形管线创建成功（Solid + Cutout 双管线）");
-    return true;
-}
-
-// 每张交换链图像配一个帧缓冲（颜色 + 深度附件）
 bool VulkanContext::createFramebuffers() {
     framebuffers_.reserve(swapchainImageViews_.size());
     for (std::size_t i = 0; i < swapchainImageViews_.size(); ++i) {
-        VkImageView attachments[3] = { colorBufferView_, depthImageView_, swapchainImageViews_[i] }; // [颜色, 深度]
+        VkImageView attachments[3] = { pipelines_.colorView(), pipelines_.depthView(), swapchainImageViews_[i] }; // [颜色, 深度]
         VkFramebufferCreateInfo framebufferInfo{};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass = renderPass_;
+        framebufferInfo.renderPass = pipelines_.renderPass();
         framebufferInfo.attachmentCount = 3;
         framebufferInfo.pAttachments = attachments;
         framebufferInfo.width = swapchainExtent_.width;
@@ -1356,7 +1088,7 @@ void VulkanContext::pushDrawMatrices(VkCommandBuffer cmd, const glm::mat4& bodyM
         glm::mat4 viewProj;
     };
     const PushData data{ bodyModel, viewProj_ };
-    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(data), &data);
+    vkCmdPushConstants(cmd, pipelines_.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(data), &data);
 }
 
 // 每帧绘制：acquire → 录制 → submit → present
@@ -1429,7 +1161,7 @@ bool VulkanContext::drawFrame() {
     }
     VkRenderPassBeginInfo renderPassBeginInfo{};
     renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassBeginInfo.renderPass = renderPass_;
+    renderPassBeginInfo.renderPass = pipelines_.renderPass();
     renderPassBeginInfo.framebuffer = framebuffers_[imageIndex];
     renderPassBeginInfo.renderArea = {{0, 0}, swapchainExtent_};
     VkClearValue clears[2]{};
@@ -1449,14 +1181,14 @@ bool VulkanContext::drawFrame() {
     vkCmdSetScissor(cmdBuffers_[frame], 0, 1, &scissor);
     // 描述符（UBO+纹理）：双管线共用同一 layout/descSet，绑定一次即可
     vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout_, 0, 1, &descSet_, 0, nullptr);
+                            pipelines_.pipelineLayout(), 0, 1, &descSet_, 0, nullptr);
 
     // 刚体变换 push constant：静态两趟各推一次单位矩阵。
     // Cutout 趟必须重推——push constant 是命令缓冲状态，不重推会沿用上一趟的值。
     const glm::mat4 identityMatrix(1.0f);
 
     // 第一趟：Solid 桶（不透明先画，写深度建立遮挡基准）
-    vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.pipeline());
     pushDrawMatrices(cmdBuffers_[frame], identityMatrix);
     for (const auto& [cp, m] : chunkMeshes_) {
         if (m.vertexCount == 0) continue;   // 无 Solid 面跳过
@@ -1515,7 +1247,7 @@ bool VulkanContext::drawFrame() {
             if (!pit->second.visible) continue;               // 第一人称隐藏自身
 
             vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    pipelineLayout_, 0, 1, &em.textureSet, 0, nullptr);
+                                    pipelines_.pipelineLayout(), 0, 1, &em.textureSet, 0, nullptr);
 
             const glm::vec3 pos{static_cast<float>(pit->second.pos.x),
                                 static_cast<float>(pit->second.pos.y),
@@ -1552,11 +1284,11 @@ bool VulkanContext::drawFrame() {
 
         // 换回图集那套：后面的 Cutout 趟还在用方块贴图
         vkCmdBindDescriptorSets(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipelineLayout_, 0, 1, &descSet_, 0, nullptr);
+                                pipelines_.pipelineLayout(), 0, 1, &descSet_, 0, nullptr);
     }
 
     // 第二趟：Cutout 桶（透明/镂空后画，双面 cull NONE）
-    vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, cutoutPipeline_);
+    vkCmdBindPipeline(cmdBuffers_[frame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_.cutoutPipeline());
     pushDrawMatrices(cmdBuffers_[frame], identityMatrix);
     for (const auto& [cp, m] : chunkMeshes_) {
         if (m.cutoutVertexCount == 0) continue;   // 无 Cutout 面跳过
@@ -1649,12 +1381,7 @@ void VulkanContext::destroyUniformObjects() {
 
 
 
-// 释放深度图像/视图/显存
-void VulkanContext::destroyDepthResources() {
-    if (depthImageView_) { vkDestroyImageView(device_, depthImageView_, nullptr); depthImageView_ = VK_NULL_HANDLE; }
-    if (depthImageMemory_) { vkFreeMemory(device_, depthImageMemory_, nullptr); depthImageMemory_ = VK_NULL_HANDLE; }
-    if (depthImage_) { vkDestroyImage(device_, depthImage_, nullptr); depthImage_ = VK_NULL_HANDLE; }
-}
+
 
 // 逆创建序释放全部渲染对象
 void VulkanContext::destroyRenderObjects() {
@@ -1671,7 +1398,6 @@ void VulkanContext::destroyRenderObjects() {
     if (cmdPool_) { vkDestroyCommandPool(device_, cmdPool_, nullptr); cmdPool_ = VK_NULL_HANDLE; }
     for (auto fb : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
     framebuffers_.clear();
-    destroyDepthResources(); // 深度资源：帧缓冲之后、管线之前
     // 增量重建：销毁所有 chunk 网格（每 chunk 的 GPU 资源）
     for (auto& [cp, m] : chunkMeshes_) destroyChunkMesh(device_, m);
     chunkMeshes_.clear();
@@ -1706,11 +1432,8 @@ void VulkanContext::destroyRenderObjects() {
     }
     entityTextures_.clear();
     blockTextures_.shutdown();   // 方块图集（S3 抽出的 TextureSet）
-    if (pipeline_) { vkDestroyPipeline(device_, pipeline_, nullptr); pipeline_ = VK_NULL_HANDLE; }
-    if (cutoutPipeline_) { vkDestroyPipeline(device_, cutoutPipeline_, nullptr); cutoutPipeline_ = VK_NULL_HANDLE; }
-    if (pipelineLayout_) { vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr); pipelineLayout_ = VK_NULL_HANDLE; }
-    hud_.shutdown();   // HUD 管线引用 renderPass_，必须先于 renderPass 销毁
-    if (renderPass_) { vkDestroyRenderPass(device_, renderPass_, nullptr); renderPass_ = VK_NULL_HANDLE; }
+    hud_.shutdown();        // HUD 管线引用 renderPass，必须早于 PipelineSet 销毁
+    pipelines_.shutdown();  // 管线 → 布局 → 附件 → renderPass
     destroyUniformObjects(); // UBO/描述符（在管线/命令之后释放）
 }
 
@@ -1728,7 +1451,7 @@ void VulkanContext::shutdown() {
 
     if (device_) vkDeviceWaitIdle(device_);
     destroyRenderObjects();
-    destroyColorResources();                                          // MSAA 颜色图三件套
+    pipelines_.shutdown();                                            // 管线/布局/附件/renderPass
     destroySwapchain();                                               // swapchain + 图像视图
     if (device_) { vkDestroyDevice(device_, nullptr); device_ = VK_NULL_HANDLE; }
     if (surface_) { vkDestroySurfaceKHR(instance_, surface_, nullptr); surface_ = VK_NULL_HANDLE; }

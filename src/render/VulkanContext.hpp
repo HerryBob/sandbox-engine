@@ -16,6 +16,7 @@
 #include "shared/chunk/ChunkPos.hpp"
 #include "render/assets/TextureAtlas.hpp"
 #include "render/HudRenderer.hpp"
+#include "render/PipelineSet.hpp"
 #include "render/TextureSet.hpp"
 #include "render/hud/HudInfo.hpp"
 #include "render/hud/HudTextBuilder.hpp"
@@ -164,9 +165,9 @@ public:
     bool drawFrame();
     // 成功呈现过的帧数（断言用）。
     std::uint64_t framesPresented() const { return framesPresented_; }
-    VkRenderPass  renderPass() const { return renderPass_; }
-    VkPipeline    pipeline() const { return pipeline_; }
-    VkPipeline    cutoutPipeline() const { return cutoutPipeline_; }
+    VkRenderPass  renderPass() const { return pipelines_.renderPass(); }
+    VkPipeline    pipeline() const { return pipelines_.pipeline(); }
+    VkPipeline    cutoutPipeline() const { return pipelines_.cutoutPipeline(); }
     VkDescriptorSet descriptorSet() const { return descSet_; }
     bool rebuildMeshFromBlocks(const std::vector<engine::shared::Block>& blocks); // 修改为增量重建chunk
     void requestChunkRebuild(const std::vector<engine::shared::Block>& blocks,
@@ -205,17 +206,11 @@ private:
     bool createSwapchain();
     void destroySwapchain();
     bool recreateSwapchain();        // 窗口尺寸变化：销毁重建尺寸相关资源
-    void destroyColorResources();    // MSAA 颜色图三件套（recreate 与 shutdown 共用）
-    bool createRenderPass();
     bool createUniformObjects();
-    bool createDepthResources();
-    bool createPipeline();
     bool createFramebuffers();
     bool createCommandObjects();
     bool createSyncObjects();
     void destroyRenderObjects();
-    void destroyDepthResources();
-    bool createColorResources();
     // 确保某张实体贴图已加载（图像/视图/采样器 + 自己的 descriptor set）。
     // 按路径去重：重复调用同一路径只建一次。返回 false 表示该贴图不可用。
     bool ensureEntityTexture(const std::string& texturePath);
@@ -253,31 +248,23 @@ private:
     std::vector<VkPhysicalDevice> devices_;
 
     // 深度缓冲
-    VkImage              depthImage_ = VK_NULL_HANDLE;
-    VkDeviceMemory       depthImageMemory_ = VK_NULL_HANDLE;
-    VkImageView          depthImageView_ = VK_NULL_HANDLE;
     VkFormat             depthFormat_ = VK_FORMAT_UNDEFINED;
 
     // MSAA 抗锯齿
     VkSampleCountFlagBits msaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
-    VkImage         colorBuffer_ = VK_NULL_HANDLE;       // MSAA 颜色图（绘制目标）
-    VkDeviceMemory  colorBufferMemory_ = VK_NULL_HANDLE;
-    VkImageView     colorBufferView_ = VK_NULL_HANDLE;
 
     // 渲染对象（第三步：RenderPass + Pipeline + 帧缓冲 + 命令 + 同步）
     static constexpr uint32_t kMaxFramesInFlight = 2;
     // HUD（S2 抽出的独立类）：可见性/统计由本类薄转发，资源与绘制都在它内部
     HudRenderer hud_;
+    // renderPass + MSAA/深度附件 + 主管线（S4a 抽出的 PipelineSet）
+    PipelineSet pipelines_;
     // FPS/帧耗时统计（渲染线程自己算，喂给 HUD 显示）
     std::chrono::steady_clock::time_point fpsWindowStart_{};
     std::chrono::steady_clock::time_point lastFrameStart_{};
     double            fpsSmoothed_ = 0.0;
     double            frameMsSmoothed_ = 0.0;
     uint32_t          fpsFramesInWindow_ = 0;
-    VkRenderPass         renderPass_ = VK_NULL_HANDLE;
-    VkPipelineLayout     pipelineLayout_ = VK_NULL_HANDLE;
-    VkPipeline           pipeline_ = VK_NULL_HANDLE;
-    VkPipeline           cutoutPipeline_ = VK_NULL_HANDLE;  // Cutout 桶管线（cull NONE 双面）
     bool                 framebufferResized_ = false; // 窗口尺寸变化标志（GLFW 回调置位）
     std::vector<VkFramebuffer> framebuffers_;
     // 增量重建：每 chunk 一份网格（旧全局 buffer 逐步替换；chunk 空则无条目）。
