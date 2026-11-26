@@ -40,10 +40,12 @@
 #include "worldgen/preset/PresetLoader.hpp"
 #include "worldgen/preset/WorldPreset.hpp"
 #include "worldgen/generator/ColumnGenerator.hpp"
+#include "save/SaveDir.hpp"
 #include "worldgen/streaming/ChunkStreamer.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <condition_variable>
 #include <cmath>
 #include <cstdint>
@@ -457,6 +459,39 @@ static int run(const std::string& presetName) {
         const std::size_t warmupColumns = static_cast<std::size_t>(span * span);   // 81
 
         streamer = std::make_unique<engine::worldgen::ChunkStreamer>(columnGen, radius);
+        // 存档读路径（原型 step ③）：生成线程先查盘，miss 再生成。
+        // 用回调注入而不是让 worldgen 依赖 save/ —— worldgen 保持"不碰磁盘"的边界，
+        // 由装配层（这里）决定存档位置。
+        {
+            const std::string saveRoot = "saves/world";
+            engine::save::SaveDir saveDir(saveRoot);
+            saveDir.ensureDirs();   // 目录不存在就建（写盘在 step ④）
+            // 路径是相对**工作目录**的（现为 build/Debug）→ 打一次绝对路径，避免以后找不到存档
+            ENGINE_LOG_INFO("Save", "存档目录：" +
+                std::filesystem::absolute(saveRoot).string() +
+                (saveDir.exists() ? "（存在，将优先读盘）" : "（不存在，全部现场生成）"));
+            if (saveDir.exists()) {
+                streamer->setColumnLoader(
+                    [saveRoot](const engine::worldgen::ColPos& pos,
+                               engine::worldgen::ColumnBlocks& out) {
+                        engine::save::SaveDir dir(saveRoot);
+                        out.pos = pos;
+                        // 一列 = kGenChunkLevels 个竖直 chunk；**任一缺失即整列 miss**
+                        // （不能半列从盘、半列生成：地形会在层交界处错位）
+                        for (int level = 0; level < engine::worldgen::kGenChunkLevels; ++level) {
+                            const int cy = (engine::worldgen::kGenMinY /
+                                            engine::shared::CHUNK_SIZE) + level;
+                            engine::shared::ChunkData cd;
+                            if (!dir.readChunk(pos.x, cy, pos.z, cd)) return false;
+                            out.chunks[level] = std::move(cd);
+                        }
+                        out.blockCount = 0;
+                        out.minSurfaceY = 0;
+                        out.maxSurfaceY = 0;
+                        return true;
+                    });
+            }
+        }
         streamer->start();
 
         warmupWindow(*streamer, businessWorld.world(), warmupColumns);

@@ -32,6 +32,12 @@ namespace engine::worldgen {
 // 现在两条队列各自单端使用，误用会立刻表现为队列断言或数据错乱，风险可接受。
 class ChunkStreamer {
 public:
+    // 列的"外部来源"回调（存档读盘）：返回 true = 已填充 out，本次不生成。
+    // 为什么用回调而不是直接依赖 save/SaveDir：
+    //   ① worldgen 层保持"不碰磁盘、不碰 World"的边界（它只做纯计算 + 队列）
+    //   ② 装配层（main）决定"存档在哪、要不要读"，生产/测试可替换成内存桩
+    // 调用线程：**生成线程**（必须无共享可变状态；SaveDir 只有一个路径字符串，安全）。
+    using ColumnLoader = std::function<bool(const ColPos&, ColumnBlocks&)>;
     // 窗口半径（chunk）：4 → 9×9 = 81 列 = 324 个 16³ chunk（1b 决策点②）
     // 将来要放大窗口，只改这个常量或构造参数。
     static constexpr int kDefaultRadius = 4;
@@ -48,6 +54,12 @@ public:
     static constexpr std::size_t kMaxApplyPerTick = 4;
     // 卸载半径 = 加载半径 + 1：留一圈滞回（hysteresis），站在窗口边界上不会反复加载/卸载。
     static constexpr int kEvictMargin = 1;
+
+    // 注入"先查盘，miss 再生成"的回调。必须在 start() 之前设置。
+    void setColumnLoader(ColumnLoader loader) { loader_ = std::move(loader); }
+    // 诊断：从磁盘加载成功 / 生成 的列数（生成线程写，只读统计）
+    long long loadedColumnCount() const { return loadedColumns_.load(std::memory_order_relaxed); }
+    long long generatedColumnCount() const { return generatedColumns_.load(std::memory_order_relaxed); }
 
     // 一批"待落地"的流式结果（业务线程取走后写入 World）。
     // 本类是线程本地化的：**不持有、不访问 World** —— 只产出数据。
@@ -116,6 +128,9 @@ private:
     // 数据层（StreamState）：两条队列 + 窗口记账 + 统计。
     // 逻辑层只通过它读写，不直接碰容器 —— 将来把"流式窗口"换成别的实现时，
     // 只改这里的类型，tick/takeBatch 的决策逻辑不用动。
+    ColumnLoader loader_;                                    // 可为空 = 全部生成
+    std::atomic<long long> loadedColumns_{0};                // 存档命中计数
+    std::atomic<long long> generatedColumns_{0};             // 生成计数
     StreamState state_;
 };
 

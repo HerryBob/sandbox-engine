@@ -1,5 +1,7 @@
 #include "worldgen/streaming/ChunkStreamer.hpp"
 
+#include <functional>
+
 #include "shared/chunk/ChunkPos.hpp"
 
 #include <algorithm>
@@ -62,7 +64,19 @@ void ChunkStreamer::workerLoop() {
         }
 
         auto blocks = std::make_shared<ColumnBlocks>();
-        generator_.generateColumn(req.pos, *blocks);
+        // 先查盘（存档命中就用盘上的数据），miss 再生成。
+        // 注意：loader_ 可能为空（未接存档）、也可能读失败（无存档/损坏/版本不符），
+        // 两者都走生成 —— "读不到就重新生成"是本设计的兜底契约。
+        bool loaded = false;
+        if (loader_) {
+            loaded = loader_(req.pos, *blocks);
+        }
+        if (loaded) {
+            loadedColumns_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            generator_.generateColumn(req.pos, *blocks);
+            generatedColumns_.fetch_add(1, std::memory_order_relaxed);
+        }
         state_.generatedColumnCount_.fetch_add(1, std::memory_order_relaxed);
 
         // 结果队列满 = 业务线程还没消费完：等它（有界等待，不丢结果）
