@@ -662,6 +662,13 @@ void PhysicsWorld::onUnpackContraption(const engine::shared::PhysicsCommand& cmd
         }
         state_.unbindStructure(it->structureId);
         jolt_->removeContraptionBody(structureId);   // Jolt 侧：销毁动态刚体
+        // 位姿表槽必须归还：否则每次"打包→解包"泄漏一个槽（2048 个之后新刚体
+        // 分配不到槽 → 位姿不再发布 → 刚体不渲染）。释放后 slotOfStructure 返回 -1，
+        // 渲染端下一帧就查不到它，网格也由 destroy 事件销毁。
+        if (poseHistory_ != nullptr) {
+            const int slot = poseHistory_->slotOfStructure(structureId);
+            if (slot >= 0) poseHistory_->release(slot);
+        }
         state_.bodies().erase(state_.bodies().begin() + (it - state_.bodies().data()));
     }
     bodyCount_.store(static_cast<long long>(state_.bodies().size()),
