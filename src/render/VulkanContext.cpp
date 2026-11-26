@@ -75,6 +75,8 @@ bool VulkanContext::init(int width, int height, const char* title) {
     }
     texWidth_  = textureAtlas_.size();
     texHeight_ = textureAtlas_.size();
+    // 刚体网格存储（S6a）：需要在图集构建之后，构网格时要查 UV
+    if (!bodies_.init(device_, physicalDevice_, textureAtlas_)) return false;
     // ① 命令池 + 同步对象（S4b）：纹理上传要先有命令池
     if (!infra_.initCommandAndSync(device_, physicalDevice_, graphicsQueue_, graphicsQueueFamily_,
                                    static_cast<uint32_t>(swapchainImages_.size()))) return false;

@@ -44,7 +44,12 @@ bool BodyMeshStore::upload(int contraptionId, const std::vector<engine::shared::
         destroyMeshBuffers(device_, it->second);
         meshes_.erase(it);
     }
-    if (atlas_ == nullptr) return false;
+    if (atlas_ == nullptr) {
+        // 防御：本类必须先 init()（拿到 device/atlas）。漏了 init 时上传会静默失败，
+        // 表现为"刚体不渲染但碰撞箱还在"（S6a 首次接入就踩了这个）。
+        ENGINE_LOG_ERROR("Vulkan", "BodyMeshStore 未初始化就 upload（检查 VulkanContext::init 里的 bodies_.init）");
+        return false;
+    }
 
     // 局部坐标生成顶点（不查世界邻居）；图集与注册表由资源侧提供
     const mesh::BodyMeshData data = mesh::buildBodyVertices(blocks, *atlas_);
