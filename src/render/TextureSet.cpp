@@ -85,9 +85,14 @@ bool TextureSet::createSampler() {
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    // 每格四周有 1px 间隔且**边缘像素已挤出**（见 TextureAtlas::addFromFile），
-    // 所以跨格渗色问题不存在了 → 放开到完整 mip 链（远处更稳、更省带宽）。
-    samplerInfo.maxLod = static_cast<float>(mipLevels_ > 0 ? mipLevels_ - 1 : 0);
+    // maxLod 上限 3：图集每格内容 16px，第 3 级只剩 2px，已经是最小可用值。
+    // 再往下（第 4/5 级）格内容 < 2 纹素，**相邻格会被混成一团** ——
+    // 实测放到全链后远处地面变成一圈橙黄（= 砖块橙 + 草绿 + 泥土棕的整张图集平均色）。
+    // 间隔方案只解决"跨格采样"，解决不了"格本身小于一个纹素"。
+    constexpr std::uint32_t kAtlasMaxLod = 3;
+    const std::uint32_t cap = (mipLevels_ > kAtlasMaxLod + 1) ? kAtlasMaxLod
+                                                             : (mipLevels_ > 0 ? mipLevels_ - 1 : 0);
+    samplerInfo.maxLod = static_cast<float>(cap);
     if (vkCreateSampler(device_, &samplerInfo, nullptr, &sampler_) != VK_SUCCESS) {
         ENGINE_LOG_ERROR("Vulkan", "纹理采样器创建失败");
         return false;
