@@ -41,6 +41,7 @@
 #include "worldgen/preset/WorldPreset.hpp"
 #include "worldgen/generator/ColumnGenerator.hpp"
 #include "save/SaveDir.hpp"
+#include "save/SaveMenu.hpp"
 #include "save/SaveSession.hpp"
 #include "worldgen/streaming/ChunkStreamer.hpp"
 
@@ -108,6 +109,45 @@ static std::filesystem::path resolveSaveRoot() {
         dir = dir.parent_path();
     }
     return std::filesystem::current_path(ec) / "saves";
+}
+// 启动时的存档选择菜单：用 HUD 的 ASCII 文字画在窗口里，键盘选择。
+// 返回选中的存档名；空串 = 用户取消（调用方应退出）。
+// 只在装配期跑（单线程，世界还没建）——换存档 = 换世界，运行期换需要 B137 的重建入口。
+static std::string promptSaveMenu(engine::render::VulkanContext& vkCtx,
+                                  const std::filesystem::path& saveRoot) {
+    engine::save::SaveMenu menu(saveRoot);
+
+    vkCtx.setHudVisible(true);
+    // GLFW 的键查询是"电平"，菜单要"边沿"（按一下动一次）→ 每帧比对上次状态。
+    std::string chosen;
+    bool lastKeyDown[8] = {false};
+    const int keys[8] = {GLFW_KEY_UP, GLFW_KEY_DOWN, GLFW_KEY_ENTER,
+                         GLFW_KEY_N, GLFW_KEY_X, GLFW_KEY_ESCAPE,
+                         GLFW_KEY_KP_ENTER, GLFW_KEY_Q};
+
+    while (!vkCtx.shouldClose()) {
+        vkCtx.pollEvents();
+        for (int i = 0; i < 8; ++i) {
+            const bool down = vkCtx.keyDown(keys[i]);
+            if (down && !lastKeyDown[i]) {
+                const auto r = menu.onKey(keys[i]);
+                if (r == engine::save::SaveMenu::Result::Chosen) {
+                    chosen = menu.selectedName();
+                } else if (r == engine::save::SaveMenu::Result::Quit) {
+                    chosen.clear();
+                    vkCtx.clearHudOverlay();
+                    return std::string();
+                }
+            }
+            lastKeyDown[i] = down;
+        }
+        vkCtx.setHudOverlay(menu.lines());
+        vkCtx.drawFrame();
+        if (!chosen.empty()) break;
+    }
+
+    vkCtx.clearHudOverlay();
+    return chosen;
 }
 // 引擎主流程：装配三条轨 → 启动 → 主线程事件循环 → 优雅停止。
 // presetName：世界预设名（不带 .json），由启动参数 --preset 决定。
@@ -180,6 +220,9 @@ static void initNoiseAndRunSelfTests() {
     //存档目录（SaveDir）：写读 chunk / level.json 往返 / 缺失与损坏都拒绝；在临时目录里跑，验完删除。
     const bool saveDirOk = engine::selftest::saveDir();
 
+    //存档菜单（新建/选择/删除）纯逻辑：临时目录，不碰真实存档。
+    const bool saveMenuOk = engine::selftest::saveMenu();
+
     //刚体物理内核（Jolt）：初始化 + 地面/箱子跑 100 步 → 箱子落在地面顶面上。
     //验的是"内核能不能起来"（编译/链接/初始化顺序/分配器/精度），不碰引擎物理与渲染。
     const bool joltKernelOk = engine::physics::selfTestJoltKernel();
@@ -220,6 +263,8 @@ static void initNoiseAndRunSelfTests() {
               << (chunkSaveOk ? "通过" : "失败") << "\n";
     std::cout << "存档目录：写读 chunk / level.json 往返 + 拒绝损坏自检"
               << (saveDirOk ? "通过" : "失败") << "\n";
+    std::cout << "存档菜单：新建/选择/删除自检"
+              << (saveMenuOk ? "通过" : "失败") << "\n";
     std::cout << "物理内核：Jolt 初始化 + 地面/箱子 100 步落地自检"
               << (joltKernelOk ? "通过" : "失败") << "\n";
     std::cout << "模组排序：跨批次依赖方向 + 缺失依赖 + 同批环自检"
@@ -375,7 +420,7 @@ struct FrameGate {
     }
 };
 
-static int run(const std::string& presetName, bool noSave) {
+static int run(const std::string& presetName, bool noSave, const std::string& worldArg) {
     initConsole();
     std::cout << "=== 沙盒引擎 ===\n";
 
@@ -497,7 +542,23 @@ static int run(const std::string& presetName, bool noSave) {
         {
             // 存档会话（原型 step ④）：根目录 = <repo>/saves，存档名先固定 "world"。
             // 多存档（新建/选择/删除）后续只需换 worldName，格式与目录结构不用动。
-            const std::string worldName = "world";
+            // 存档名：--world=<名> 直接指定；否则弹菜单让玩家选/新建/删除。
+            // --no-save（冒烟）不弹菜单：基线必须无交互地跑到指标。
+            const std::filesystem::path saveRoot = resolveSaveRoot();
+            std::string worldName = worldArg;
+            if (worldName.empty() && !noSave) {
+                worldName = promptSaveMenu(vkCtx, saveRoot);
+                if (worldName.empty()) {
+                    // 用户按 ESC / 关窗：直接退出（世界还没建，无需清理）。
+                    // 注意：这里**不要**手工 ModLoader::unloadAll() —— columnGen 还持有
+                    // DLL 创建的噪声实例，它的析构晚于本 return，提前卸 DLL 会调用已卸载
+                    // 映像里的代码（AGENTS §5 记过同一类 UB）。进程退出即可。
+                    vkCtx.shutdown();
+                    return 0;
+                }
+                vkCtx.setHudVisible(false);   // 菜单用完关掉调试浮层（F3 可再开）
+            }
+            if (worldName.empty()) worldName = "world";   // --no-save 时的占位名
             engine::save::LevelInfo meta;
             meta.formatVersion = 1;
             meta.generatorVersion = 1;
@@ -506,7 +567,6 @@ static int run(const std::string& presetName, bool noSave) {
             meta.worldName = worldName;
             meta.spawnX = 0.0; meta.spawnY = 0.0; meta.spawnZ = 0.0;
 
-            const std::filesystem::path saveRoot = resolveSaveRoot();
             if (!noSave) saveSession.init(saveRoot, worldName, meta);
             if (saveSession.active()) {
                 const std::string worldDir = saveSession.worldDir().string();
@@ -829,6 +889,16 @@ static bool hasNoSaveArg(int argc, char** argv) {
     return false;
 }
 
+// 解析启动参数 --world=<名>（缺省空 = 弹存档菜单）：直接进指定存档，跳过菜单。
+static std::string parseWorldArg(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        const std::string prefix = "--world=";
+        if (arg.rfind(prefix, 0) == 0) return arg.substr(prefix.size());
+        if (arg == "--world" && (i + 1) < argc) return argv[i + 1];
+    }
+    return std::string();
+}
 // 解析启动参数 --preset <name>（缺省 default）：决定跑哪个世界预设。
 static std::string parsePresetArg(int argc, char** argv) {
     std::string name = "default";
@@ -877,7 +947,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    const int code = run(parsePresetArg(argc, argv), hasNoSaveArg(argc, argv));
+    const int code = run(parsePresetArg(argc, argv), hasNoSaveArg(argc, argv),
+                         parseWorldArg(argc, argv));
 
     engine::core::logShutdown();   // 停止后台线程并 flush 剩余队列
     return code;

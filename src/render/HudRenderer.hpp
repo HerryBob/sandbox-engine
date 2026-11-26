@@ -78,6 +78,11 @@ public:
     // 在 EndRenderPass 之前录制 HUD 这一趟。
     void drawHud(VkCommandBuffer cmd, uint32_t frameIndex);
 
+    // 覆盖层：非空时**替代**调试统计行（用于存档选择这类模态界面）。
+    // 只用 ASCII（字体图集只覆盖 32..126），不做布局/交互 —— 交互由调用方处理。
+    void setOverlayLines(std::vector<std::string> lines) { overlayLines_ = std::move(lines); }
+    void clearOverlayLines() { overlayLines_.clear(); }
+
 private:
     bool        createHudResources();      // 一次性创建：字体纹理 / 描述符 / 管线 / 顶点缓冲
     void        destroyHudResources();     // 逆序释放（重复调用安全）
@@ -100,6 +105,7 @@ private:
     // ---- 自有资源 ----
     hud::HudInfo         hudInfo_{};            // 业务统计快照
     bool                 hudVisible_ = false;   // F3 切换，默认隐藏
+    std::vector<std::string> overlayLines_;    // 非空 = 模态覆盖层（存档菜单等）
     bool                 hudDrawnOnce_ = false; // 首帧绘制日志只打一次
     hud::HudTextBuilder  hudText_;              // 逐帧重建的顶点流（CPU 侧）
     // 帧统计（由 VulkanContext 每帧喂入：它在那里算，HUD 只负责显示）

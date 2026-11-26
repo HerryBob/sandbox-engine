@@ -458,6 +458,11 @@ std::size_t HudRenderer::buildHudVertices() {
     // ---- 文本行（英文标签：字体图集只覆盖 ASCII 32..126）----
     std::vector<std::string> lines;
     lines.reserve(10);
+
+    // 模态覆盖层（存档菜单）：有内容就**替代**调试统计，避免两套字叠在一起
+    if (!overlayLines_.empty()) {
+        lines = overlayLines_;
+    } else {
     char buf[200];
 
     std::snprintf(buf, sizeof(buf),
@@ -496,6 +501,7 @@ std::size_t HudRenderer::buildHudVertices() {
         static_cast<int>(msaaSamples_),   // 枚举值本身即采样数（1/2/4/8/16）
         static_cast<unsigned long long>(hudFrames_));
     lines.emplace_back(buf);
+    }   // ← overlay 为空时的调试统计行
 
     // ---- 排版：先算背板宽度 → 画板 → 画字（顶点顺序即绘制顺序，板必须先于字）----
     float maxWidth = 0.0f;

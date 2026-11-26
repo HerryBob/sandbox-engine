@@ -8,10 +8,12 @@
 #include "render/assets/ModelDef.hpp"
 #include "render/assets/TextureAtlas.hpp"
 #include "save/SaveDir.hpp"
+#include "save/SaveMenu.hpp"
 #include "shared/chunk/ChunkData.hpp"
 
 #include <cmath>
 #include <filesystem>
+#include <GLFW/glfw3.h>
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -437,6 +439,55 @@ bool saveDir() {
     std::cout << "存档目录：写读 chunk/level.json + 缺失与损坏拒绝 自检"
               << ((cleaned) ? "通过" : "失败") << "\n";
     return cleaned;
+}
+// 存档菜单（SaveMenu）：新建/选择/删除的纯逻辑。用临时目录，不碰真实存档。
+// 键盘用 GLFW 键码直接喂 onKey —— 不需要窗口，也不依赖焦点。
+bool saveMenu() {
+    using engine::save::SaveMenu;
+    const std::string root = "savemenu_tmp";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+
+    SaveMenu menu(root);
+    // ① 空目录：无条目，ENTER 无效（提示而不是离开）
+    if (!menu.empty()) return false;
+    if (menu.onKey(GLFW_KEY_ENTER) != SaveMenu::Result::None) return false;
+
+    // ② 新建两个存档（同一秒内连按 → 第二个带后缀，不能覆盖）
+    const std::string a = menu.createNewSave();
+    if (a.empty()) return false;
+    const std::string b = menu.createNewSave();
+    if (b.empty() || b == a) return false;
+
+    // ③ 非存档目录不能被当成存档（只有 chunks/ 或 level.json 才算）
+    std::filesystem::create_directories(std::filesystem::path(root) / "not_a_save", ec);
+    menu.refresh();
+    if (menu.entries().size() != 2) return false;
+
+    // ④ 选择：DOWN/UP 都在范围内循环
+    const std::string first = menu.selectedName();
+    menu.onKey(GLFW_KEY_DOWN);
+    if (menu.selectedName() == first) return false;
+    menu.onKey(GLFW_KEY_UP);
+    if (menu.selectedName() != first) return false;
+
+    // ⑤ ENTER → Chosen，且名字就是选中的那个
+    if (menu.onKey(GLFW_KEY_ENTER) != SaveMenu::Result::Chosen) return false;
+    if (menu.selectedName() != first) return false;
+
+    // ⑥ 删除需要两次确认：第一次只提示，第二次才真删
+    const std::size_t before = menu.entries().size();
+    if (menu.onKey(GLFW_KEY_X) != SaveMenu::Result::None) return false;
+    if (menu.entries().size() != before) return false;      // 未删
+    menu.onKey(GLFW_KEY_X);
+    if (menu.entries().size() != before - 1) return false;   // 删了
+
+    // ⑦ ESC → Quit
+    if (menu.onKey(GLFW_KEY_ESCAPE) != SaveMenu::Result::Quit) return false;
+
+    std::filesystem::remove_all(root, ec);
+    std::cout << "存档菜单：新建/选择/两次确认删除/退出 自检通过\n";
+    return true;
 }
 // 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
 bool modSorter() {

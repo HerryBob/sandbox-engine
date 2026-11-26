@@ -835,7 +835,8 @@ bool VulkanContext::drawFrame() {
 
     uint32_t imageIndex = 0;
     if (!beginFrame(frame, imageIndex)) return false;
-    if (chunkMeshes_.empty()) return true;   // 没有任何 chunk 网格 → 跳过本帧
+    // 注意：这里**不能**因为"没有 chunk 网格"就跳过整帧 —— 存档选择菜单要在
+    // 空世界下把 HUD 画出来并呈现。recordFrame 对空网格集合是安全的（两趟各零次绘制）。
     if (!recordFrame(frame, imageIndex)) return false;
     if (!submitFrame(frame, imageIndex)) return false;
     ++framesPresented_;
@@ -871,6 +872,11 @@ void VulkanContext::destroyRenderObjects() {
 
 // 轮询 GLFW 事件（主线程调用）
 void VulkanContext::pollEvents() { glfwPollEvents(); } //检测对于窗口是否有事件发生
+
+bool VulkanContext::keyDown(int glfwKey) const {
+    if (!window_) return false;
+    return glfwGetKey(window_, glfwKey) == GLFW_PRESS;
+}
 
 // 窗口是否请求关闭
 bool VulkanContext::shouldClose() const {

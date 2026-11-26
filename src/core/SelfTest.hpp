@@ -33,6 +33,9 @@ bool bodyMesh();
   // 存档目录：创建/写 chunk/读回比对/level.json 往返/缺失与损坏都拒绝。
   bool saveDir();
 
+  // 存档菜单：新建/选择/两次确认删除/退出；非存档目录不被误判。
+  bool saveMenu();
+
 // 模组排序：批次倒序依赖拒绝、跨批放行、缺失依赖拒绝、同批环双方拒绝。
 bool modSorter();
 

@@ -78,6 +78,12 @@ public:
 
     // 主线程轮询窗口事件（渲染线程不触碰窗口对象）。
     void pollEvents();
+    // 键盘查询（菜单用）：直接问 GLFW 当前键状态。菜单只在装配期跑（单线程），
+    // 不与 InputSampler 的按键回调冲突。
+    bool keyDown(int glfwKey) const;
+    // 模态覆盖层转发（存档菜单用）：非空时 HUD 只画这些行，不画调试统计。
+    void setHudOverlay(std::vector<std::string> lines) { hud_.setOverlayLines(std::move(lines)); }
+    void clearHudOverlay() { hud_.clearOverlayLines(); }
 
     // 用户是否点了窗口关闭按钮。
     bool shouldClose() const;
