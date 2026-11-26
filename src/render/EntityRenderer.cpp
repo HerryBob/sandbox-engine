@@ -178,10 +178,14 @@ bool EntityRenderer::ensureTexture(const std::string& path) {
     }
 
     const VkDeviceSize size = static_cast<VkDeviceSize>(w) * static_cast<VkDeviceSize>(h) * 4;
+    // mipmap：实体贴图是独立纹理（无图集渗色问题）→ 用完整链
+    const std::uint32_t mipLevels = util::mipLevelsFor(
+        static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
     if (!util::createImage(device_, physicalDevice_,
             static_cast<uint32_t>(w), static_cast<uint32_t>(h), VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            1, VK_SAMPLE_COUNT_1_BIT, res.image, res.memory)) {
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_SAMPLED_BIT,
+            mipLevels, VK_SAMPLE_COUNT_1_BIT, res.image, res.memory)) {
         stbi_image_free(src);
         ENGINE_LOG_ERROR("Vulkan", "实体贴图图像创建失败：" + path);
         return false;
@@ -205,14 +209,19 @@ bool EntityRenderer::ensureTexture(const std::string& path) {
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     util::copyBufferToImage(device_, graphicsQueue_, cmdPool_, staging, res.image,
         static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, res.image,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // mip 链：入口 TRANSFER_DST_OPTIMAL（刚拷完），出口由 generateMipmaps 转成 READ_ONLY
+    if (!util::generateMipmaps(device_, physicalDevice_, cmdPool_, graphicsQueue_,
+            res.image, VK_FORMAT_R8G8B8A8_SRGB,
+            static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), mipLevels)) {
+        util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, res.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
 
     vkDestroyBuffer(device_, staging, nullptr);
     vkFreeMemory(device_, stagingMem, nullptr);
 
     if (!util::createImageView(device_, res.image, VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_ASPECT_COLOR_BIT, res.view)) {
+            VK_IMAGE_ASPECT_COLOR_BIT, res.view, mipLevels)) {
         ENGINE_LOG_ERROR("Vulkan", "实体贴图视图创建失败：" + path);
         return false;
     }
@@ -220,13 +229,13 @@ bool EntityRenderer::ensureTexture(const std::string& path) {
     // 像素画必须最近邻；CLAMP 防边缘泄漏
     VkSamplerCreateInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    si.magFilter = VK_FILTER_NEAREST;
-    si.minFilter = VK_FILTER_NEAREST;
+    si.magFilter = VK_FILTER_NEAREST;   // 像素风：放大保持硬边
+    si.minFilter = VK_FILTER_LINEAR;    // 缩小走 mip 链 + 线性，远处不闪
     si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    si.maxLod = 1.0f;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    si.maxLod = static_cast<float>(mipLevels);
     if (vkCreateSampler(device_, &si, nullptr, &res.sampler) != VK_SUCCESS) {
         ENGINE_LOG_ERROR("Vulkan", "实体采样器创建失败：" + path);
         return false;

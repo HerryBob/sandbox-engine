@@ -24,9 +24,12 @@ bool TextureSet::init(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue 
 bool TextureSet::createImage(const void* rgba, std::uint32_t width, std::uint32_t height) {
     const VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * 4;   // RGBA8
 
+    // mipmap：完整链（blit 需要 TRANSFER_SRC，生成 mip 时要读第 N-1 级）
+    mipLevels_ = util::mipLevelsFor(width, height);
     if (!util::createImage(device_, physicalDevice_, width, height, VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            1, VK_SAMPLE_COUNT_1_BIT, image_, imageMemory_)) {
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_SAMPLED_BIT,
+            mipLevels_, VK_SAMPLE_COUNT_1_BIT, image_, imageMemory_)) {
         ENGINE_LOG_ERROR("Vulkan", "纹理图像创建失败");
         return false;
     }
@@ -48,8 +51,15 @@ bool TextureSet::createImage(const void* rgba, std::uint32_t width, std::uint32_
     util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, image_,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     util::copyBufferToImage(device_, graphicsQueue_, cmdPool_, staging, image_, width, height);
-    util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, image_,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // 生成 mip 链：入口布局必须是 TRANSFER_DST_OPTIMAL（刚拷贝完就是这样），
+    // 出口由 generateMipmaps 转成 SHADER_READ_ONLY_OPTIMAL，所以这里不再手工 transition。
+    if (!util::generateMipmaps(device_, physicalDevice_, cmdPool_, graphicsQueue_,
+            image_, VK_FORMAT_R8G8B8A8_SRGB, width, height, mipLevels_)) {
+        ENGINE_LOG_WARN("Vulkan", "图集 mipmap 生成失败，退回单级采样");
+        util::transitionImageLayout(device_, graphicsQueue_, cmdPool_, image_,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        mipLevels_ = 1;
+    }
 
     vkDestroyBuffer(device_, staging, nullptr);
     vkFreeMemory(device_, stagingMem, nullptr);
@@ -58,7 +68,7 @@ bool TextureSet::createImage(const void* rgba, std::uint32_t width, std::uint32_
 
 bool TextureSet::createImageView() {
     if (!util::createImageView(device_, image_, VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_ASPECT_COLOR_BIT, view_)) {
+            VK_IMAGE_ASPECT_COLOR_BIT, view_, mipLevels_)) {
         ENGINE_LOG_ERROR("Vulkan", "纹理视图创建失败");
         return false;
     }
@@ -68,13 +78,17 @@ bool TextureSet::createImageView() {
 bool TextureSet::createSampler() {
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_NEAREST;      // 放大最近邻：16² 像素风硬块（线性会糊）
-    samplerInfo.minFilter = VK_FILTER_NEAREST;      // 缩小最近邻
+    samplerInfo.magFilter = VK_FILTER_NEAREST;      // 放大最近邻：像素风硬块（线性会糊）
+    // 缩小用线性 + mip 链：远处方块不再闪烁（摩尔纹），近处仍是硬边
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
     samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;  // 图集防相邻格泄漏
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;   // 1 级占位
-    samplerInfo.maxLod = 1.0f;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    // 图集里 tile 相邻 → mip 高级别会跨 tile 混色（渗色）。限制到第 2 级：
+    // 48² 图集第 2 级是 12²，每个 16px tile 还剩 ~4px，肉眼可接受。
+    // 彻底解决要走"tile padding"或 texture array（记在文档里，不在本轮）。
+    samplerInfo.maxLod = (mipLevels_ > 2) ? 2.0f : static_cast<float>(mipLevels_ - 1);
     if (vkCreateSampler(device_, &samplerInfo, nullptr, &sampler_) != VK_SUCCESS) {
         ENGINE_LOG_ERROR("Vulkan", "纹理采样器创建失败");
         return false;

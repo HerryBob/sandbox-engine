@@ -53,6 +53,7 @@ private:
     VkCommandPool    cmdPool_ = VK_NULL_HANDLE;
 
     VkImage        image_ = VK_NULL_HANDLE;
+    std::uint32_t  mipLevels_ = 1;   // 已生成的 mip 级数（1 = 只有原图）
     VkDeviceMemory imageMemory_ = VK_NULL_HANDLE;
     VkImageView    view_ = VK_NULL_HANDLE;
     VkSampler      sampler_ = VK_NULL_HANDLE;
