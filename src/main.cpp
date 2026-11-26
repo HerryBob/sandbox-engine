@@ -150,6 +150,10 @@ static void initNoiseAndRunSelfTests() {
     //刚体网格（可动方块组）：3×3×3 内部剔除 → 54 面 / 216 顶点。
     const bool bodyMeshOk = engine::selftest::bodyMesh();
 
+    //世界 chunk 网格（ChunkMeshBuilder，纯 CPU）：空输入 / 单方块 6 面 / 3×3×3 实心 54 面。
+    //这是渲染层拆分后的第一个可单测点（不需要窗口与 GPU）。
+    const bool chunkMeshOk = engine::selftest::chunkMesh();
+
     //刚体物理内核（Jolt）：初始化 + 地面/箱子跑 100 步 → 箱子落在地面顶面上。
     //验的是"内核能不能起来"（编译/链接/初始化顺序/分配器/精度），不碰引擎物理与渲染。
     const bool joltKernelOk = engine::physics::selfTestJoltKernel();
@@ -184,6 +188,8 @@ static void initNoiseAndRunSelfTests() {
               << (modelGeoOk ? "通过" : "失败") << "\n";
     std::cout << "刚体网格：3×3×3 内部剔除自检"
               << (bodyMeshOk ? "通过" : "失败") << "\n";
+    std::cout << "chunk 网格：空/单块/3×3×3 内部剔除自检"
+              << (chunkMeshOk ? "通过" : "失败") << "\n";
     std::cout << "物理内核：Jolt 初始化 + 地面/箱子 100 步落地自检"
               << (joltKernelOk ? "通过" : "失败") << "\n";
     std::cout << "模组排序：跨批次依赖方向 + 缺失依赖 + 同批环自检"

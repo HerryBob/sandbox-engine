@@ -3,6 +3,7 @@
 
 #include "modhost/manifest/Manifest.hpp"
 #include "modhost/sorter/ModSorter.hpp"
+#include "render/ChunkMeshBuilder.hpp"
 #include "render/VulkanMesh.hpp"
 #include "render/assets/ModelDef.hpp"
 #include "render/assets/TextureAtlas.hpp"
@@ -204,6 +205,55 @@ bool bodyMesh() {
     return ok;
 }
 
+// 世界 chunk 网格（ChunkMeshBuilder）：面剔除与顶点生成是纯 CPU 的，可在这里单测。
+// 三个用例：① 空输入 ② 单方块 6 面 ③ 3×3×3 实心 54 面（与刚体网格同一判据）。
+bool chunkMesh() {
+    using engine::shared::Block;
+    using engine::shared::BlockPos;
+    using engine::shared::BlockType;
+    using engine::render::ChunkMeshBuilder;
+    using engine::render::ChunkMeshData;
+
+    engine::assets::TextureAtlas emptyAtlas;   // 空图集：纹理走兜底格，不影响几何
+
+    // ① 空输入 → 空网格
+    {
+        std::vector<Block> none;
+        std::unordered_set<BlockPos> solid;
+        const ChunkMeshData d = ChunkMeshBuilder::buildChunk(none, solid, emptyAtlas);
+        if (!d.empty()) return false;
+    }
+
+    // ② 单个孤立方块 → 6 面 / 24 顶点（六面全可见，无邻居剔除）
+    {
+        std::vector<Block> one{Block{static_cast<BlockType>(1), BlockPos{0, 0, 0}, 0}};
+        std::unordered_set<BlockPos> solid{BlockPos{0, 0, 0}};   // 手工集合，不依赖注册表
+        const ChunkMeshData d = ChunkMeshBuilder::buildChunk(one, solid, emptyAtlas);
+        const std::size_t faces = d.indices.size() / 6;
+        if (faces != 6 || d.verts.size() != 24) return false;
+    }
+
+    // ③ 3×3×3 实心 → 内部接触面全剔除 → 54 面 / 216 顶点
+    {
+        std::vector<Block> blocks;
+        blocks.reserve(27);
+        std::unordered_set<BlockPos> solid;   // 手工建集合：自检不依赖方块注册表是否已加载
+        solid.reserve(27);
+        for (int x = -1; x <= 1; ++x)
+            for (int y = -1; y <= 1; ++y)
+                for (int z = -1; z <= 1; ++z) {
+                    blocks.push_back(Block{static_cast<BlockType>(1), BlockPos{x, y, z}, 0});
+                    solid.insert(BlockPos{x, y, z});
+                }
+        const ChunkMeshData d = ChunkMeshBuilder::buildChunk(blocks, solid, emptyAtlas);
+        const std::size_t faces = d.indices.size() / 6;
+        const std::size_t verts = d.verts.size();
+        const bool ok = (faces == 54 && verts == 216);
+        std::cout << "chunk 网格：3×3×3 面=" << faces << " 顶点=" << verts
+                  << (ok ? " 自检通过" : " 自检失败") << "\n";
+        return ok;
+    }
+}
 // 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
 bool modSorter() {
     using engine::modhost::ModManifest;

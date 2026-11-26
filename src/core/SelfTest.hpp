@@ -22,6 +22,11 @@ bool modelGeometry();
 // 刚体网格：3×3×3 内部接触面全剔除 → 54 面 / 216 顶点。
 bool bodyMesh();
 
+  // 世界 chunk 网格（ChunkMeshBuilder，纯 CPU）：3×3×3 实心 → 54 面 / 216 顶点；
+  // 单个孤立方块 → 6 面 / 24 顶点；空输入 → 空。
+  // 这是渲染层拆分后第一个**可单测**的点（不需要窗口/GPU）。
+  bool chunkMesh();
+
 // 模组排序：批次倒序依赖拒绝、跨批放行、缺失依赖拒绝、同批环双方拒绝。
 bool modSorter();
 
