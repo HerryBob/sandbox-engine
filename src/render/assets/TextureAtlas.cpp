@@ -67,7 +67,7 @@ void TextureAtlas::layoutGrid(std::size_t count) {
     const std::uint32_t need = 1 + static_cast<std::uint32_t>(count);
     grid_ = 1;
     while (grid_ * grid_ < need) ++grid_;
-    size_ = kAtlasTile * grid_;
+    size_ = kAtlasPitch * grid_;   // 每格占 pitch（含两侧各 1px 间隔）
     pixels_.assign(static_cast<std::size_t>(size_) * size_ * kAtlasChannels, 0u);
 }
 
@@ -144,15 +144,37 @@ bool TextureAtlas::addFromFile(std::string_view name, AtlasSlot slot) {
         return false;
     }
 
-    // 直接写入图集格：源像素 → 格（源已是 16²，逐行拷贝）
-    // 偏移按像素算：格左上角 = (格行 × 格高, 格列 × 格宽)，再换算成字节
-    const std::size_t pixelRow = static_cast<std::size_t>(slot.row) * kAtlasTile;
-    const std::size_t pixelCol = static_cast<std::size_t>(slot.col) * kAtlasTile;
-    std::uint8_t* base = pixels_.data() + (pixelRow * size_ + pixelCol) * kAtlasChannels;
+    // 写入图集格：格左上角 = (row*pitch + pad, col*pitch + pad)，再换算成字节。
+    // 写入后把四条边的像素**挤出**到环绕的 1px 间隔里，
+    // 这样边界上的采样（含 mipmap 线性缩小）取到的永远是本格边缘的颜色，
+    // 不会被隔壁格的纹素污染（紫线就是这样来的）。
+    const std::size_t pixelRow = static_cast<std::size_t>(slot.row) * kAtlasPitch + kAtlasPadding;
+    const std::size_t pixelCol = static_cast<std::size_t>(slot.col) * kAtlasPitch + kAtlasPadding;
+    auto dst = [&](std::size_t px, std::size_t py) -> std::uint8_t* {
+        return pixels_.data() + (py * size_ + px) * kAtlasChannels;
+    };
     for (std::uint32_t y = 0; y < kAtlasTile; ++y)
-        std::memcpy(base + y * size_ * kAtlasChannels,   // 每行间距 = 图集宽度（格内行间有空隙列）
+        std::memcpy(dst(pixelCol, pixelRow + y),
                     src + y * kAtlasTile * kAtlasChannels,
                     kAtlasTile * kAtlasChannels);
+
+    // 边缘挤出（1px 间隔）：上下左右各一行/列 + 四角
+    for (std::uint32_t i = 0; i < kAtlasTile; ++i) {
+        std::memcpy(dst(pixelCol + i, pixelRow - 1), dst(pixelCol + i, pixelRow), kAtlasChannels);
+        std::memcpy(dst(pixelCol + i, pixelRow + kAtlasTile),
+                    dst(pixelCol + i, pixelRow + kAtlasTile - 1), kAtlasChannels);
+        std::memcpy(dst(pixelCol - 1, pixelRow + i), dst(pixelCol, pixelRow + i), kAtlasChannels);
+        std::memcpy(dst(pixelCol + kAtlasTile, pixelRow + i),
+                    dst(pixelCol + kAtlasTile - 1, pixelRow + i), kAtlasChannels);
+    }
+    std::memcpy(dst(pixelCol - 1, pixelRow - 1), dst(pixelCol, pixelRow), kAtlasChannels);
+    std::memcpy(dst(pixelCol + kAtlasTile, pixelRow - 1),
+                dst(pixelCol + kAtlasTile - 1, pixelRow), kAtlasChannels);
+    std::memcpy(dst(pixelCol - 1, pixelRow + kAtlasTile),
+                dst(pixelCol, pixelRow + kAtlasTile - 1), kAtlasChannels);
+    std::memcpy(dst(pixelCol + kAtlasTile, pixelRow + kAtlasTile),
+                dst(pixelCol + kAtlasTile - 1, pixelRow + kAtlasTile - 1), kAtlasChannels);
+
     stbi_image_free(src);
     return true;
 }
@@ -165,18 +187,21 @@ bool TextureAtlas::slotOf(std::string_view name, AtlasSlot& out) const {
 }
 
 glm::vec4 atlasSlotUVPure(std::uint32_t grid, std::uint32_t size,
+                          std::uint32_t tile, std::uint32_t pad,
                           std::uint32_t col, std::uint32_t row) {
-    const float f = 1.0f / static_cast<float>(grid);
-    // 半像素内缩（**关键**）：格子之间没有间隙，UV 正好落在格边界时，
-    // 最近邻/线性过滤会取到**隔壁格**的纹素 —— 隔壁若是 default.png（品红+黑的
-    // 缺失纹理兜底），方块边缘就会冒出一条条短紫线。内缩半像素让采样点始终在格内。
-    const float inset = (size > 0) ? (0.5f / static_cast<float>(size)) : 0.0f;
-    return { static_cast<float>(col) * f + inset, static_cast<float>(row) * f + inset,
-             static_cast<float>(col + 1) * f - inset, static_cast<float>(row + 1) * f - inset };
+    // 格内容（不含四周间隔）在像素坐标里的范围 → 归一化成 UV。
+    // 不做半像素内缩：间隔里的像素是**本格边缘挤出的复制品**，采样到它也是本格颜色。
+    const float invSize = (size > 0) ? (1.0f / static_cast<float>(size)) : 0.0f;
+    const float x0 = static_cast<float>(col * (tile + 2 * pad) + pad);
+    const float y0 = static_cast<float>(row * (tile + 2 * pad) + pad);
+    const float x1 = x0 + static_cast<float>(tile);
+    const float y1 = y0 + static_cast<float>(tile);
+    (void)grid;
+    return { x0 * invSize, y0 * invSize, x1 * invSize, y1 * invSize };
 }
 
 glm::vec4 TextureAtlas::slotUV(AtlasSlot s) const {
-    return atlasSlotUVPure(grid_, size_, s.col, s.row);
+    return atlasSlotUVPure(grid_, size_, kAtlasTile, kAtlasPadding, s.col, s.row);
 }
 
 } // namespace engine::assets

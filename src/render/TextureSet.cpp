@@ -85,10 +85,9 @@ bool TextureSet::createSampler() {
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    // 图集里 tile 相邻 → mip 高级别会跨 tile 混色（渗色）。限制到第 2 级：
-    // 48² 图集第 2 级是 12²，每个 16px tile 还剩 ~4px，肉眼可接受。
-    // 彻底解决要走"tile padding"或 texture array（记在文档里，不在本轮）。
-    samplerInfo.maxLod = (mipLevels_ > 2) ? 2.0f : static_cast<float>(mipLevels_ - 1);
+    // 每格四周有 1px 间隔且**边缘像素已挤出**（见 TextureAtlas::addFromFile），
+    // 所以跨格渗色问题不存在了 → 放开到完整 mip 链（远处更稳、更省带宽）。
+    samplerInfo.maxLod = static_cast<float>(mipLevels_ > 0 ? mipLevels_ - 1 : 0);
     if (vkCreateSampler(device_, &samplerInfo, nullptr, &sampler_) != VK_SUCCESS) {
         ENGINE_LOG_ERROR("Vulkan", "纹理采样器创建失败");
         return false;

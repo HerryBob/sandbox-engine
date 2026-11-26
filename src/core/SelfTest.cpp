@@ -493,33 +493,31 @@ bool saveMenu() {
 // 这锁住"方块边缘冒紫色短线"那类 bug —— 根因是 UV 正好压在格边界，采样取到隔壁格
 // 的 default.png（品红+黑缺失纹理标记）。用纯数学函数验证，不需要真图集文件。
 bool atlasUV() {
+    // 图集采用"每格四周 1px 间隔 + 边缘挤出"方案：格内容 = 16px，格距 = 18px。
+    // 验证：UV 矩形换算成纹素范围后，必须**恰好等于**格内容那 16×16 像素
+    // （左边从格内第一像素起、右边到格内最后一像素止）。
+    // 这样边界上的采样只会落到"本格边缘的挤出复制品"，不会取到隔壁格。
+    const std::uint32_t tile = 16;
+    const std::uint32_t pad = 1;
     for (std::uint32_t grid = 1; grid <= 8; ++grid) {
-        const std::uint32_t size = 16 * grid;          // 每格 16px
+        const std::uint32_t size = (tile + 2 * pad) * grid;
         for (std::uint32_t row = 0; row < grid; ++row) {
             for (std::uint32_t col = 0; col < grid; ++col) {
-                const glm::vec4 r = engine::assets::atlasSlotUVPure(grid, size, col, row);
-                // UV → 像素坐标（最近的纹素中心）
-                const float px0 = r.x * static_cast<float>(size);
-                const float px1 = r.z * static_cast<float>(size);
-                const float py0 = r.y * static_cast<float>(size);
-                const float py1 = r.w * static_cast<float>(size);
-                const float tileMinX = static_cast<float>(col) * 16.0f;
-                const float tileMaxX = tileMinX + 16.0f;
-                const float tileMinY = static_cast<float>(row) * 16.0f;
-                const float tileMaxY = tileMinY + 16.0f;
-                // 采样点（向下取整的纹素）必须严格在格内：>= tileMin 且 < tileMax
-                if (!(px0 >= tileMinX && px0 < tileMaxX)) return false;
-                if (!(py0 >= tileMinY && py0 < tileMaxY)) return false;
-                if (!(px1 > tileMinX && px1 <= tileMaxX)) return false;
-                if (!(py1 > tileMinY && py1 <= tileMaxY)) return false;
-                // 且矩形不能退化成零面积
-                if (px1 - px0 < 1.0f || py1 - py0 < 1.0f) return false;
+                const glm::vec4 r = engine::assets::atlasSlotUVPure(grid, size, tile, pad, col, row);
+                const auto px = [size](float u) { return static_cast<std::uint32_t>(u * static_cast<float>(size) + 0.5f); };
+                const std::uint32_t x0 = px(r.x), x1 = px(r.z);
+                const std::uint32_t y0 = px(r.y), y1 = px(r.w);
+                const std::uint32_t expectX = col * (tile + 2 * pad) + pad;
+                const std::uint32_t expectY = row * (tile + 2 * pad) + pad;
+                if (x0 != expectX || y0 != expectY) return false;
+                if (x1 != expectX + tile || y1 != expectY + tile) return false;
             }
         }
     }
-    std::cout << "图集 UV：1×1..8×8 各格的 UV 均落在格内（无跨格采样）自检通过\n";
+    std::cout << "图集 UV：1×1..8×8 各格 UV 恰好覆盖格内容（1px 间隔不被采样）自检通过\n";
     return true;
 }
+
 // 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
 bool modSorter() {
     using engine::modhost::ModManifest;

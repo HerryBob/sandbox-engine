@@ -18,6 +18,13 @@ namespace engine::assets {
 constexpr std::uint32_t kAtlasTile = 16;   // 每格边长（像素）
 // 通道数：RGBA 四通道 × 1 字节/通道 = 每像素 4 字节（PNG 解码 / Vulkan 导入均按此）
 constexpr std::uint32_t kAtlasChannels = 4;
+// 每格四周的**间隔**（像素）：格子之间留 1px，并把边缘像素挤进这 1px。
+// 为什么需要：格子紧挨着时，采样点落在边界会取到隔壁格（mipmap 线性缩小更是必然跨格），
+// 隔壁若是 default.png（品红缺失纹理）就会在方块边缘冒出紫线。
+// 留 1px + 边缘挤出后，边界上的采样取到的永远是**本格边缘的颜色**。
+constexpr std::uint32_t kAtlasPadding = 1;
+// 格距（格 + 两侧间隔）。像素边长 = pitch × grid。
+constexpr std::uint32_t kAtlasPitch = kAtlasTile + 2 * kAtlasPadding;
 
 // 格位置：row（行）/ col（列）
 struct AtlasSlot {
@@ -29,7 +36,10 @@ struct AtlasSlot {
 // 抽成自由函数是为了可单测 —— 这条 UV 边界过去出过"方块边缘冒紫色短线"的 bug
 // （UV 正好落在格边界 → 最近邻采样取到隔壁格 default.png 的品红）。
 // grid = 每边格数；size = 图集像素边长。
+// grid/size：图集参数；tile/pad：格边长与四周间隔（像素）。
+// 返回值是**格内容**（不含间隔）的 UV 矩形。
 glm::vec4 atlasSlotUVPure(std::uint32_t grid, std::uint32_t size,
+                          std::uint32_t tile, std::uint32_t pad,
                           std::uint32_t col, std::uint32_t row);
 
 class TextureAtlas {
