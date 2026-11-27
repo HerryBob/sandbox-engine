@@ -50,6 +50,11 @@ struct PlayerInput {
     // 语义同上面三个 toggle：键盘回调置位、**业务线程** exchange(false) 消费
     // （打包要改 World，只有业务线程能改）。
     std::atomic<bool> packInFront{ false };
+
+    // F10 / F11：对**刚体**放 / 拆一块（原型用独立按键，见 business 的说明）。
+    // 语义同上：回调置位、业务线程 exchange(false) 消费。
+    std::atomic<bool> interactPlace{ false };
+    std::atomic<bool> interactRemove{ false };
 };
 
 } // namespace engine::shared

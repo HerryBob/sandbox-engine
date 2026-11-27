@@ -109,6 +109,12 @@ public:
     // 只看最多 kPackRaySteps 格内的第一个非空气方块；没打到就什么都不做。
     void handlePackInFront(const engine::shared::CameraState& cam);
 
+    // F10 / F11：对**刚体**放 / 拆一块。
+    // 为什么由物理侧执行：刚体的方块已从 World 移走，业务侧看不见它们；
+    // 射线求交与形状修改只能由物理线程做（见 Protocol 的 InteractStructure 注释）。
+    // action: 0 = 拆，1 = 放。
+    void handleStructureInteract(const engine::shared::CameraState& cam, int action);
+
     // 请求下一次同步下发全量方块集（区块卸载等"批量增删"之后调用）。
     // 物理侧只认 SyncBlockSet 才能建立集合，逐条 RemoveBlock 卸载 4096 格不现实。
     // 只置标志：真正的下发与重试在 syncWorldToPhysics 里（指令槽位被占用时下 tick 再试）。

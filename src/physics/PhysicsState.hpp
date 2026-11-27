@@ -39,6 +39,10 @@ struct PhysicsBody {
     //   - 刚体：Jolt 的 compound shape 自己算，这两组字段届时可删
     double halfExtentX = 0.0, halfExtentY = 0.0, halfExtentZ = 0.0;
     double centerOffsetX = 0.0, centerOffsetY = 0.0, centerOffsetZ = 0.0;
+    // 结构局部坐标的"几何中心 − 整数基准"（见 shared/block/StructureFrame.hpp）。
+    // 打包时算一次并**固定**：加/拆方块时**不能重算** —— 重算会让整个结构相对
+    // 自身帧平移（视觉上"加一块，整体跳一下"）。
+    double frameBiasX = 0.0, frameBiasY = 0.0, frameBiasZ = 0.0;
     // 踩地标志（求解器删除后恒为 false；Jolt 接入后由 CharacterVirtual::GetGroundState 取代）。
     bool   onGround = false;
 };
