@@ -50,6 +50,15 @@ void logInit(LogLevel level) {
 #ifdef _WIN32
     // 日志文本按 UTF-8 输出；控制台代码页不切到 65001 中文会乱码。
     SetConsoleOutputCP(CP_UTF8);
+    // 关掉控制台"快速编辑模式"：该模式下用户在控制台里点一下/选中文字，
+    // Windows 会挂起所有对该控制台的写入 → 日志后台线程被永久阻塞
+    // （配合异步队列溢出策略就会冻住整个引擎，2026-11-27 实测踩到）。
+    {
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD mode = 0;
+        if (hOut != INVALID_HANDLE_VALUE && GetConsoleMode(hOut, &mode))
+            SetConsoleMode(hOut, (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
+    }
 #endif
     std::error_code ec;
     std::filesystem::create_directories("logs", ec);
@@ -80,7 +89,13 @@ void logInit(LogLevel level) {
         spdlog::init_thread_pool(8192, 1);
         auto logger = std::make_shared<spdlog::async_logger>(
             "engine", sinks.begin(), sinks.end(), spdlog::thread_pool(),
-            spdlog::async_overflow_policy::block);
+            // **不能改成 block**：队列满时会让调用线程一直等后台线程。
+            // 而后台线程在写 stdout，一旦控制台进入"快速编辑/选中文本"模式，
+            // Windows 会把对 stdout 的写入挂起 → 后台线程永久阻塞 → 队列填满 →
+            // 所有调用 ENGINE_LOG_* 的线程（业务/物理/渲染/主线程）全部卡死，
+            // 表现为"画面停住、所有输入无响应、CPU 接近 0"（2026-11-27 实测踩到）。
+            // 丢日志远好过冻死引擎：满时丢弃并在下一行里用 dropped 计数暴露出来。
+            spdlog::async_overflow_policy::overrun_oldest);
 
         logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e][%l][%t]%v");
         logger->set_level(toSpdLevel(level));
