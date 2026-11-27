@@ -45,6 +45,9 @@ bool bodyMesh();
   // 结构局部射线：单位立方体 DDA（业务侧同步裁决的几何核心）。
   bool structureRay();
 
+  // UI 布局：居中/九宫格切分/快捷栏槽位（纯数学，不碰 Vulkan）。
+  bool uiLayout();
+
 // 模组排序：批次倒序依赖拒绝、跨批放行、缺失依赖拒绝、同批环双方拒绝。
 bool modSorter();
 

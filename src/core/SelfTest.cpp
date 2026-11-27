@@ -10,7 +10,9 @@
 #include "save/SaveDir.hpp"
 #include "save/SaveMenu.hpp"
 #include "shared/chunk/ChunkData.hpp"
+#include "business/ui/HotbarUi.hpp"
 #include "shared/pick/PickRay.hpp"
+#include "shared/ui/UiCmd.hpp"
 #include "shared/pick/StructureRay.hpp"
 
 #include <cmath>
@@ -619,6 +621,77 @@ bool structureRay() {
     }
 
     std::cout << "结构射线：轴向/法线/打偏/距离/起点在体内/斜向 自检通过\n";
+    return true;
+}
+// UI 布局：与 Vulkan 无关的纯数学（居中、九宫格切分、快捷栏槽位）。
+// UI 将来要模组化，所以"摆在哪"必须先能脱机验证。
+bool uiLayout() {
+    using namespace engine::shared::ui;
+
+    // ① 底部居中：左右留白相等，底边距离 = margin
+    {
+        const Rect r = bottomCenterRect(1280.0f, 720.0f, 400.0f, 60.0f, 20.0f);
+        if (std::fabs(r.x - (1280.0f - 400.0f) * 0.5f) > 1e-6f) return false;
+        if (std::fabs((r.y + r.h) - (720.0f - 20.0f)) > 1e-6f) return false;
+        if (std::fabs(r.w - 400.0f) > 1e-6f || std::fabs(r.h - 60.0f) > 1e-6f) return false;
+    }
+    // ② 水平居中
+    {
+        const Rect r = centerXRect(1280.0f, 100.0f, 300.0f, 40.0f);
+        if (std::fabs(r.x - 490.0f) > 1e-6f) return false;
+    }
+    // ③ 九宫格：9 块必须**无缝铺满**目标矩形（相邻块首尾相接，无重叠无空隙）
+    {
+        const Rect dst{ 100.0f, 100.0f, 200.0f, 120.0f };
+        const Rect uv{ 0.0f, 0.0f, 0.5f, 0.5f };
+        const Slice9 s = makeNineSlice(dst, uv, 8.0f);
+        // 列边界：dst 左三块的 x 必须等于块宽累加
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                const Rect d = s.dst[r * 3 + c];
+                if (d.w <= 0.0f || d.h <= 0.0f) return false;   // 不允许退化成负尺寸
+            }
+            // 横向首尾相接
+            const Rect a = s.dst[r * 3 + 0], b = s.dst[r * 3 + 1], c2 = s.dst[r * 3 + 2];
+            if (std::fabs((a.x + a.w) - b.x) > 1e-5f) return false;
+            if (std::fabs((b.x + b.w) - c2.x) > 1e-5f) return false;
+            if (std::fabs((c2.x + c2.w) - (dst.x + dst.w)) > 1e-5f) return false;
+        }
+        // 纵向首尾相接
+        for (int c = 0; c < 3; ++c) {
+            const Rect a = s.dst[0 * 3 + c], b = s.dst[1 * 3 + c], c3 = s.dst[2 * 3 + c];
+            if (std::fabs((a.y + a.h) - b.y) > 1e-5f) return false;
+            if (std::fabs((b.y + b.h) - c3.y) > 1e-5f) return false;
+            if (std::fabs((c3.y + c3.h) - (dst.y + dst.h)) > 1e-5f) return false;
+        }
+    }
+    // ④ 快捷栏：条居中、9 格等距、最后一格右边缘不超过条右边缘
+    {
+        engine::business::ui::HotbarState st;
+        st.selected = 3;
+        engine::business::ui::HotbarLayout L;
+        const Rect strip = engine::business::ui::hotbarRect(1280.0f, 720.0f, L);
+        if (std::fabs((strip.x * 2.0f + strip.w) - 1280.0f) > 1e-4f) return false;
+        const Rect s0 = engine::business::ui::hotbarSlotRect(1280.0f, 720.0f, L, 0);
+        const Rect s1 = engine::business::ui::hotbarSlotRect(1280.0f, 720.0f, L, 1);
+        const Rect s8 = engine::business::ui::hotbarSlotRect(1280.0f, 720.0f, L, 8);
+        if (std::fabs(s1.x - s0.x - s0.w) > 1e-4f) return false;
+        if (s8.x + s8.w > strip.x + strip.w + 1e-4f) return false;
+        if (std::fabs(s0.y - strip.y) > 1e-4f) return false;
+
+        // 指令表：底板 + 高亮 + 9 个数字
+        std::vector<UiCmd> cmds;
+        engine::business::ui::buildHotbar(st, 1280.0f, 720.0f, L, cmds);
+        if (cmds.size() != static_cast<std::size_t>(2 + engine::business::ui::kHotbarSlots)) return false;
+        if (cmds[0].type != CmdType::Sprite || cmds[0].texture != engine::business::ui::kTexHotbar) return false;
+        if (cmds[1].type != CmdType::Quad) return false;
+        if (cmds[2].type != CmdType::Text || cmds[2].texture != kTextureFont) return false;
+        // 高亮必须落在第 3 格内部（选中 3 → 索引 3）
+        const Rect sel = engine::business::ui::hotbarSlotRect(1280.0f, 720.0f, L, 3);
+        if (cmds[1].dst.x < sel.x - 0.01f || cmds[1].dst.x > sel.x + sel.w) return false;
+    }
+
+    std::cout << "UI 布局：居中/九宫格无缝/快捷栏槽位/指令表 自检通过\n";
     return true;
 }
 // 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
