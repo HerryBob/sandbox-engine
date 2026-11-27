@@ -47,10 +47,21 @@ public:
                  float qx, float qy, float qz, float qw);
     bool pose(int contraptionId, glm::dvec3& outPos, glm::quat& outRot) const;
 
+    // ---- P14 式延迟销毁（与 ChunkMeshStore 同一套规则）----
+    // 为什么必须延迟：旧缓冲可能仍被"在飞的"命令缓冲引用，立刻 vkDestroyBuffer
+    // 在 AMD 驱动上会把 GPU 挂死（fence 永不 signal → vkWaitForFences 永久阻塞，
+    // 表现为整个引擎冻结）。2026-11-27 的 B142 就是这个原因。
+    void setFrameSlot(std::size_t slot) { currentSlot_ = slot % kMaxFramesInFlight; }
+    // 该帧槽的 fence 已 wait 完 → 上一轮挂在这里的旧缓冲可以真正销毁
+    void collectRetired(std::size_t slot);
+
     // 只读访问（录制命令用）
     const std::unordered_map<int, ChunkMesh>& meshes() const { return meshes_; }
 
 private:
+    static constexpr std::size_t kMaxFramesInFlight = 2;
+    void retire(ChunkMesh&& m);
+
     VkDevice                   device_ = VK_NULL_HANDLE;
     VkPhysicalDevice           physicalDevice_ = VK_NULL_HANDLE;
     const engine::assets::TextureAtlas* atlas_ = nullptr;
@@ -58,6 +69,9 @@ private:
     std::unordered_map<int, ChunkMesh>  meshes_;
     std::unordered_map<int, glm::dvec3> pos_;
     std::unordered_map<int, glm::quat>  rot_;
+    // P14 墓地：按帧槽分桶，等该槽 fence 过了才真正销毁
+    std::vector<ChunkMesh> graveyard_[kMaxFramesInFlight];
+    std::size_t            currentSlot_ = 0;
 };
 
 } // namespace engine::render

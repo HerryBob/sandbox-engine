@@ -1,6 +1,7 @@
 // VulkanContext：GLFW 窗口 + Vulkan 实例/设备/交换链 + 渲染管线 + 每帧绘制循环。
 // 函数按 init 调用顺序排列；无状态工具在 VulkanUtils，网格在 VulkanMesh。
 #include "render/VulkanContext.hpp"
+
 #include "render/ChunkMeshBuilder.hpp"
 #include "render/VulkanMesh.hpp"
 #include "render/utils/Utils.hpp"
@@ -328,8 +329,6 @@ void VulkanContext::destroySwapchain() {
     }
 }
 
-
-
 // 窗口尺寸变化 → 销毁重建所有依赖尺寸的资源（swapchain/帧缓冲/深度/MSAA 图）
 bool VulkanContext::recreateSwapchain() {
     int w = 0, h = 0;
@@ -409,8 +408,6 @@ bool VulkanContext::rebuildMeshFromBlocks(const std::vector<engine::shared::Bloc
     if (allChunks.empty()) return true;
     return rebuildChunkMeshes(blocks, allChunks);
 }
-
-
 
 //dirtychunks 更新
 bool VulkanContext::rebuildChunkMeshes(
@@ -551,7 +548,13 @@ void VulkanContext::updateFrameStats() {
 // ============================================================================
 bool VulkanContext::beginFrame(uint32_t frame, uint32_t& imageIndex) {
     VkFence f = infra_.inFlightFence(frame);
-    vkWaitForFences(device_, 1, &f, VK_TRUE, UINT64_MAX);
+    // 带超时的等待：GPU 真挂死时**报错并返回**，而不是永久静默卡住整个渲染线程。
+    // （无超时的 UINT64_MAX 会把 B142 那类问题变成"画面定格、日志也停"的哑死。）
+    const VkResult waitRes = vkWaitForFences(device_, 1, &f, VK_TRUE, 5'000'000'000ULL);
+    if (waitRes == VK_TIMEOUT) {
+        ENGINE_LOG_ERROR("Vulkan", "等 fence 超时（5s）—— GPU 可能已挂死 / 设备丢失");
+        return false;
+    }
     // 注意：vkResetFences 必须在 acquire 成功之后！
     // acquire 失败(OUT_OF_DATE)时 fence 保持 signaled → 下一帧 wait 直接通过
     // 若先 reset，失败帧没有 submit 触发 fence → 下一帧 wait 无限阻塞 → 渲染线程卡死
@@ -560,6 +563,9 @@ bool VulkanContext::beginFrame(uint32_t frame, uint32_t& imageIndex) {
     currentFrameSlot_ = frame;
     chunkMeshes_.setFrameSlot(currentFrameSlot_);
     chunkMeshes_.collectRetired(frame);
+    // 刚体网格同理（B142：曾经在这里立刻销毁旧缓冲 → GPU 挂死 → 整引擎冻结）
+    bodies_.setFrameSlot(currentFrameSlot_);
+    bodies_.collectRetired(frame);
 
     VkResult r = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
                                        infra_.imageAvailable(frame), VK_NULL_HANDLE, &imageIndex);
@@ -898,7 +904,6 @@ void VulkanContext::shutdown() {
 }
 
 VulkanContext::~VulkanContext() { shutdown(); }
-
 
 // 注：HUD 已抽成 HudRenderer（S2）。可见性/统计由本类的薄转发接口提供，
 // 资源创建与绘制都在那边的类里。

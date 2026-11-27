@@ -30,7 +30,21 @@ bool BodyMeshStore::init(VkDevice device, VkPhysicalDevice physicalDevice,
     return true;
 }
 
+void BodyMeshStore::retire(ChunkMesh&& m) {
+    graveyard_[currentSlot_ % kMaxFramesInFlight].push_back(std::move(m));
+}
+
+void BodyMeshStore::collectRetired(std::size_t slot) {
+    auto& bucket = graveyard_[slot % kMaxFramesInFlight];
+    for (auto& m : bucket) destroyMeshBuffers(device_, m);
+    bucket.clear();
+}
+
 void BodyMeshStore::shutdown() {
+    for (auto& bucket : graveyard_) {
+        for (auto& m : bucket) destroyMeshBuffers(device_, m);
+        bucket.clear();
+    }
     for (auto& [id, m] : meshes_) destroyMeshBuffers(device_, m);
     meshes_.clear();
     pos_.clear();
@@ -38,10 +52,10 @@ void BodyMeshStore::shutdown() {
 }
 
 bool BodyMeshStore::upload(int contraptionId, const std::vector<engine::shared::Block>& blocks) {
-    // 同 id 已有网格：结构变了，先销毁旧缓冲再建新的
+    // 同 id 已有网格：结构变了 → 旧缓冲**延迟**销毁（可能还在飞，见头文件说明）
     auto it = meshes_.find(contraptionId);
     if (it != meshes_.end()) {
-        destroyMeshBuffers(device_, it->second);
+        retire(std::move(it->second));
         meshes_.erase(it);
     }
     if (atlas_ == nullptr) {
@@ -82,7 +96,7 @@ bool BodyMeshStore::upload(int contraptionId, const std::vector<engine::shared::
 void BodyMeshStore::destroy(int contraptionId) {
     auto it = meshes_.find(contraptionId);
     if (it != meshes_.end()) {
-        destroyMeshBuffers(device_, it->second);
+        retire(std::move(it->second));   // 延迟销毁：同理
         meshes_.erase(it);
     }
     pos_.erase(contraptionId);
