@@ -15,6 +15,9 @@
 #include <Jolt/Physics/Collision/ObjectLayerPairFilterTable.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
@@ -257,6 +260,9 @@ void PhysicsWorld::applyCommands(engine::core::SPSCQueue<engine::shared::Physics
             break;
         case engine::shared::PhysicsCommand::Type::UnpackContraption:
             onUnpackContraption(cmd);
+            break;
+        case engine::shared::PhysicsCommand::Type::InteractStructure:
+            onInteractStructure(cmd);
             break;
         }
         processedCommandCount_.fetch_add(1, std::memory_order_relaxed);
@@ -559,6 +565,151 @@ void PhysicsWorld::onRemoveBlock(const engine::shared::PhysicsCommand& cmd) {
     }
 }
 
+// 射线 × 刚体交互：命中刚体后，在命中面外放一块（raction=1）或拆掉命中块（raction=0）。
+//
+// 命中点 → 局部坐标：刚体的位姿就是"帧原点（几何中心）"的世界位置，
+// 所以局部点 = inverse(bodyTransform) * 世界命中点；方块坐标 = floor(局部点 + 帧偏置)
+// （因为方块中心 = p + 0.5 − bias，见 shared/block/StructureFrame.hpp）。
+// 面法线：局部命中点到方块中心的位移里，绝对值最大的那个轴。
+void PhysicsWorld::onInteractStructure(const engine::shared::PhysicsCommand& cmd) {
+    auto pushMiss = [this]() {
+        // 记一条日志：交互是"按键驱动"的低频操作，打出原因比静默失败更好排查
+        // （例如"射线打空了"和"目标格被占用"在玩家看来都是"没反应"）。
+        ENGINE_LOG_INFO("Physics", "[刚体交互] 未生效（射线未命中刚体 / 目标格不可用）");
+        engine::shared::PhysicsResult r;
+        r.type = engine::shared::PhysicsResult::Type::StructureEditMiss;
+        pendingReceipts_.push_back(r);
+    };
+    if (!jolt_) { pushMiss(); return; }
+
+    JPH::Vec3 dir(static_cast<float>(cmd.rdx), static_cast<float>(cmd.rdy),
+                  static_cast<float>(cmd.rdz));
+    if (dir.LengthSq() < 1e-8f) { pushMiss(); return; }
+    dir = dir.Normalized();
+    const JPH::RRayCast ray(JPH::RVec3(cmd.rox, cmd.roy, cmd.roz),
+                            JPH::Vec3(dir * static_cast<float>(cmd.rmaxDist)));
+    JPH::RayCastResult hit;
+    if (!jolt_->system.GetNarrowPhaseQuery().CastRay(ray, hit)) { pushMiss(); return; }
+    // 命中的是不是刚体？（静态 chunk 体不算：那种情况业务侧自己会打中世界）
+    int structureId = -1;
+    for (const auto& [sid, bid] : jolt_->contraptionBodies) {
+        if (bid == hit.mBodyID) { structureId = sid; break; }
+    }
+    if (structureId < 0) { pushMiss(); return; }
+    PhysicsBody* body = state_.findBodyByStructure(structureId);
+    if (body == nullptr) { pushMiss(); return; }
+
+    JPH::BodyInterface& bi = jolt_->system.GetBodyInterface();
+    const JPH::Vec3 worldPoint = ray.GetPointOnRay(hit.mFraction);
+    // 世界 → 局部：p_local = R⁻¹ · (p_world − bodyPos)。
+    // 手写而不复用 Jolt 的矩阵逆：语义一目了然，也避免 RVec3/Mat44 的重载歧义
+    // （第一版用 InversedRotationTranslation() 时结果被算成了 −p_world）。
+    const JPH::RMat44 xform = bi.GetCenterOfMassTransform(hit.mBodyID);
+    const JPH::Quat invRot = xform.GetQuaternion().Conjugated();
+    const JPH::Vec3 rel = JPH::Vec3(
+        worldPoint.GetX() - xform.GetTranslation().GetX(),
+        worldPoint.GetY() - xform.GetTranslation().GetY(),
+        worldPoint.GetZ() - xform.GetTranslation().GetZ());
+    const JPH::Vec3 local = invRot * rel;
+
+    const double biasX = body->frameBiasX, biasY = body->frameBiasY, biasZ = body->frameBiasZ;
+    const int bx = static_cast<int>(std::floor(local.GetX() + biasX));
+    const int by = static_cast<int>(std::floor(local.GetY() + biasY));
+    const int bz = static_cast<int>(std::floor(local.GetZ() + biasZ));
+
+    // 命中块在局部坐标系里的中心
+    const double cx = static_cast<double>(bx) + 0.5 - biasX;
+    const double cy = static_cast<double>(by) + 0.5 - biasY;
+    const double cz = static_cast<double>(bz) + 0.5 - biasZ;
+    const double ddx = local.GetX() - cx, ddy = local.GetY() - cy, ddz = local.GetZ() - cz;
+    const double ax = std::fabs(ddx), ay = std::fabs(ddy), az = std::fabs(ddz);
+    engine::shared::BlockPos normal{0, 0, 0};
+    if (ax >= ay && ax >= az)      normal.x = (ddx > 0) ? 1 : -1;
+    else if (ay >= az)             normal.y = (ddy > 0) ? 1 : -1;
+    else                            normal.z = (ddz > 0) ? 1 : -1;
+
+    const engine::shared::BlockPos hitPos{bx, by, bz};
+    auto findBlock = [body](const engine::shared::BlockPos& p) {
+        for (auto it = body->blocks.begin(); it != body->blocks.end(); ++it)
+            if (it->pos == p) return it;
+        return body->blocks.end();
+    };
+
+    if (cmd.raction == 0) {
+        // 拆：命中块必须存在
+        auto it = findBlock(hitPos);
+        if (it == body->blocks.end()) { pushMiss(); return; }
+        body->blocks.erase(it);
+        if (body->blocks.empty()) { pushMiss(); return; }   // 不允许把结构拆空（应走解包）
+    } else {
+        // 放：目标格 = 命中块 + 面法线；不能已占用
+        const engine::shared::BlockPos target{hitPos.x + normal.x,
+                                              hitPos.y + normal.y,
+                                              hitPos.z + normal.z};
+        if (findBlock(target) != body->blocks.end()) { pushMiss(); return; }
+        body->blocks.push_back(engine::shared::Block{
+            static_cast<engine::shared::BlockType>(cmd.blockType), target});
+    }
+    body->blockCount = static_cast<int>(body->blocks.size());
+
+    if (!rebuildContraptionShape(structureId)) { pushMiss(); return; }
+
+    // 回执：带编辑后的完整局部方块表 → 渲染端重建该结构的网格
+    engine::shared::PhysicsResult r;
+    r.type = engine::shared::PhysicsResult::Type::StructureEdited;
+    r.contraptionId = structureId;
+    r.blockCount = body->blockCount;
+    r.x = hitPos.x; r.y = hitPos.y; r.z = hitPos.z;   // 被编辑的局部坐标（诊断用）
+    r.blocks = body->blocks;
+    pendingReceipts_.push_back(r);
+}
+// 按当前 body.blocks 重建刚体的复合形状。
+// 为什么整块重建而不是 AddShape/RemoveShape：
+//   · 每次编辑要重算质心（AdjustCenterOfMass）+ 通知形状变化（NotifyShapeChanged），
+//     两者的调用顺序与索引维护都容易错；结构规模很小（几十块），重建更简单可靠；
+//   · 重建天然处理"帧偏置变化"以外的所有情况（偏置本身固定，不随编辑变）。
+// 返回 false 表示形状构建失败（调用方应视为本次编辑失败）。
+bool PhysicsWorld::rebuildContraptionShape(int structureId) {
+    if (!jolt_) return false;
+    PhysicsBody* body = state_.findBodyByStructure(structureId);
+    if (body == nullptr) return false;
+    const auto it = jolt_->contraptionBodies.find(structureId);
+    if (it == jolt_->contraptionBodies.end()) return false;
+    if (body->blocks.empty()) return false;
+
+    // 关键：Jolt 的刚体位置就是**质心**，形状超出质心的部分会被它重新居中。
+    // 所以每次编辑方块都要把"帧偏置"重算成新包围盒的中心，并把刚体位置平移
+    // (新 bias − 旧 bias)（转到世界方向），否则方块坐标与世界位置会整体错开半格。
+    JPH::BodyInterface& bi = jolt_->system.GetBodyInterface();
+    const JPH::RMat44 xf = bi.GetCenterOfMassTransform(it->second);
+    const glm::dvec3 oldBias(body->frameBiasX, body->frameBiasY, body->frameBiasZ);
+    const glm::dvec3 newBias = engine::shared::structureBias(body->blocks);
+    const JPH::Vec3 shift = xf.GetRotation() * JPH::Vec3(
+        static_cast<float>(newBias.x - oldBias.x),
+        static_cast<float>(newBias.y - oldBias.y),
+        static_cast<float>(newBias.z - oldBias.z));
+    const JPH::RVec3 newPos = xf.GetTranslation() + shift;
+
+    JPH::MutableCompoundShapeSettings compound;
+    JPH::RefConst<JPH::ShapeSettings> box =
+        new JPH::BoxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+    for (const auto& b : body->blocks) {
+        const glm::vec3 c = engine::shared::localBlockCenter(b.pos, newBias);
+        compound.AddShape(JPH::Vec3(c.x, c.y, c.z), JPH::Quat::sIdentity(), box.GetPtr());
+    }
+    JPH::ShapeSettings::ShapeResult result = compound.Create();
+    if (result.HasError()) {
+        ENGINE_LOG_ERROR("Physics", std::string("刚体形状重建失败：") + result.GetError().c_str());
+        return false;
+    }
+    // 先换形状（updateMassProperties = true：质量/惯量跟着方块数变），再定位
+    bi.SetShape(it->second, result.Get(), /*inUpdateMassProperties=*/true, JPH::EActivation::Activate);
+    bi.SetPositionAndRotation(it->second, newPos, xf.GetQuaternion(), JPH::EActivation::Activate);
+    body->frameBiasX = newBias.x;
+    body->frameBiasY = newBias.y;
+    body->frameBiasZ = newBias.z;
+    return true;
+}
 void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) {
     // 打包：新建刚体，应用业务裁决的初始速度（起飞速度）。
     // 物理形态转移（架构 2.7）：方块从静态碰撞体集合转移进刚体。
@@ -592,6 +743,10 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
     body.x = static_cast<double>(originX) + frameBias.x;
     body.y = static_cast<double>(originY) + frameBias.y;
     body.z = static_cast<double>(originZ) + frameBias.z;
+    // 帧偏置随体保存（编辑方块时不重算，见 PhysicsState.hpp 的注释）
+    body.frameBiasX = frameBias.x;
+    body.frameBiasY = frameBias.y;
+    body.frameBiasZ = frameBias.z;
     body.blocks.clear();
     body.blocks.reserve(cmd.blocks.size());
     for (const auto& b : cmd.blocks) {
