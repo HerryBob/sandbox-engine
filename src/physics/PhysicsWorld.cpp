@@ -1,4 +1,6 @@
 #include "physics/PhysicsWorld.hpp"
+
+#include "shared/block/StructureFrame.hpp"
 #include "physics/JoltKernel.hpp"
 #include "core/Log.hpp"
 #include "shared/chunk/ChunkPos.hpp"
@@ -580,12 +582,16 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
         minY = std::min(minY, b.pos.y); maxY = std::max(maxY, b.pos.y);
         minZ = std::min(minZ, b.pos.z); maxZ = std::max(maxZ, b.pos.z);
     }
-    const int originX = (minX + maxX) / 2;
-    const int originY = (minY + maxY) / 2;
-    const int originZ = (minZ + maxZ) / 2;
-    body.x = static_cast<double>(originX);
-    body.y = static_cast<double>(originY);
-    body.z = static_cast<double>(originZ);
+    // B141：原点取**几何中心**（可能半整数），不是一个格点。
+    // 局部坐标仍是整数（origin = 整数基准），形状/网格按 localBlockCenter 摆放，
+    // 三者由 shared/block/StructureFrame.hpp 统一给出（物理与渲染共用同一份数学）。
+    const int originX = engine::shared::structureOriginAxis(minX, maxX);
+    const int originY = engine::shared::structureOriginAxis(minY, maxY);
+    const int originZ = engine::shared::structureOriginAxis(minZ, maxZ);
+    const glm::dvec3 frameBias = engine::shared::structureBias(cmd.blocks);
+    body.x = static_cast<double>(originX) + frameBias.x;
+    body.y = static_cast<double>(originY) + frameBias.y;
+    body.z = static_cast<double>(originZ) + frameBias.z;
     body.blocks.clear();
     body.blocks.reserve(cmd.blocks.size());
     for (const auto& b : cmd.blocks) {
@@ -607,11 +613,9 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
         JPH::RefConst<JPH::ShapeSettings> box =
             new JPH::BoxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
         for (const auto& b : body.blocks) {
-            compound.AddShape(
-                JPH::Vec3(static_cast<float>(b.pos.x) + 0.5f,
-                          static_cast<float>(b.pos.y) + 0.5f,
-                          static_cast<float>(b.pos.z) + 0.5f),
-                JPH::Quat::sIdentity(), box.GetPtr());
+            // 局部方块中心（以几何中心为 0）—— 与渲染网格顶点用同一个函数
+            const glm::vec3 c = engine::shared::localBlockCenter(b.pos, frameBias);
+            compound.AddShape(JPH::Vec3(c.x, c.y, c.z), JPH::Quat::sIdentity(), box.GetPtr());
         }
         JPH::ShapeSettings::ShapeResult result = compound.Create();
         if (result.HasError()) {
@@ -665,11 +669,14 @@ void PhysicsWorld::onUnpackContraption(const engine::shared::PhysicsCommand& cmd
     if (it != nullptr) {
         const int structureId = it->structureId;
         worldBlocks.reserve(it->blocks.size());
+        // 局部方块中心 = p + 0.5 - bias（见 StructureFrame.hpp）；
+        // 世界方块坐标 = 中心 - 0.5 = body.pos + p - bias
+        const glm::dvec3 bias = engine::shared::structureBias(it->blocks);
         for (const auto& b : it->blocks) {
             const engine::shared::BlockPos world{
-                static_cast<int>(std::llround(it->x + b.pos.x)),
-                static_cast<int>(std::llround(it->y + b.pos.y)),
-                static_cast<int>(std::llround(it->z + b.pos.z))};
+                static_cast<int>(std::llround(it->x + static_cast<double>(b.pos.x) - bias.x)),
+                static_cast<int>(std::llround(it->y + static_cast<double>(b.pos.y) - bias.y)),
+                static_cast<int>(std::llround(it->z + static_cast<double>(b.pos.z) - bias.z))};
             state_.colliders()[world] = b.type;
             worldBlocks.push_back(engine::shared::Block{b.type, world});
         }

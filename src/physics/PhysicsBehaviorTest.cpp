@@ -114,12 +114,10 @@ bool selfTestPhysicsBehavior() {
             std::cout << "物理行为：②落到台面 —— 读不到位姿\n";
             return false;
         }
-        // 注意：当前实现的原点是**包围盒角**（形状偏移 = 局部 pos + 0.5），
-        // 不是包围盒中心 —— 所以静止时 body.y = 地面顶面 = 1.0，而不是 1.5。
-        // 这个约定偏差记在 bug 台账 B141（旋转/多体前必须统一），
-        // 这里按**现状**断言，用例仍然覆盖"落地"这一行为。
-        if (std::fabs(e.py - 1.0f) > 0.15f) {
-            std::cout << "物理行为：②落到台面失败 y=" << e.py << "（应 ≈ 1.0，见 B141）\n";
+        // B141 已修：刚体位姿 = **几何中心**（见 shared/block/StructureFrame.hpp）。
+        // 单块结构静止在地面（顶面 y=1）时，方块中心 = 1.5。
+        if (std::fabs(e.py - 1.5f) > 0.15f) {
+            std::cout << "物理行为：②落到台面失败 y=" << e.py << "（应 ≈ 1.5）\n";
             return false;
         }
     }
@@ -134,14 +132,48 @@ bool selfTestPhysicsBehavior() {
             std::cout << "物理行为：③挖掉脚下 —— 读不到位姿\n";
             return false;
         }
-        if (!(e.py < 0.5f)) {
+        if (!(e.py < 1.0f)) {
             std::cout << "物理行为：③挖掉脚下失败 y=" << e.py
-                      << "（应掉到 0.5 以下；说明睡眠体没被唤醒 / 没被积分）\n";
+                      << "（应掉到 1.0 以下；说明睡眠体没被唤醒 / 没被积分）\n";
             return false;
         }
     }
 
-    std::cout << "物理行为：自由落体 / 落到台面 / 挖掉脚下 自检通过\n";
+    // −−− 用例④ 约定自检：位姿 = 方块中心的平均（偶数尺寸时 bias = 1.0）
+    // 2 个方块 z=20,21：origin_z=20、bias_z=1.0 ⇒ 几何中心 z = 20+1.0 = 21.0，
+    // 两块中心 z 分别是 20.5 / 21.5，平均正好 21.0。
+    // 旧约定（角原点）会给出 20.0 —— 这条用例就是 B141 的回归防线。
+    {
+        const int sid = nextStructureId++;
+        engine::shared::PhysicsCommand pack;
+        pack.type = engine::shared::PhysicsCommand::Type::PackContraption;
+        pack.contraptionId = 1;
+        pack.blocks.push_back(engine::shared::Block{
+            static_cast<engine::shared::BlockType>(kTestBlockType),
+            engine::shared::BlockPos{20, 6, 20}, -1});
+        pack.blocks.push_back(engine::shared::Block{
+            static_cast<engine::shared::BlockType>(kTestBlockType),
+            engine::shared::BlockPos{20, 6, 21}, -1});
+        pack.blockCount = 2;
+        send(std::move(pack));
+        step(1);   // 只走一步：验证"打包瞬间"的位姿约定（重力只让它动 ~1.5cm）
+        engine::shared::PoseEntry e;
+        if (!readPose(poses, sid, 426.0, e)) {
+            std::cout << "物理行为：④中心约定 —— 读不到位姿\n";
+            return false;
+        }
+        // 期望 (20.5, 6.5, 21.0)：x/y 各 +0.5（奇数尺寸 1 块宽），z +1.0（偶数尺寸 2 块）
+        const bool ok = std::fabs(e.px - 20.5f) < 0.05f &&
+                        std::fabs(e.py - 6.5f) < 0.05f &&
+                        std::fabs(e.pz - 21.0f) < 0.05f;
+        if (!ok) {
+            std::cout << "物理行为：④中心约定失败 pos=(" << e.px << "," << e.py << ","
+                      << e.pz << ")（应 ≈ (20.5,6.5,21.0)）\n";
+            return false;
+        }
+    }
+
+    std::cout << "物理行为：自由落体 / 落到台面 / 挖掉脚下 / 中心约定 自检通过\n";
     return true;
 }
 
