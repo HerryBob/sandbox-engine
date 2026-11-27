@@ -13,6 +13,7 @@
 #include "shared/state/PoseHistory.hpp"
 #include "input/InputSampler.hpp"
 #include "physics/JoltKernel.hpp"
+#include "physics/PhysicsBehaviorTest.hpp"
 #include "physics/PhysicsWorld.hpp"
 #include "render/Renderer.hpp"
 #include "render/VulkanContext.hpp"
@@ -230,6 +231,10 @@ static void initNoiseAndRunSelfTests() {
     //验的是"内核能不能起来"（编译/链接/初始化顺序/分配器/精度），不碰引擎物理与渲染。
     const bool joltKernelOk = engine::physics::selfTestJoltKernel();
 
+    //物理**行为**（真走 PhysicsWorld：自由落体 / 落到台面 / 挖掉脚下）。
+    //补的是"跑得好但行为错"这一类（B139/B140 都是这种）。
+    const bool physicsBehaviorOk = engine::physics::selfTestPhysicsBehavior();
+
     //模组排序（ModSorter）：跨批次依赖方向、缺失依赖、同批环。
     const bool sorterOk = engine::selftest::modSorter();
 
@@ -272,6 +277,8 @@ static void initNoiseAndRunSelfTests() {
               << (atlasUvOk ? "通过" : "失败") << "\n";
     std::cout << "物理内核：Jolt 初始化 + 地面/箱子 100 步落地自检"
               << (joltKernelOk ? "通过" : "失败") << "\n";
+    std::cout << "物理行为：自由落体 / 落到台面 / 挖掉脚下自检"
+              << (physicsBehaviorOk ? "通过" : "失败") << "\n";
     std::cout << "模组排序：跨批次依赖方向 + 缺失依赖 + 同批环自检"
               << (sorterOk ? "通过" : "失败") << "\n";
 }
