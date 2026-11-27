@@ -4,6 +4,8 @@
 #include "business/World.hpp"
 #include "core/TimeManager.hpp"
 #include "shared/chunk/ChunkPos.hpp"
+#include <glm/gtc/quaternion.hpp>
+
 #include "shared/pick/PickRay.hpp"
 #include "shared/state/CameraState.hpp"
 #include "shared/state/PlayerInput.hpp"
@@ -11,6 +13,8 @@
 #include <atomic>
 #include <chrono>
 #include <optional>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace engine::business {
@@ -132,31 +136,41 @@ public:
 private:
     void maybeLog();
 
-    // 一次点击的"待裁决"记录：体素射线已经算完，等物理侧的刚体探测回执。
-    struct PendingPick {
-        std::uint32_t seq = 0;                        // 与物理回执对应
-        engine::shared::pick::PickRay ray;            // 冻结的射线（两条射线共用）
-        engine::shared::pick::PickHit blockHit;       // 体素结果（已算）
-        bool leftButton = true;
-        int  ageTicks = 0;                            // 超时用（对端慢不能丢点击）
+    // ---- 结构镜像（方案 B：让拾取裁决在业务线程同步完成）----
+    // 为什么需要：刚体的方块已从 World 移走，业务侧本来"看不见"它们，
+    // 所以过去每点击一次都要跨线程问物理（+1~2 tick ≈ 40~80ms）。
+    // 镜像把"决定打谁"所需的最小信息搬到业务线程：
+    //   · 方块（局部整数坐标）—— 来自打包/编辑回执（物理侧权威，业务只是抄一份）
+    //   · 位姿 —— 来自每 tick 的 RigidBodyPos 回执（COM 位置 + 旋转）
+    // 真正改形状仍然由物理侧执行（业务只在对上后才发 InteractStructure）。
+    struct StructureMirror {
+        std::vector<engine::shared::Block> blocks;          // 局部坐标（整数格）
+        std::unordered_set<std::uint64_t>  occupied;        // 快速查表（DDA 用）
+        glm::dvec3 bias{ 0.0 };                             // 质心偏置（与物理同一函数）
+        double cx = 0.0, cy = 0.0, cz = 0.0;                // COM 世界位置（回执）
+        glm::dquat rot{ 1.0, 0.0, 0.0, 0.0 };               // 旋转（回执）
+        bool hasPose = false;
     };
-    static constexpr int kMaxPendingPicks = 8;        // 连点堆积上限
-    static constexpr int kPickTimeoutTicks = 3;       // 3 tick（120ms）没回执就按"无刚体"处理
+    // 局部坐标 → 哈希键（三个 21 位分量；结构坐标范围远小于此）
+    static std::uint64_t posKey(int x, int y, int z) {
+        const std::uint64_t ux = static_cast<std::uint64_t>(x + (1 << 20)) & 0x1FFFFF;
+        const std::uint64_t uy = static_cast<std::uint64_t>(y + (1 << 20)) & 0x1FFFFF;
+        const std::uint64_t uz = static_cast<std::uint64_t>(z + (1 << 20)) & 0x1FFFFF;
+        return (ux << 42) | (uy << 21) | uz;
+    }
+    void rebuildStructureIndex(StructureMirror& m);   // 重算 occupied + bias
 
-    // 物理回执到了 → 裁决 → 执行（恰好一个动作生效）
-    void resolvePick(const PendingPick& pick, const engine::shared::pick::PickHit& bodyHit,
-                     bool timedOut);
-    // 把裁决结果落到 world / 发给物理
-    void applyPick(const PendingPick& pick, const engine::shared::pick::PickAction& action);
-    // 对本 tick 之前发出、仍无回执的点击做超时处理
-    void expirePendingPicks();
-    // 发一条 ProbeStructure（只查询）。返回 false = 队列满（调用方按"无刚体"处理）。
-    bool pushProbe(const PendingPick& pick);
-    // 发一条 InteractStructure（执行；探测阶段已完成）
+    // 刚体射线：把世界射线变到每个结构的局部空间求交，取**最近**命中。
+    // 返回 kind=None 表示没打到任何刚体。
+    engine::shared::pick::PickHit raycastStructures(const engine::shared::pick::PickRay& ray) const;
+
+    // 裁决并执行（直接落到 world / 发指令给物理）：同步，不等回执。
+    void applyPick(const engine::shared::pick::PickRay& ray,
+                   const engine::shared::pick::PickAction& action);
+    // 发一条 InteractStructure（物理侧重新求交并执行）
     void sendStructureInteract(const engine::shared::pick::PickRay& ray, int action);
 
-    std::vector<PendingPick> pendingPicks_;
-    std::uint32_t            nextPickSeq_ = 1;
+    std::unordered_map<int, StructureMirror> structures_;
 
     // 世界（状态层）：方块数据 + 锁 + 查询 + 动作入口（World 内部加锁）。
     engine::business::World world_;

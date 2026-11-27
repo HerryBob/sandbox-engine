@@ -77,6 +77,7 @@ void PhysicsBridge::receiveResultsFromPhysics(
     std::vector<engine::shared::BodyStructureEvent>* bodyEvents,
     std::optional<engine::shared::BodyPose>* bodyPose) {
     // 业务 Tick 边界：收物理结果（位置快照/碰撞体数量/刚体结构/位姿）。
+    bodyPoses_.clear();   // 每次收件重新收集（业务侧本 tick 的镜像刷新用）
     engine::shared::PhysicsResult res;
     while (physicsToBusinessResults_.pop(res)) {
         receivedResultCount_.fetch_add(1, std::memory_order_relaxed);
@@ -116,6 +117,9 @@ void PhysicsBridge::receiveResultsFromPhysics(
             break;
         }
         case engine::shared::PhysicsResult::Type::RigidBodyPos: {
+            bodyPoses_.push_back(engine::shared::BodyPose{
+                res.contraptionId, res.rx, res.ry, res.rz,
+                res.qx, res.qy, res.qz, res.qw, res.simTime});
             // 位姿快照（状态语义：后到的覆盖先到的）。
             if (bodyPose)
                 *bodyPose = engine::shared::BodyPose{
@@ -136,10 +140,6 @@ void PhysicsBridge::receiveResultsFromPhysics(
             structureEditedCount_.fetch_add(1, std::memory_order_relaxed);
             break;
         }
-        case engine::shared::PhysicsResult::Type::ProbeResult:
-            // 射线探测回执（只查询）：交给业务做"打方块还是打刚体"的裁决
-            probeResults_.push_back(res);
-            break;
         case engine::shared::PhysicsResult::Type::StructureEditMiss:
             // 射线没命中刚体：置标志，业务下一 tick 回退到"打世界"（见 pendingInteract_）
             lastStructureMiss_.fetch_add(1, std::memory_order_relaxed);

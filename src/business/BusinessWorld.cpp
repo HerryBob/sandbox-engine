@@ -2,6 +2,8 @@
 
 #include "core/Log.hpp"
 #include "registry/BlockRegistry.hpp"
+#include "shared/block/StructureFrame.hpp"
+#include "shared/pick/StructureRay.hpp"
 
 #include <cmath>
 #include <sstream>
@@ -74,26 +76,26 @@ void BusinessWorld::receiveResultsFromPhysics() {
     std::optional<engine::shared::BodyPose> bodyPose;
     physicsBridge_.receiveResultsFromPhysics(&bodyEvents_, &bodyPose);
 
-    // 射线探测回执 → 裁决（"这次点击打方块还是打刚体"，恰好一个生效）。
-    // 只查询阶段的回执，物理侧此时还没修改任何东西；真正的修改在 applyPick 里才发。
-    for (const auto& pr : physicsBridge_.probeResults()) {
-        if (pr.type != engine::shared::PhysicsResult::Type::ProbeResult) continue;
-        auto it = std::find_if(pendingPicks_.begin(), pendingPicks_.end(),
-                               [&pr](const PendingPick& p) { return p.seq == pr.pickSeq; });
-        if (it == pendingPicks_.end()) continue;   // 已超时处理过：忽略迟到的回执
-
-        engine::shared::pick::PickHit bodyHit;
-        if (pr.blockCount != 0) {
-            using engine::shared::pick::HitKind;
-            bodyHit.kind = HitKind::Body;
-            bodyHit.t = pr.rx;
-            bodyHit.structureId = pr.contraptionId;
-            bodyHit.lx = pr.x; bodyHit.ly = pr.y; bodyHit.lz = pr.z;
-            bodyHit.nx = pr.nx; bodyHit.ny = pr.ny; bodyHit.nz = pr.nz;
+    // ---- 结构镜像：方块来自结构事件，位姿来自 RigidBodyPos 回执 ----
+    // 用途只有一个：让"这次点击该打谁"在业务线程同步算出来（不再跨线程问物理）。
+    // 物理侧仍是形状的权威 —— 编辑指令下去后它会自己重新求交。
+    for (const auto& ev : bodyEvents_) {
+        if (ev.destroy) {
+            structures_.erase(ev.contraptionId);
+        } else {
+            StructureMirror& m = structures_[ev.contraptionId];
+            m.blocks = ev.blocks;
+            rebuildStructureIndex(m);
         }
-        PendingPick pick = *it;
-        pendingPicks_.erase(it);
-        resolvePick(pick, bodyHit, /*timedOut=*/false);
+    }
+    for (const auto& pose : physicsBridge_.bodyPoses()) {
+        auto it = structures_.find(pose.contraptionId);
+        if (it == structures_.end()) continue;   // 只有位姿、还没收到方块：等下一帧
+        it->second.cx = pose.x;
+        it->second.cy = pose.y;
+        it->second.cz = pose.z;
+        it->second.rot = glm::dquat(pose.qw, pose.qx, pose.qy, pose.qz);
+        it->second.hasPose = true;
     }
     // 刚体数据转给渲染桥：结构事件逐条送（事件流），位姿只送最新（状态）。
     // push 失败即逻辑异常（队列已从 16 提到 64），不在此处重试。
@@ -199,43 +201,26 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
 
 
     // 逐条消费：一个 tick 内落进几次点击就处理几次。
-    // 旧实现用"序号 + 按钮"两个原子变量、业务侧按序号跳号，一个 40ms tick 内的第二次点击会被吞掉。
+    // 每次点击**同步**完成：体素射线（查 World）+ 刚体射线（查结构镜像）→ 裁决 → 执行。
+    // 不再跨线程问物理，所以方块操作没有额外延迟（刚体改形状仍要等物理 tick，那是它自己的职责）。
     engine::shared::ClickEvent ev;
     while (clicks.clicks.pop(ev)) {
-        // 一次点击 = 一次拾取：
-        //   ① 冻结射线（两条射线共用同一份，保证可比）
-        //   ② 业务侧立刻算体素结果
-        //   ③ 发探测命令给物理（**只查询**）
-        //   ④ 回执到了再裁决（见 resolvePick）—— 物理侧此时还没改任何东西
         engine::shared::pick::PickRay ray;
         ray.ox = cx; ray.oy = cy; ray.oz = cz;
         ray.dx = dx; ray.dy = dy; ray.dz = dz;
         ray.maxDist = 8.0;
 
-        PendingPick pick;
-        pick.seq = nextPickSeq_++;
-        pick.ray = ray;
-        pick.blockHit = raycastVoxel(ray);
-        pick.leftButton = (ev.button == 0);
-
-        // 队列满 = 探测发不出去：直接按"无刚体"处理，点击不能丢
-        if (!pushProbe(pick)) {
-            resolvePick(pick, engine::shared::pick::PickHit{}, /*timedOut=*/true);
-            continue;
+        using namespace engine::shared::pick;
+        const PickHit blockHit = raycastVoxel(ray);
+        const PickHit bodyHit = raycastStructures(ray);
+        const PickAction action = resolve(blockHit, bodyHit, /*bodyProbeTimedOut=*/false,
+            ev.button == 0,
+            static_cast<std::uint16_t>(engine::registry::g_builtinBlockIds.stone));
+        if (action.kind == PickActionKind::None) {
+            ENGINE_LOG_DEBUG("Business", "拾取无动作（两条射线都没命中可用目标）");
         }
-        pendingPicks_.push_back(pick);
-        // 连点堆积：超上限时把最旧的按超时处理（宁可打方块，也不无限等待）
-        while (static_cast<int>(pendingPicks_.size()) > kMaxPendingPicks) {
-            PendingPick old = pendingPicks_.front();
-            pendingPicks_.erase(pendingPicks_.begin());
-            resolvePick(old, engine::shared::pick::PickHit{}, /*timedOut=*/true);
-        }
+        applyPick(ray, action);
     }
-
-    // 超时兜底：对端慢/丢回执时，等满 kPickTimeoutTicks 就按"无刚体"处理
-    expirePendingPicks();
-
-
 }
 
 // ---- 鼠标拾取：体素射线 + 刚体探测 → 裁决 → 唯一动作 ----
@@ -311,22 +296,9 @@ engine::shared::pick::PickHit BusinessWorld::raycastVoxel(
     return out;   // 未命中：kind 保持 None，t = 1e30（裁决时视为"更远"）
 }
 
-// 发一条射线探测命令（只查询，不修改）。返回 false 表示队列满。
-bool BusinessWorld::pushProbe(const PendingPick& pick) {
-    engine::shared::PhysicsCommand cmd;
-    cmd.type = engine::shared::PhysicsCommand::Type::ProbeStructure;
-    cmd.rox = pick.ray.ox; cmd.roy = pick.ray.oy; cmd.roz = pick.ray.oz;
-    cmd.rdx = pick.ray.dx; cmd.rdy = pick.ray.dy; cmd.rdz = pick.ray.dz;
-    cmd.rmaxDist = pick.ray.maxDist;
-    cmd.pickSeq = pick.seq;
-    if (!physicsBridge_.pushInteractCommand(cmd)) {
-        ENGINE_LOG_WARN("Business", "射线探测指令队列满（本次按无刚体处理）");
-        return false;
-    }
-    return true;
-}
-
-// 发一条真正的刚体编辑（裁决之后才发；物理侧此时才改形状）。
+// 发一条刚体编辑指令（裁决之后才发；物理侧重新求交并改形状）。
+// 注意：业务侧已经用镜像算过命中，这里只是"请物理照做"——
+// 物理侧仍会用它自己的射线重算一遍（它才是形状的权威），所以镜像即使短暂不同步也不会写坏状态。
 void BusinessWorld::sendStructureInteract(const engine::shared::pick::PickRay& ray, int action) {
     engine::shared::PhysicsCommand cmd;
     cmd.type = engine::shared::PhysicsCommand::Type::InteractStructure;
@@ -340,21 +312,83 @@ void BusinessWorld::sendStructureInteract(const engine::shared::pick::PickRay& r
     }
 }
 
-// 裁决并执行：两个射线结果 → 恰好一个动作（规则见 shared/pick/PickRay.hpp）
-void BusinessWorld::resolvePick(const PendingPick& pick,
-                                const engine::shared::pick::PickHit& bodyHit, bool timedOut) {
-    using namespace engine::shared::pick;
-    const PickAction action = resolve(pick.blockHit, bodyHit, timedOut, pick.leftButton,
-        static_cast<std::uint16_t>(engine::registry::g_builtinBlockIds.stone));
-    // 一次点击什么都没发生（射线打空 / 目标不可用）时留一条 DEBUG：
-    // 玩家看到的是"点了没反应"，排查时需要知道是"没命中"还是"被拒"。
-    if (action.kind == PickActionKind::None) {
-        ENGINE_LOG_DEBUG("Business", "拾取无动作（两条射线都没命中可用目标）");
+// ---- 结构镜像维护 ----
+void BusinessWorld::rebuildStructureIndex(StructureMirror& m) {
+    m.occupied.clear();
+    m.occupied.reserve(m.blocks.size() * 2);
+    for (const auto& b : m.blocks) {
+        m.occupied.insert(posKey(b.pos.x, b.pos.y, b.pos.z));
     }
-    applyPick(pick, action);
+    // 质心偏置：与物理侧同一份实现（shared/block/StructureFrame.hpp），
+    // 所以两边算出的"格点原点"必然一致。
+    m.bias = engine::shared::structureBias(m.blocks);
 }
 
-void BusinessWorld::applyPick(const PendingPick& pick, const engine::shared::pick::PickAction& a) {
+// 刚体射线：每个结构把射线变到局部空间做体素 DDA，取最近命中。
+engine::shared::pick::PickHit BusinessWorld::raycastStructures(
+    const engine::shared::pick::PickRay& ray) const {
+    using namespace engine::shared::pick;
+    PickHit out;   // kind=None, t=1e30
+
+    for (const auto& [id, m] : structures_) {
+        if (!m.hasPose || m.blocks.empty()) continue;
+
+        // 世界 → 局部：先减 anchor（= COM − R·bias，与 physics 发布位姿的语义一致），再反转旋转
+        const glm::dquat invRot = glm::conjugate(m.rot);
+        const glm::dvec3 com(m.cx, m.cy, m.cz);
+        const glm::dvec3 anchor = com - m.rot * m.bias;
+        const glm::dvec3 rel(ray.ox - anchor.x, ray.oy - anchor.y, ray.oz - anchor.z);
+        const glm::dvec3 lo = invRot * rel;
+        const glm::dvec3 ld = invRot * glm::dvec3(ray.dx, ray.dy, ray.dz);
+
+        // 整结构 AABB 快速剔除（局部坐标下是整数格的范围）
+        double mnx = 1e30, mxx = -1e30, mny = 1e30, mxy = -1e30, mnz = 1e30, mxz = -1e30;
+        for (const auto& b : m.blocks) {
+            mnx = std::min(mnx, static_cast<double>(b.pos.x)); mxx = std::max(mxx, static_cast<double>(b.pos.x) + 1.0);
+            mny = std::min(mny, static_cast<double>(b.pos.y)); mxy = std::max(mxy, static_cast<double>(b.pos.y) + 1.0);
+            mnz = std::min(mnz, static_cast<double>(b.pos.z)); mxz = std::max(mxz, static_cast<double>(b.pos.z) + 1.0);
+        }
+        {
+            double t0 = 0.0, t1 = ray.maxDist;
+            const double dirs[3] = { ld.x, ld.y, ld.z };
+            const double os[3] = { lo.x, lo.y, lo.z };
+            const double mins[3] = { mnx, mny, mnz };
+            const double maxs[3] = { mxx, mxy, mxz };
+            bool miss = false;
+            for (int a = 0; a < 3; ++a) {
+                if (std::fabs(dirs[a]) < 1e-12) {
+                    if (os[a] < mins[a] || os[a] > maxs[a]) { miss = true; break; }
+                    continue;
+                }
+                double ta = (mins[a] - os[a]) / dirs[a];
+                double tb = (maxs[a] - os[a]) / dirs[a];
+                if (ta > tb) std::swap(ta, tb);
+                t0 = std::max(t0, ta);
+                t1 = std::min(t1, tb);
+                if (t0 > t1) { miss = true; break; }
+            }
+            if (miss) continue;
+        }
+
+        const LocalHit h = raycastLocalVoxel(lo.x, lo.y, lo.z, ld.x, ld.y, ld.z, ray.maxDist,
+            [&m](int x, int y, int z) {
+                return m.occupied.find(posKey(x, y, z)) != m.occupied.end();
+            });
+        if (!h.hit) continue;
+        if (h.t < out.t) {
+            out.kind = HitKind::Body;
+            out.t = h.t;
+            out.structureId = id;
+            out.lx = h.x; out.ly = h.y; out.lz = h.z;
+            out.nx = h.nx; out.ny = h.ny; out.nz = h.nz;
+        }
+    }
+    return out;
+}
+
+// 执行裁决结果：方块走 World（同步），刚体发指令给物理（下一物理 tick 生效）。
+void BusinessWorld::applyPick(const engine::shared::pick::PickRay& ray,
+                              const engine::shared::pick::PickAction& a) {
     using engine::shared::pick::PickActionKind;
     switch (a.kind) {
     case PickActionKind::BreakBlock:
@@ -370,26 +404,14 @@ void BusinessWorld::applyPick(const PendingPick& pick, const engine::shared::pic
         }
         break;
     case PickActionKind::BreakBodyBlock:
-        sendStructureInteract(pick.ray, 0);
+        sendStructureInteract(ray, 0);
         break;
     case PickActionKind::PlaceBodyBlock:
-        sendStructureInteract(pick.ray, 1);
+        sendStructureInteract(ray, 1);
         break;
     case PickActionKind::None:
     default:
         break;
-    }
-}
-
-void BusinessWorld::expirePendingPicks() {
-    for (auto it = pendingPicks_.begin(); it != pendingPicks_.end();) {
-        if (++it->ageTicks > kPickTimeoutTicks) {
-            PendingPick old = *it;
-            it = pendingPicks_.erase(it);
-            resolvePick(old, engine::shared::pick::PickHit{}, /*timedOut=*/true);
-        } else {
-            ++it;
-        }
     }
 }
 

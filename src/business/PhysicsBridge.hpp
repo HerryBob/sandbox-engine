@@ -29,8 +29,9 @@ public:
     bool pushSyncCommand();
     // 射线 × 刚体交互（PlaceBlock/RemoveBlock 的"刚体域"走这里）：
     // 物理侧权威求解并执行，回执 StructureEdited / StructureEditMiss。
-    // 本次 receiveResults 收到的射线探测回执（业务线程消费，回执流不跨线程共享）
-    std::vector<engine::shared::PhysicsResult>& probeResults() { return probeResults_; }
+    // 本次 receiveResults 收到的**每个结构**的位姿（业务侧的结构镜像要用）。
+    // 与 bodyPose 的区别：那个只保留最新一条（状态语义），这里按结构逐条留（用于镜像刷新）。
+    const std::vector<engine::shared::BodyPose>& bodyPoses() const { return bodyPoses_; }
     bool pushInteractCommand(const engine::shared::PhysicsCommand& cmd) {
         return businessToPhysicsCommands_.push(cmd);
     }
@@ -73,7 +74,7 @@ public:
 private:
     // B1 业务→物理（指令）；B2 物理→业务（回执）。容量对齐原装配（512）。
     engine::core::SPSCQueue<engine::shared::PhysicsCommand> businessToPhysicsCommands_{512};
-    std::vector<engine::shared::PhysicsResult> probeResults_;
+    std::vector<engine::shared::BodyPose> bodyPoses_;
     // 诊断：物理侧回执里"结构被编辑 / 射线未命中刚体"的累计数
     std::atomic<long long> structureEditedCount_{0};
     std::atomic<long long> lastStructureMiss_{0};

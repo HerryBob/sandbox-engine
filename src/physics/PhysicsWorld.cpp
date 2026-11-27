@@ -266,9 +266,7 @@ void PhysicsWorld::applyCommands(engine::core::SPSCQueue<engine::shared::Physics
         case engine::shared::PhysicsCommand::Type::InteractStructure:
             onInteractStructure(cmd);
             break;
-        case engine::shared::PhysicsCommand::Type::ProbeStructure:
-            onProbeStructure(cmd);
-            break;
+
         }
         processedCommandCount_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -585,8 +583,9 @@ void PhysicsWorld::onRemoveBlock(const engine::shared::PhysicsCommand& cmd) {
 // 所以局部点 = inverse(bodyTransform) * 世界命中点；方块坐标 = floor(局部点 + 帧偏置)
 // （因为方块中心 = p + 0.5 − bias，见 shared/block/StructureFrame.hpp）。
 // 面法线：局部命中点到方块中心的位移里，绝对值最大的那个轴。
-// 射线 → 刚体命中信息。onInteractStructure（执行）与 onProbeStructure（只查询）共用：
-// 两条命令的"命中点 → 方块局部坐标 → 面法线"推导必须完全一致，否则裁决与执行会错位。
+// 射线 → 刚体命中信息（onInteractStructure 用）。
+// 业务侧也有一份等价的"结构局部射线"（shared/pick/StructureRay.hpp）用于同步裁决；
+// 两边的几何约定必须一致（方块 p 占 [p, p+1]，位姿 = 格点原点）。
 bool PhysicsWorld::castStructureRay(const engine::shared::PhysicsCommand& cmd,
                                     StructureRayHit& out) {
     if (!jolt_) return false;
@@ -682,24 +681,6 @@ bool PhysicsWorld::castStructureRay(const engine::shared::PhysicsCommand& cmd,
     return true;
 }
 
-// 射线探测：**只查询，不修改**。业务用它裁决"这次点击该打刚体还是打方块"。
-void PhysicsWorld::onProbeStructure(const engine::shared::PhysicsCommand& cmd) {
-    StructureRayHit h;
-    const bool ok = castStructureRay(cmd, h);
-
-    engine::shared::PhysicsResult r;
-    r.type = engine::shared::PhysicsResult::Type::ProbeResult;
-    r.pickSeq = cmd.pickSeq;
-    r.blockCount = ok ? 1 : 0;                  // 0 = 未命中（见协议注释）
-    if (ok) {
-        r.contraptionId = h.structureId;
-        r.x = h.bx; r.y = h.by; r.z = h.bz;     // 命中块**局部**坐标
-        r.rx = h.t;
-        r.nx = h.nx; r.ny = h.ny; r.nz = h.nz;
-    }
-    pendingReceipts_.push_back(r);
-}
-
 void PhysicsWorld::onInteractStructure(const engine::shared::PhysicsCommand& cmd) {
     auto pushMiss = [this, &cmd]() {
         // 记一条日志：交互是"按键驱动"的低频操作，打出原因比静默失败更好排查
@@ -707,7 +688,7 @@ void PhysicsWorld::onInteractStructure(const engine::shared::PhysicsCommand& cmd
         ENGINE_LOG_INFO("Physics", "[刚体交互] 未生效（射线未命中刚体 / 目标格不可用）");
         engine::shared::PhysicsResult r;
         r.type = engine::shared::PhysicsResult::Type::StructureEditMiss;
-        r.pickSeq = cmd.pickSeq;
+    
         pendingReceipts_.push_back(r);
     };
 
@@ -746,7 +727,7 @@ void PhysicsWorld::onInteractStructure(const engine::shared::PhysicsCommand& cmd
     // 回执：带编辑后的完整局部方块表 → 渲染端重建该结构的网格
     engine::shared::PhysicsResult r;
     r.type = engine::shared::PhysicsResult::Type::StructureEdited;
-    r.pickSeq = cmd.pickSeq;
+
     r.contraptionId = structureId;
     r.blockCount = body->blockCount;
     r.x = hitPos.x; r.y = hitPos.y; r.z = hitPos.z;   // 被编辑的局部坐标（诊断用）
