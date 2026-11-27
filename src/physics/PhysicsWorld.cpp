@@ -1,5 +1,7 @@
 #include "physics/PhysicsWorld.hpp"
 
+#include <glm/gtc/quaternion.hpp>
+
 #include "shared/block/StructureFrame.hpp"
 #include "physics/JoltKernel.hpp"
 #include "core/Log.hpp"
@@ -518,9 +520,18 @@ void PhysicsWorld::publishPoseFrame() {
         const int slot = poseHistory_->slotOfStructure(b.structureId);
         if (slot < 0) continue;
         engine::shared::PoseEntry& e = f.e[slot];
-        e.px = static_cast<float>(b.x);
-        e.py = static_cast<float>(b.y);
-        e.pz = static_cast<float>(b.z);
+        // 对外发布的刚体位姿 = **结构格点原点**（不是质心）：
+        //   anchor = COM − R·bias
+        // 这样编辑方块（bias 变化 + 位置补偿）时 anchor **保持不变**，
+        // 渲染端的网格顶点又只依赖整数局部坐标（p + 0.5），两边都与 bias 无关
+        // → 不会再出现"网格用新偏置、位姿还插值在旧帧"的半格错位（B145）。
+        const glm::dquat q(static_cast<double>(b.qw), static_cast<double>(b.qx),
+                           static_cast<double>(b.qy), static_cast<double>(b.qz));
+        const glm::dvec3 bias(b.frameBiasX, b.frameBiasY, b.frameBiasZ);
+        const glm::dvec3 rotated = q * bias;
+        e.px = static_cast<float>(b.x - rotated.x);
+        e.py = static_cast<float>(b.y - rotated.y);
+        e.pz = static_cast<float>(b.z - rotated.z);
         e.qx = static_cast<float>(b.qx);
         e.qy = static_cast<float>(b.qy);
         e.qz = static_cast<float>(b.qz);

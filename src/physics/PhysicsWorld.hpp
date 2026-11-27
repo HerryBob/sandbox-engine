@@ -106,6 +106,9 @@ private:
     bool castStructureRay(const engine::shared::PhysicsCommand& cmd, StructureRayHit& out);
     // 按 body.blocks 重建复合形状（编辑方块后调用）。失败返回 false。
     bool rebuildContraptionShape(int structureId);
+    // 临时诊断（测完删）：编辑后跟踪该结构的位姿轨迹
+    int debugWatchStructure_ = -1;
+    int debugWatchTicks_ = 0;
     void onUnpackContraption(const engine::shared::PhysicsCommand& cmd);
     // 刚体插值快照：为玩家体成组写 PlayerBodyState（seqlock 包住 prev/curr/时刻）。
     // prevX/Y/Z 是**本 tick 推进之前**的位置（调用方在 stepPlayer 之前取）——

@@ -153,7 +153,6 @@ namespace engine::render::mesh {
             { 1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}
         };
 
-        const glm::dvec3 frameBias = engine::shared::structureBias(blocks);
         for (const auto& block : blocks) {
             if (block.type == BlockType::Air) continue;
 
@@ -169,10 +168,11 @@ namespace engine::render::mesh {
                     faceMask = static_cast<std::uint8_t>(faceMask | (1u << f));
             }
 
-            // 局部坐标下的方块中心 —— 以**几何中心**为原点（B141）。
-            // 与物理形状偏移共用 shared/block/StructureFrame.hpp 的同一份数学，
-            // 两边不会各算一套（那正是 B141 的成因）。
-            const glm::vec3 center = engine::shared::localBlockCenter(block.pos, frameBias);
+            // 局部坐标下的方块中心，相对**结构格点原点**（渲染用，与物理的质心偏置无关）。
+            // 位姿发布出去的就是这个格点原点（见 PhysicsWorld::publishPoseFrame），
+            // 所以顶点只需要 p + 0.5：编辑方块时两者都不变 → 不会半格错位（B145）。
+            const glm::vec3 center = engine::shared::localBlockCenter(
+                block.pos, glm::dvec3(0.0));
 
             const auto* info = engine::registry::g_blockRegistry.find(
                 static_cast<std::uint16_t>(block.type));

@@ -114,10 +114,11 @@ bool selfTestPhysicsBehavior() {
             std::cout << "物理行为：②落到台面 —— 读不到位姿\n";
             return false;
         }
-        // B141 已修：刚体位姿 = **几何中心**（见 shared/block/StructureFrame.hpp）。
-        // 单块结构静止在地面（顶面 y=1）时，方块中心 = 1.5。
-        if (std::fabs(e.py - 1.5f) > 0.15f) {
-            std::cout << "物理行为：②落到台面失败 y=" << e.py << "（应 ≈ 1.5）\n";
+        // 位姿语义（B145 起）：对外发布的刚体位姿 = **结构格点原点**
+        // （= 质心位姿 − R·bias）。单块落在地面（顶面 y=1）时：COM=1.5、bias=0.5
+        // → 格点原点 y = 1.0。渲染端顶点就用 p + 0.5，两边都与 bias 无关。
+        if (std::fabs(e.py - 1.0f) > 0.15f) {
+            std::cout << "物理行为：②落到台面失败 y=" << e.py << "（应 ≈ 1.0）\n";
             return false;
         }
     }
@@ -132,9 +133,9 @@ bool selfTestPhysicsBehavior() {
             std::cout << "物理行为：③挖掉脚下 —— 读不到位姿\n";
             return false;
         }
-        if (!(e.py < 1.0f)) {
+        if (!(e.py < 0.5f)) {
             std::cout << "物理行为：③挖掉脚下失败 y=" << e.py
-                      << "（应掉到 1.0 以下；说明睡眠体没被唤醒 / 没被积分）\n";
+                      << "（应掉到 0.5 以下；说明睡眠体没被唤醒 / 没被积分）\n";
             return false;
         }
     }
@@ -163,12 +164,13 @@ bool selfTestPhysicsBehavior() {
             return false;
         }
         // 期望 (20.5, 6.5, 21.0)：x/y 各 +0.5（奇数尺寸 1 块宽），z +1.0（偶数尺寸 2 块）
-        const bool ok = std::fabs(e.px - 20.5f) < 0.05f &&
-                        std::fabs(e.py - 6.5f) < 0.05f &&
-                        std::fabs(e.pz - 21.0f) < 0.05f;
+        // 格点原点 = 整数基准（x/y 各 20/6，z 因两块而取 20）
+        const bool ok = std::fabs(e.px - 20.0f) < 0.05f &&
+                        std::fabs(e.py - 6.0f) < 0.05f &&
+                        std::fabs(e.pz - 20.0f) < 0.05f;
         if (!ok) {
             std::cout << "物理行为：④中心约定失败 pos=(" << e.px << "," << e.py << ","
-                      << e.pz << ")（应 ≈ (20.5,6.5,21.0)）\n";
+                      << e.pz << ")（应 ≈ (20,6,20)）\n";
             return false;
         }
     }
