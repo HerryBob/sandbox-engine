@@ -102,6 +102,15 @@ bool VulkanContext::init(int width, int height, const char* title) {
     if (!hud_.init(physicalDevice_, device_, graphicsQueue_, infra_.commandPool(), pipelines_.renderPass(),
                    swapchainExtent_, msaaSamples_)) return false;
 
+    // 准星：共享 HUD 刚创建好的字体图集（自带管线与顶点缓冲，失败不影响主流程）
+    {
+        const auto atlas = hud_.atlas();
+        if (!crosshair_.init(physicalDevice_, device_, graphicsQueue_, infra_.commandPool(),
+                             pipelines_.renderPass(), swapchainExtent_, msaaSamples_, atlas)) {
+            ENGINE_LOG_WARN("Vulkan", "[准星] 初始化失败，本次运行不显示准星");
+        }
+    }
+
     renderObjectsReady_ = true;
     return true;
 }
@@ -256,6 +265,7 @@ bool VulkanContext::createSwapchain() {
 
     swapchainExtent_ = util::chooseSwapExtent(physicalDevice_, surface_, window_);
     hud_.setExtent(swapchainExtent_);   // HUD 的 push constant 用屏幕尺寸
+    crosshair_.setExtent(swapchainExtent_);
 
     VkSwapchainCreateInfoKHR swapchainInfo{};
     swapchainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -721,6 +731,8 @@ void VulkanContext::recordHudPass(VkCommandBuffer cmd, uint32_t frame) {
         hud_.setMeshStats(meshChunks, meshTris);
         hud_.drawHud(cmd, frame);
     }
+    // 准星独立于 F3 可见性：HUD 关掉也要有准星（常驻 HUD 元素 vs 可开关的调试浮层）
+    crosshair_.draw(cmd, frame);
     hud_.setHudFrameStats(fpsSmoothed_, frameMsSmoothed_, framesPresented_);
 }
 
@@ -871,6 +883,7 @@ void VulkanContext::destroyRenderObjects() {
     // 实体：逐骨骼释放缓冲，再释放贴图三件套
     entities_.shutdown();   // 实体网格/贴图（S6b 抽出的 EntityRenderer）
     blockTextures_.shutdown();   // 方块图集（S3 抽出的 TextureSet）
+    crosshair_.shutdown();  // 先于 HUD：它借用了 HUD 的图集
     hud_.shutdown();        // HUD 管线引用 renderPass，必须早于 PipelineSet 销毁
     pipelines_.shutdown();  // 管线 → 布局 → 附件 → renderPass
     infra_.shutdown();       // 命令池/同步/UBO/描述符（S4b 的 FrameInfra）

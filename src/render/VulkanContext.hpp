@@ -21,6 +21,7 @@
 #include "render/MeshTypes.hpp"
 #include "render/FrameInfra.hpp"
 #include "render/HudRenderer.hpp"
+#include "render/hud/CrosshairRenderer.hpp"
 #include "render/PipelineSet.hpp"
 #include "render/TextureSet.hpp"
 #include "render/hud/HudInfo.hpp"
@@ -207,6 +208,10 @@ private:
     static constexpr uint32_t kMaxFramesInFlight = 2;
     // HUD（S2 抽出的独立类）：可见性/统计由本类薄转发，资源与绘制都在它内部
     HudRenderer hud_;
+    // 屏幕中心十字准星：与 F3 浮层**互不依赖**（独立管线/独立文件，只借用 HUD 的字体图集）。
+    // 单独成类的原因：常驻 HUD 元素 vs 可开关的调试浮层，生命周期与归属都不同；
+    // 将来要外置成 DLL 模组，它只依赖 Vulkan 句柄 + HudAtlas（POD）。
+    engine::render::hud::CrosshairRenderer crosshair_;
     // renderPass + MSAA/深度附件 + 主管线（S4a 抽出的 PipelineSet）
     PipelineSet pipelines_;
     // 命令池/同步/UBO/描述符（S4b 抽出的 FrameInfra）

@@ -13,6 +13,7 @@
 #include "shared/state/CameraState.hpp"
 
 #include "render/hud/HudInfo.hpp"
+#include "render/hud/HudAtlas.hpp"
 #include "render/hud/HudTextBuilder.hpp"
 
 namespace engine::render {
@@ -51,6 +52,12 @@ public:
               VkSampleCountFlagBits msaaSamples);
     // 逆序释放（重复调用安全）。设备句柄在 init 时存下，这里不需要参数。
     void shutdown();
+
+    // 字体图集句柄（供其它 2D 元素借用，例如准星）：只有 HUD 创建/持有它。
+    // 返回 POD 而非引用：调用方拿不到本类内部状态，也不会误释放（模组化后的接口形态）。
+    hud::HudAtlas atlas() const {
+        return hud::HudAtlas{ fontImage_, fontImageView_, fontSampler_ };
+    }
 
     // 相机槽（HUD 显示坐标/朝向用）：attachCameraState 时注入，不持有所有权
     void setCameraState(const engine::shared::CameraState* cam) { cameraState_ = cam; }
