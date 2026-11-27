@@ -123,23 +123,6 @@ void PhysicsBridge::receiveResultsFromPhysics(
                     res.qx, res.qy, res.qz, res.qw, res.simTime};
             break;
         }
-        case engine::shared::PhysicsResult::Type::StructureEdited: {
-            // 刚体上的方块被放/拆：把**新的局部方块表**交给渲染端重建该结构网格。
-            // 复用打包那条事件通路（destroy=false = 建/换网格），不新增渲染接口。
-            if (bodyEvents) {
-                engine::shared::BodyStructureEvent ev;
-                ev.contraptionId = res.contraptionId;
-                ev.destroy = false;
-                ev.blocks = res.blocks;
-                bodyEvents->push_back(std::move(ev));
-            }
-            structureEditedCount_.fetch_add(1, std::memory_order_relaxed);
-            break;
-        }
-        case engine::shared::PhysicsResult::Type::StructureEditMiss:
-            // 射线没命中刚体：置标志，业务下一 tick 回退到"打世界"（见 pendingInteract_）
-            lastStructureMiss_.fetch_add(1, std::memory_order_relaxed);
-            break;
         case engine::shared::PhysicsResult::Type::CollisionEvent:
             // 碰撞事件暂无消费方，先忽略。
             break;

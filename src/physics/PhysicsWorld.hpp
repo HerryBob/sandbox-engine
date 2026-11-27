@@ -89,11 +89,6 @@ private:
     void onPlaceBlock(const engine::shared::PhysicsCommand& cmd);
     void onRemoveBlock(const engine::shared::PhysicsCommand& cmd);
     void onPackContraption(const engine::shared::PhysicsCommand& cmd);
-    // 射线 × 刚体：命中刚体则在其上加/拆一块，并回执"编辑后的方块表"。
-    // 没命中任何刚体 → 回一条 StructureEditMiss（业务据此回退到"打世界"）。
-    void onInteractStructure(const engine::shared::PhysicsCommand& cmd);
-    // 按 body.blocks 重建复合形状（编辑方块后调用）。失败返回 false。
-    bool rebuildContraptionShape(int structureId);
     void onUnpackContraption(const engine::shared::PhysicsCommand& cmd);
     // 刚体插值快照：为玩家体成组写 PlayerBodyState（seqlock 包住 prev/curr/时刻）。
     // prevX/Y/Z 是**本 tick 推进之前**的位置（调用方在 stepPlayer 之前取）——

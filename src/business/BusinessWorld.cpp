@@ -258,44 +258,8 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
     if (clicks.packInFront.exchange(false, std::memory_order_relaxed)) {
         handlePackInFront(cam);
     }
-
-    // F10 / F11：对刚体放 / 拆一块（物理侧求解射线并执行；见 handleStructureInteract）
-    if (clicks.interactPlace.exchange(false, std::memory_order_relaxed)) {
-        handleStructureInteract(cam, 1);
-    }
-    if (clicks.interactRemove.exchange(false, std::memory_order_relaxed)) {
-        handleStructureInteract(cam, 0);
-    }
 }
 
-// F10 / F11：对刚体放 / 拆一块。
-// 业务只负责"把相机射线发下去"：命中判定与形状修改都在物理线程（那里才有刚体）。
-// 这里不判断视角（第一/第三人称都能用）—— 用的是相机射线，第三人称下等于"从相机看过去"。
-void BusinessWorld::handleStructureInteract(const engine::shared::CameraState& cam, int action) {
-    const double cx = cam.camX.load(std::memory_order_relaxed);
-    const double cy = cam.camY.load(std::memory_order_relaxed);
-    const double cz = cam.camZ.load(std::memory_order_relaxed);
-    const double yaw = cam.yaw.load(std::memory_order_relaxed);
-    const double pitch = cam.pitch.load(std::memory_order_relaxed);
-
-    const double cosP = std::cos(pitch);
-    engine::shared::PhysicsCommand cmd;
-    cmd.type = engine::shared::PhysicsCommand::Type::InteractStructure;
-    cmd.rox = cx; cmd.roy = cy; cmd.roz = cz;
-    cmd.rdx = std::sin(yaw) * cosP;
-    cmd.rdy = std::sin(pitch);
-    cmd.rdz = -std::cos(yaw) * cosP;
-    cmd.rmaxDist = 8.0;
-    cmd.raction = action;
-    cmd.blockType = static_cast<int>(engine::registry::g_builtinBlockIds.stone);
-
-    if (!physicsBridge_.pushInteractCommand(cmd)) {
-        ENGINE_LOG_WARN("Business", "刚体交互指令队列满，本次忽略");
-        return;
-    }
-    ENGINE_LOG_INFO("Business", std::string("刚体交互：") +
-        (action == 0 ? "拆一块" : "放一块"));
-}
 // F9：把准星对着的那一个方块打包成刚体（仅第一人称）。
 //
 // 为什么单独写一遍射线（没复用 handlePlayerInput 里的 DDA）：

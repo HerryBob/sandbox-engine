@@ -27,7 +27,6 @@ struct PhysicsCommand {
         RemoveBlock,       // 破坏一块方块（业务裁决通过 → 物理删碰撞体）
         PackContraption,   // 打包：方块列表转移进刚体（物理形态转移，见架构 2.7）
         UnpackContraption, // 解包：刚体方块回写静态碰撞体集合
-    InteractStructure, // 射线 × 刚体：在刚体上加/拆一块（物理侧权威求解并执行）
     };
     Type type = Type::MoveBlock;
     int x = 0, y = 0, z = 0;    // 目标方块坐标（PlaceBlock/RemoveBlock）。
@@ -49,14 +48,6 @@ struct PhysicsCommand {
     // 为什么不用全量：流式每加载一批就全量重发 8 万方块，物理侧要整表重建（实测 11~14ms/次），
     // 那一帧直接变成 30~70ms —— 就是"每次更新区块卡一下"。
     std::vector<engine::shared::ChunkPos> changedChunks;
-
-    // ---- InteractStructure：射线 × 刚体交互 ----
-    // 为什么由物理侧求解：刚体的形状/位姿只有物理线程有，业务侧看不到已打包的方块
-    // （它们已从 World 移除）。业务只发起"从相机发出的射线"，物理负责命中与执行。
-    double rox = 0.0, roy = 0.0, roz = 0.0;   // 射线起点（世界坐标）
-    double rdx = 0.0, rdy = 1.0, rdz = 0.0;   // 射线方向（**单位向量**，物理侧会归一化）
-    double rmaxDist = 8.0;                    // 最大距离（格）
-    int    raction = 0;                       // 0 = 拆命中块，1 = 在命中面外放一块
 };
 
 // 物理 → 业务：刚体位置/姿态/碰撞标记回传。
@@ -70,9 +61,7 @@ struct PhysicsCommand {
 struct PhysicsResult {
     enum class Type {
         BlockMoved, ContraptionPacked, ContraptionUnpacked, RigidBodyPos,
-        BlockSetSize, CollisionEvent,
-        StructureEdited,    // 刚体上的方块被放/拆：blocks = 新的局部方块表
-        StructureEditMiss,  // 射线没命中任何刚体（业务据此回退到"打世界"）
+        BlockSetSize, CollisionEvent
     };
     Type       type = Type::BlockMoved;
     int        x = 0, y = 0, z = 0;        // BlockMoved：移动后坐标

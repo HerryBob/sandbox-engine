@@ -27,11 +27,6 @@ public:
     // 排队待发指令（裁决通过后调用；业务线程私有状态，无需原子）：
     // 全量同步（已有待发指令则返回 false，防覆盖）。
     bool pushSyncCommand();
-    // 射线 × 刚体交互（PlaceBlock/RemoveBlock 的"刚体域"走这里）：
-    // 物理侧权威求解并执行，回执 StructureEdited / StructureEditMiss。
-    bool pushInteractCommand(const engine::shared::PhysicsCommand& cmd) {
-        return businessToPhysicsCommands_.push(cmd);
-    }
     // 增量同步：只推变化的 chunk 及其方块（流式加载/卸载）。队列满返回 false。
     bool pushChunksCommand(std::vector<engine::shared::Block> blocks,
                            std::vector<engine::shared::ChunkPos> chunks);
@@ -71,9 +66,6 @@ public:
 private:
     // B1 业务→物理（指令）；B2 物理→业务（回执）。容量对齐原装配（512）。
     engine::core::SPSCQueue<engine::shared::PhysicsCommand> businessToPhysicsCommands_{512};
-    // 诊断：物理侧回执里"结构被编辑 / 射线未命中刚体"的累计数
-    std::atomic<long long> structureEditedCount_{0};
-    std::atomic<long long> lastStructureMiss_{0};
     engine::core::SPSCQueue<engine::shared::PhysicsResult>  physicsToBusinessResults_{512};
 
     // 待发指令状态机（业务线程私有，无需原子）：
