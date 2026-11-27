@@ -624,6 +624,12 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
             settings.mLinearVelocity =
                 JPH::Vec3(static_cast<float>(cmd.ivx), static_cast<float>(cmd.ivy),
                           static_cast<float>(cmd.ivz));
+            // 原型阶段**禁止刚体睡眠**：Jolt 会在静止约 0.5s 后让它睡（active=0），
+            // 而"睡眠体"不会因为我们挖掉它脚下的方块、改地形而自动醒来
+            // → 表现就是"看着像冻住了，只有玩家碰到才动一下"。
+            // 刚体数量还很小（1~几个），一直模拟的开销可忽略；等多刚体/大量结构时
+            // 再改成"按需唤醒"（在方块变更/邻近结构变动时显式 ActivateBody）。
+            settings.mAllowSleeping = false;
             jolt_->contraptionBodies[body.structureId] =
                 jolt_->system.GetBodyInterface().CreateAndAddBody(
                     settings, JPH::EActivation::Activate);
