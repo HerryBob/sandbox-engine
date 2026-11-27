@@ -818,7 +818,9 @@ void PhysicsWorld::onPackContraption(const engine::shared::PhysicsCommand& cmd) 
     const int originX = engine::shared::structureOriginAxis(minX, maxX);
     const int originY = engine::shared::structureOriginAxis(minY, maxY);
     const int originZ = engine::shared::structureOriginAxis(minZ, maxZ);
-    const glm::dvec3 frameBias = engine::shared::structureBias(cmd.blocks);
+    // 质心偏置：把方块中心均值放到刚体原点（形状 COM 恒为 0，Jolt 不会自己挪体）
+    const glm::dvec3 frameBias =
+        engine::shared::structureBiasWorld(cmd.blocks, originX, originY, originZ);
     body.x = static_cast<double>(originX) + frameBias.x;
     body.y = static_cast<double>(originY) + frameBias.y;
     body.z = static_cast<double>(originZ) + frameBias.z;
