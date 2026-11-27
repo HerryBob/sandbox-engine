@@ -79,7 +79,8 @@ using namespace engine;
 constexpr const char* kCameraHelp =
     "相机控制：WASD=平移 空格/左Shift=上下 移动鼠标=转视角 R=重置视角\n"
     "         F4=自由相机/玩家跟随切换 F5=第一人称/第三人称切换（仅玩家模式） F3=调试浮层\n"
-        "         F9=把准星对着的一个方块打包成刚体（仅第一人称）\n";
+        "         F9=把准星对着的一个方块打包成刚体（仅第一人称）\n"
+        "         F10=对刚体放一块   F11=从刚体拆一块（射线在物理侧求解）\n";
 
 // 把工作目录切到 exe 所在目录：稳定解析 shaders/、textures/ 相对路径。
 // 无论从 IDE / 命令行 / 双击启动，资源相对路径都不依赖"进程从哪启动"。
@@ -228,6 +229,9 @@ static void initNoiseAndRunSelfTests() {
     //图集 UV 边界（纯数学）：各格 UV 必须整块在格内，防跨格采到隔壁纹理。
     const bool atlasUvOk = engine::selftest::atlasUV();
 
+    //拾取裁决（两条射线 → 唯一动作）：纯逻辑，不碰窗口/GPU/Jolt。
+    const bool pickResolveOk = engine::selftest::pickResolve();
+
     //刚体物理内核（Jolt）：初始化 + 地面/箱子跑 100 步 → 箱子落在地面顶面上。
     //验的是"内核能不能起来"（编译/链接/初始化顺序/分配器/精度），不碰引擎物理与渲染。
     const bool joltKernelOk = engine::physics::selfTestJoltKernel();
@@ -276,6 +280,8 @@ static void initNoiseAndRunSelfTests() {
               << (saveMenuOk ? "通过" : "失败") << "\n";
     std::cout << "图集 UV：各格 UV 不越界自检"
               << (atlasUvOk ? "通过" : "失败") << "\n";
+    std::cout << "拾取裁决：刚体/方块/近等距/超时自检"
+              << (pickResolveOk ? "通过" : "失败") << "\n";
     std::cout << "物理内核：Jolt 初始化 + 地面/箱子 100 步落地自检"
               << (joltKernelOk ? "通过" : "失败") << "\n";
     std::cout << "物理行为：自由落体 / 落到台面 / 挖掉脚下自检"

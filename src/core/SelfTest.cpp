@@ -10,6 +10,7 @@
 #include "save/SaveDir.hpp"
 #include "save/SaveMenu.hpp"
 #include "shared/chunk/ChunkData.hpp"
+#include "shared/pick/PickRay.hpp"
 
 #include <cmath>
 #include <filesystem>
@@ -518,6 +519,56 @@ bool atlasUV() {
     return true;
 }
 
+// 拾取裁决（PickResolver）：两张射线结果 → 唯一动作。
+// 这是"鼠标点击到底该打方块还是打刚体"的唯一规则表，纯逻辑、可完全自动化验证。
+bool pickResolve() {
+    using namespace engine::shared::pick;
+
+    auto makeBlock = [](double t) {
+        PickHit h; h.kind = HitKind::Block; h.t = t;
+        h.bx = 4; h.by = 5; h.bz = 6; h.px = 4; h.py = 6; h.pz = 6;
+        h.blockType = 3;
+        return h;
+    };
+    auto makeBody = [](double t) {
+        PickHit h; h.kind = HitKind::Body; h.t = t;
+        h.structureId = 7; h.lx = 0; h.ly = 1; h.lz = 0; h.ny = 1;
+        return h;
+    };
+    auto none = [] { PickHit h; return h; };
+
+    // ① 刚体更近（t=3）→ 左键拆刚体 / 右键放刚体
+    if (resolve(makeBlock(5.0), makeBody(3.0), false, true, 9).kind != PickActionKind::BreakBodyBlock) return false;
+    if (resolve(makeBlock(5.0), makeBody(3.0), false, false, 9).kind != PickActionKind::PlaceBodyBlock) return false;
+
+    // ② 方块更近（t=2）→ 打方块
+    if (resolve(makeBlock(2.0), makeBody(6.0), false, true, 9).kind != PickActionKind::BreakBlock) return false;
+    if (resolve(makeBlock(2.0), makeBody(6.0), false, false, 9).kind != PickActionKind::PlaceBlock) return false;
+
+    // ③ 近等距（浮点噪声量级）→ 确定地判给方块
+    if (resolve(makeBlock(4.0), makeBody(4.0 - 1e-7), false, true, 9).kind != PickActionKind::BreakBlock) return false;
+
+    // ④ 只有刚体命中 → 刚体
+    if (resolve(none(), makeBody(3.0), false, true, 9).kind != PickActionKind::BreakBodyBlock) return false;
+
+    // ⑤ 只有方块命中 → 方块
+    if (resolve(makeBlock(2.0), none(), false, true, 9).kind != PickActionKind::BreakBlock) return false;
+
+    // ⑥ 都没命中 → 无动作
+    if (resolve(none(), none(), false, true, 9).kind != PickActionKind::None) return false;
+
+    // ⑦ 物理探测超时 → 即使刚体命中也要走方块（点击不能因对端慢而丢失）
+    if (resolve(makeBlock(5.0), makeBody(1.0), true, true, 9).kind != PickActionKind::BreakBlock) return false;
+
+    // ⑧ 右键放置要把 placeType 带进动作
+    {
+        const PickAction a = resolve(makeBlock(2.0), none(), false, false, 42);
+        if (a.kind != PickActionKind::PlaceBlock || a.block.blockType != 42) return false;
+    }
+
+    std::cout << "拾取裁决：刚体/方块/近等距/超时/双空 自检通过\n";
+    return true;
+}
 // 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
 bool modSorter() {
     using engine::modhost::ModManifest;
