@@ -317,7 +317,15 @@ void InputSampler::keyboardCb(GLFWwindow* w, int key, int scancode, int action, 
         }
         return;
     }
-
+    // F9：把准星对着的那一个方块打包成刚体（只有第一人称有意义，
+    // 但"是否第一人称"由业务侧判断 —— 这里只发请求，不读相机状态）。
+    if (key == GLFW_KEY_F9) {
+        if (action != GLFW_PRESS) return;
+        if (self->clickOut_) {
+            self->clickOut_->packInFront.store(true, std::memory_order_relaxed);
+        }
+        return;
+    }
     if (action == GLFW_REPEAT) return; // 其它键：重复事件不改变状态
     const bool pressed = (action == GLFW_PRESS);
     switch (key) {

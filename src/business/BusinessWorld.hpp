@@ -105,6 +105,10 @@ public:
     void handlePlayerInput(const engine::shared::CameraState& cam,
                             engine::shared::PlayerInput& clicks);
 
+    // F9：把准星对着的那一个方块打包成刚体（仅第一人称）。
+    // 只看最多 kPackRaySteps 格内的第一个非空气方块；没打到就什么都不做。
+    void handlePackInFront(const engine::shared::CameraState& cam);
+
     // 请求下一次同步下发全量方块集（区块卸载等"批量增删"之后调用）。
     // 物理侧只认 SyncBlockSet 才能建立集合，逐条 RemoveBlock 卸载 4096 格不现实。
     // 只置标志：真正的下发与重试在 syncWorldToPhysics 里（指令槽位被占用时下 tick 再试）。

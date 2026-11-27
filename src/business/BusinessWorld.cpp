@@ -253,6 +253,89 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
             }
         }
     }
+
+    // F9：把准星对着的那一个方块打包成刚体（仅第一人称；见 handlePackInFront）
+    if (clicks.packInFront.exchange(false, std::memory_order_relaxed)) {
+        handlePackInFront(cam);
+    }
+}
+
+// F9：把准星对着的那一个方块打包成刚体（仅第一人称）。
+//
+// 为什么单独写一遍射线（没复用 handlePlayerInput 里的 DDA）：
+// 那段 DDA 与"点击事件 / 放置位"耦合在一个大循环里，直接抽函数的风险高于收益。
+// 这里保留同构的数学；后续统一时应合并（TODO）。
+void BusinessWorld::handlePackInFront(const engine::shared::CameraState& cam) {
+    // 只在第一人称生效：自由相机/第三人称下准星不代表玩家视线，避免误打包
+    if (cam.viewMode.load(std::memory_order_relaxed) != 1) {
+        ENGINE_LOG_DEBUG("Business", "F9 打包被忽略（非第一人称）");
+        return;
+    }
+
+    const double cx = cam.camX.load(std::memory_order_relaxed);
+    const double cy = cam.camY.load(std::memory_order_relaxed);
+    const double cz = cam.camZ.load(std::memory_order_relaxed);
+    const double yaw = cam.yaw.load(std::memory_order_relaxed);
+    const double pitch = cam.pitch.load(std::memory_order_relaxed);
+
+    // 方向必须与渲染端 / 点击射线完全一致（否则"看着对准、实际打空"）
+    const double cosP = std::cos(pitch);
+    const double dx = std::sin(yaw) * cosP;
+    const double dy = std::sin(pitch);
+    const double dz = -std::cos(yaw) * cosP;
+
+    const double ox = std::floor(cx), oy = std::floor(cy), oz = std::floor(cz);
+    const double tDeltaX = (dx != 0.0 ? std::abs(1.0 / dx) : 1e30);
+    const double tDeltaY = (dy != 0.0 ? std::abs(1.0 / dy) : 1e30);
+    const double tDeltaZ = (dz != 0.0 ? std::abs(1.0 / dz) : 1e30);
+    const int stepX = (dx > 0 ? 1 : -1);
+    const int stepY = (dy > 0 ? 1 : -1);
+    const int stepZ = (dz > 0 ? 1 : -1);
+    double tMaxX = (dx > 0 ? (ox + 1 - cx) / dx : (dx < 0 ? (ox - cx) / dx : 1e30));
+    double tMaxY = (dy > 0 ? (oy + 1 - cy) / dy : (dy < 0 ? (oy - cy) / dy : 1e30));
+    double tMaxZ = (dz > 0 ? (oz + 1 - cz) / dz : (dz < 0 ? (oz - cz) / dz : 1e30));
+
+    int ix = static_cast<int>(ox), iy = static_cast<int>(oy), iz = static_cast<int>(oz);
+    constexpr int kPackRaySteps = 8;
+
+    // 起点格直接是方块（站在方块里）→ 不动手：否则会把脚下的地打包成刚体，玩家掉坑
+    {
+        engine::shared::BlockType t0 = engine::shared::BlockType::Air;
+        if (lookupBlock(engine::shared::BlockPos{ix, iy, iz}, t0) == World::LookupResult::Occupied) {
+            return;
+        }
+    }
+
+    for (int s = 0; s < kPackRaySteps; ++s) {
+        if (tMaxX < tMaxY && tMaxX < tMaxZ) { tMaxX += tDeltaX; ix += stepX; }
+        else if (tMaxY < tMaxZ)             { tMaxY += tDeltaY; iy += stepY; }
+        else                                 { tMaxZ += tDeltaZ; iz += stepZ; }
+
+        engine::shared::BlockType hitType = engine::shared::BlockType::Air;
+        const auto q = lookupBlock(engine::shared::BlockPos{ix, iy, iz}, hitType);
+        if (q == World::LookupResult::NotLoaded) return;   // 未加载就停（不猜）
+        if (q != World::LookupResult::Occupied) continue;
+
+        const engine::shared::BlockPos hitPos{ix, iy, iz};
+        // 先从世界删掉（渲染与存档跟着变）。物理侧**不发 RemoveBlock**：
+        // PackContraption 自带"碰撞体从静态集合转移到刚体"（onPackContraption 里 erase）。
+        if (!world_.removeBlock(hitPos)) return;
+
+        engine::shared::PhysicsCommand pack;
+        pack.type = engine::shared::PhysicsCommand::Type::PackContraption;
+        pack.contraptionId = 1;   // 占位：物理侧会分配真正的结构 id
+        pack.blocks.push_back(engine::shared::Block{hitType, hitPos, -1});
+        pack.blockCount = 1;
+        if (!physicsBridge_.businessToPhysicsCommands().push(std::move(pack))) {
+            // 队列满：把方块放回去，避免"世界里凭空少一块"
+            world_.placeBlock(hitPos, hitType);
+            ENGINE_LOG_WARN("Business", "F9 打包失败（指令队列满），方块已还原");
+            return;
+        }
+        ENGINE_LOG_INFO("Business", "F9 打包：pos=(" + std::to_string(hitPos.x) + "," +
+            std::to_string(hitPos.y) + "," + std::to_string(hitPos.z) + ")");
+        return;
+    }
 }
 
 void BusinessWorld::requestPhysicsResync() {    // 只置标志；真正的下发在 syncWorldToPhysics（那里才有世界快照，且每 tick 会重试）。
