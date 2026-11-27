@@ -412,7 +412,14 @@ void PhysicsWorld::stepJolt() {
     if (!jolt_) return;
     // 没有动态刚体时跳过推进：静态世界不需要模拟。
     // 玩家是 CharacterVirtual（不是刚体，自己走碰撞查询），所以这里只负责 Dynamic 刚体。
-    if (jolt_->system.GetNumActiveBodies(JPH::EBodyType::RigidBody) == 0) return;
+    //
+    // ⚠ 这里**不能**用 GetNumActiveBodies 做判断（曾经就是这么写的）：
+    //   "active" = **醒着** 的刚体。Jolt 会在刚体静止后让它睡眠 → 活跃数变 0
+    //   → Update 永远不再被调用 → 重力再也不积分 → 刚体被冻在原地
+    //   （表现：刚体只在玩家碰到它时动一下，因为接触把它唤醒、那一 tick 才 Update）。
+    //   现在的判据是"有没有动态刚体"：刚体睡着也必须继续 Update，
+    //   由 Jolt 自己决定要不要算（全睡眠时开销很小）。
+    if (jolt_->contraptionBodies.empty()) return;
     // 固定步长 25Hz + 2 次碰撞子步（与《未来方向-物理内核替换为Jolt》§六 一致）
     jolt_->system.Update(0.04f, 2, &jolt_->tempAllocator, &jolt_->jobSystem);
 }
