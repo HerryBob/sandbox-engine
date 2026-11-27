@@ -28,6 +28,7 @@ struct PhysicsCommand {
         PackContraption,   // 打包：方块列表转移进刚体（物理形态转移，见架构 2.7）
         UnpackContraption, // 解包：刚体方块回写静态碰撞体集合
     InteractStructure, // 射线 × 刚体：在刚体上加/拆一块（物理侧权威求解并执行）
+    ProbeStructure,    // 射线 × 刚体：**只查询**（不改形状），供业务裁决这次点击该打谁
     };
     Type type = Type::MoveBlock;
     int x = 0, y = 0, z = 0;    // 目标方块坐标（PlaceBlock/RemoveBlock）。
@@ -57,6 +58,9 @@ struct PhysicsCommand {
     double rdx = 0.0, rdy = 1.0, rdz = 0.0;   // 射线方向（**单位向量**，物理侧会归一化）
     double rmaxDist = 8.0;                    // 最大距离（格）
     int    raction = 0;                       // 0 = 拆命中块，1 = 在命中面外放一块
+    // ProbeStructure：本次探测的序号。业务侧用它把回执对回原来那次点击
+    // （点击可能连发，回执按到达顺序处理，但不能假设一一对应）。
+    std::uint32_t pickSeq = 0;
 };
 
 // 物理 → 业务：刚体位置/姿态/碰撞标记回传。
@@ -73,6 +77,7 @@ struct PhysicsResult {
         BlockSetSize, CollisionEvent,
         StructureEdited,    // 刚体上的方块被放/拆：blocks = 新的局部方块表
         StructureEditMiss,  // 射线没命中任何刚体（业务据此回退到"打世界"）
+        ProbeResult,        // ProbeStructure 的回执：命中/未命中 + 命中点信息
     };
     Type       type = Type::BlockMoved;
     int        x = 0, y = 0, z = 0;        // BlockMoved：移动后坐标
@@ -103,6 +108,13 @@ struct PhysicsResult {
     // Unpacked = 世界坐标方块列表（业务据此重建 blocks_）；
     // Packed   = 刚体局部坐标方块列表（业务据此交给渲染端建网格，不必自己留副本）。
     std::vector<Block> blocks;   // B53：与文件内其它声明统一定宽
+
+    // ---- ProbeResult（射线探测回执）----
+    // 复用字段：contraptionId = 命中的结构 id；x/y/z = 命中块的**局部**坐标；
+    //           rx = 沿射线的距离 t；nx/ny/nz = 命中面的**局部**法线；
+    //           blockCount = 0 未命中 / 1 命中（省一个 bool）。
+    // 这里只加序号：点击可能连发，业务要能把回执对回原来那次点击。
+    std::uint32_t pickSeq = 0;
 };
 
 // 业务 → 渲染：刚体结构事件（打包/解包）。

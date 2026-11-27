@@ -4,6 +4,7 @@
 #include "business/World.hpp"
 #include "core/TimeManager.hpp"
 #include "shared/chunk/ChunkPos.hpp"
+#include "shared/pick/PickRay.hpp"
 #include "shared/state/CameraState.hpp"
 #include "shared/state/PlayerInput.hpp"
 
@@ -109,11 +110,11 @@ public:
     // 只看最多 kPackRaySteps 格内的第一个非空气方块；没打到就什么都不做。
     void handlePackInFront(const engine::shared::CameraState& cam);
 
-    // F10 / F11：对**刚体**放 / 拆一块。
-    // 为什么由物理侧执行：刚体的方块已从 World 移走，业务侧看不见它们；
-    // 射线求交与形状修改只能由物理线程做（见 Protocol 的 InteractStructure 注释）。
-    // action: 0 = 拆，1 = 放。
-    void handleStructureInteract(const engine::shared::CameraState& cam, int action);
+    // ---- 鼠标拾取：体素射线 + 刚体探测 → 裁决 → 唯一动作 ----
+    // 业务侧只能看见 World 里的方块（已打包的方块已移走），物理侧没有静态方块的
+    // 身份，所以一次点击要两条射线各自作答，再由 pick::resolve 裁决谁生效
+    // （规则在 shared/pick/PickRay.hpp，纯逻辑，已有自检）。
+    engine::shared::pick::PickHit raycastVoxel(const engine::shared::pick::PickRay& ray) const;
 
     // 请求下一次同步下发全量方块集（区块卸载等"批量增删"之后调用）。
     // 物理侧只认 SyncBlockSet 才能建立集合，逐条 RemoveBlock 卸载 4096 格不现实。
@@ -133,6 +134,32 @@ public:
 
 private:
     void maybeLog();
+
+    // 一次点击的"待裁决"记录：体素射线已经算完，等物理侧的刚体探测回执。
+    struct PendingPick {
+        std::uint32_t seq = 0;                        // 与物理回执对应
+        engine::shared::pick::PickRay ray;            // 冻结的射线（两条射线共用）
+        engine::shared::pick::PickHit blockHit;       // 体素结果（已算）
+        bool leftButton = true;
+        int  ageTicks = 0;                            // 超时用（对端慢不能丢点击）
+    };
+    static constexpr int kMaxPendingPicks = 8;        // 连点堆积上限
+    static constexpr int kPickTimeoutTicks = 3;       // 3 tick（120ms）没回执就按"无刚体"处理
+
+    // 物理回执到了 → 裁决 → 执行（恰好一个动作生效）
+    void resolvePick(const PendingPick& pick, const engine::shared::pick::PickHit& bodyHit,
+                     bool timedOut);
+    // 把裁决结果落到 world / 发给物理
+    void applyPick(const PendingPick& pick, const engine::shared::pick::PickAction& action);
+    // 对本 tick 之前发出、仍无回执的点击做超时处理
+    void expirePendingPicks();
+    // 发一条 ProbeStructure（只查询）。返回 false = 队列满（调用方按"无刚体"处理）。
+    bool pushProbe(const PendingPick& pick);
+    // 发一条 InteractStructure（执行；探测阶段已完成）
+    void sendStructureInteract(const engine::shared::pick::PickRay& ray, int action);
+
+    std::vector<PendingPick> pendingPicks_;
+    std::uint32_t            nextPickSeq_ = 1;
 
     // 世界（状态层）：方块数据 + 锁 + 查询 + 动作入口（World 内部加锁）。
     engine::business::World world_;

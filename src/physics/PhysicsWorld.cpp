@@ -264,6 +264,9 @@ void PhysicsWorld::applyCommands(engine::core::SPSCQueue<engine::shared::Physics
         case engine::shared::PhysicsCommand::Type::InteractStructure:
             onInteractStructure(cmd);
             break;
+        case engine::shared::PhysicsCommand::Type::ProbeStructure:
+            onProbeStructure(cmd);
+            break;
         }
         processedCommandCount_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -571,33 +574,29 @@ void PhysicsWorld::onRemoveBlock(const engine::shared::PhysicsCommand& cmd) {
 // 所以局部点 = inverse(bodyTransform) * 世界命中点；方块坐标 = floor(局部点 + 帧偏置)
 // （因为方块中心 = p + 0.5 − bias，见 shared/block/StructureFrame.hpp）。
 // 面法线：局部命中点到方块中心的位移里，绝对值最大的那个轴。
-void PhysicsWorld::onInteractStructure(const engine::shared::PhysicsCommand& cmd) {
-    auto pushMiss = [this]() {
-        // 记一条日志：交互是"按键驱动"的低频操作，打出原因比静默失败更好排查
-        // （例如"射线打空了"和"目标格被占用"在玩家看来都是"没反应"）。
-        ENGINE_LOG_INFO("Physics", "[刚体交互] 未生效（射线未命中刚体 / 目标格不可用）");
-        engine::shared::PhysicsResult r;
-        r.type = engine::shared::PhysicsResult::Type::StructureEditMiss;
-        pendingReceipts_.push_back(r);
-    };
-    if (!jolt_) { pushMiss(); return; }
+// 射线 → 刚体命中信息。onInteractStructure（执行）与 onProbeStructure（只查询）共用：
+// 两条命令的"命中点 → 方块局部坐标 → 面法线"推导必须完全一致，否则裁决与执行会错位。
+bool PhysicsWorld::castStructureRay(const engine::shared::PhysicsCommand& cmd,
+                                    StructureRayHit& out) {
+    if (!jolt_) return false;
 
     JPH::Vec3 dir(static_cast<float>(cmd.rdx), static_cast<float>(cmd.rdy),
                   static_cast<float>(cmd.rdz));
-    if (dir.LengthSq() < 1e-8f) { pushMiss(); return; }
+    if (dir.LengthSq() < 1e-8f) return false;
     dir = dir.Normalized();
     const JPH::RRayCast ray(JPH::RVec3(cmd.rox, cmd.roy, cmd.roz),
                             JPH::Vec3(dir * static_cast<float>(cmd.rmaxDist)));
     JPH::RayCastResult hit;
-    if (!jolt_->system.GetNarrowPhaseQuery().CastRay(ray, hit)) { pushMiss(); return; }
+    if (!jolt_->system.GetNarrowPhaseQuery().CastRay(ray, hit)) return false;
+
     // 命中的是不是刚体？（静态 chunk 体不算：那种情况业务侧自己会打中世界）
     int structureId = -1;
     for (const auto& [sid, bid] : jolt_->contraptionBodies) {
         if (bid == hit.mBodyID) { structureId = sid; break; }
     }
-    if (structureId < 0) { pushMiss(); return; }
+    if (structureId < 0) return false;
     PhysicsBody* body = state_.findBodyByStructure(structureId);
-    if (body == nullptr) { pushMiss(); return; }
+    if (body == nullptr) return false;
 
     JPH::BodyInterface& bi = jolt_->system.GetBodyInterface();
     const JPH::Vec3 worldPoint = ray.GetPointOnRay(hit.mFraction);
@@ -611,24 +610,103 @@ void PhysicsWorld::onInteractStructure(const engine::shared::PhysicsCommand& cmd
         worldPoint.GetY() - xform.GetTranslation().GetY(),
         worldPoint.GetZ() - xform.GetTranslation().GetZ());
     const JPH::Vec3 local = invRot * rel;
-
     const double biasX = body->frameBiasX, biasY = body->frameBiasY, biasZ = body->frameBiasZ;
-    const int bx = static_cast<int>(std::floor(local.GetX() + biasX));
-    const int by = static_cast<int>(std::floor(local.GetY() + biasY));
-    const int bz = static_cast<int>(std::floor(local.GetZ() + biasZ));
 
-    // 命中块在局部坐标系里的中心
+    auto findBlockAt = [body](int x, int y, int z) {
+        for (const auto& b : body->blocks)
+            if (b.pos.x == x && b.pos.y == y && b.pos.z == z) return true;
+        return false;
+    };
+
+    // 命中点 → 方块格。
+    // **坑（2026-11-27 实测）**：命中点常常正好落在格子边界上（例如打在 +z 面上，
+    // 局部 z = 1.5），此时 floor(局部 + 偏置) 会取到体外的空格（1.5+0.5 → 2），
+    // 于是"看得见、点得中，却判成没命中"，表现为刚体上的放/拆时灵时不灵。
+    // 解法：把命中点**沿射线方向回退一点点**，落进实体内侧再取格
+    // （射线是从外面打进来的，回退必然进入被击中的那一格）。
+    const JPH::Vec3 dirLocal = invRot * JPH::Vec3(static_cast<float>(cmd.rdx),
+                                                  static_cast<float>(cmd.rdy),
+                                                  static_cast<float>(cmd.rdz)).Normalized();
+    const JPH::Vec3 inside = local - dirLocal * 1e-3f;
+    int bx = static_cast<int>(std::floor(inside.GetX() + biasX));
+    int by = static_cast<int>(std::floor(inside.GetY() + biasY));
+    int bz = static_cast<int>(std::floor(inside.GetZ() + biasZ));
+
+    // 兜底：回退后仍不在体内（掠射/角点/浮点误差）→ 在 6 邻居里找最近的实心格。
+    // 只在"取到的格子不存在"时才走这条，正常命中不受影响。
+    if (!findBlockAt(bx, by, bz)) {
+        static constexpr int kOff[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+        int bestX = bx, bestY = by, bestZ = bz;
+        double bestDist = 1e30;
+        bool found = false;
+        for (const auto& o : kOff) {
+            const int cx2 = bx + o[0], cy2 = by + o[1], cz2 = bz + o[2];
+            if (!findBlockAt(cx2, cy2, cz2)) continue;
+            const double cxx = static_cast<double>(cx2) + 0.5 - biasX;
+            const double cyy = static_cast<double>(cy2) + 0.5 - biasY;
+            const double czz = static_cast<double>(cz2) + 0.5 - biasZ;
+            const double dx2 = local.GetX() - cxx, dy2 = local.GetY() - cyy, dz2 = local.GetZ() - czz;
+            const double d2 = dx2*dx2 + dy2*dy2 + dz2*dz2;   // 比距离平方即可
+            if (d2 < bestDist) { bestDist = d2; bestX = cx2; bestY = cy2; bestZ = cz2; found = true; }
+        }
+        if (!found) return false;   // 命中点周围没有实心格：不是可用命中
+        bx = bestX; by = bestY; bz = bestZ;
+    }
+
+    // 命中块在局部坐标系里的中心 → 位移里绝对值最大的轴就是命中面
     const double cx = static_cast<double>(bx) + 0.5 - biasX;
     const double cy = static_cast<double>(by) + 0.5 - biasY;
     const double cz = static_cast<double>(bz) + 0.5 - biasZ;
     const double ddx = local.GetX() - cx, ddy = local.GetY() - cy, ddz = local.GetZ() - cz;
     const double ax = std::fabs(ddx), ay = std::fabs(ddy), az = std::fabs(ddz);
-    engine::shared::BlockPos normal{0, 0, 0};
-    if (ax >= ay && ax >= az)      normal.x = (ddx > 0) ? 1 : -1;
-    else if (ay >= az)             normal.y = (ddy > 0) ? 1 : -1;
-    else                            normal.z = (ddz > 0) ? 1 : -1;
+    int nx = 0, ny = 0, nz = 0;
+    if (ax >= ay && ax >= az)      nx = (ddx > 0) ? 1 : -1;
+    else if (ay >= az)             ny = (ddy > 0) ? 1 : -1;
+    else                           nz = (ddz > 0) ? 1 : -1;
 
-    const engine::shared::BlockPos hitPos{bx, by, bz};
+    out.structureId = structureId;
+    out.t = static_cast<double>(hit.mFraction) * cmd.rmaxDist;
+    out.bx = bx; out.by = by; out.bz = bz;
+    out.nx = nx; out.ny = ny; out.nz = nz;
+    return true;
+}
+
+// 射线探测：**只查询，不修改**。业务用它裁决"这次点击该打刚体还是打方块"。
+void PhysicsWorld::onProbeStructure(const engine::shared::PhysicsCommand& cmd) {
+    StructureRayHit h;
+    const bool ok = castStructureRay(cmd, h);
+
+    engine::shared::PhysicsResult r;
+    r.type = engine::shared::PhysicsResult::Type::ProbeResult;
+    r.pickSeq = cmd.pickSeq;
+    r.blockCount = ok ? 1 : 0;                  // 0 = 未命中（见协议注释）
+    if (ok) {
+        r.contraptionId = h.structureId;
+        r.x = h.bx; r.y = h.by; r.z = h.bz;     // 命中块**局部**坐标
+        r.rx = h.t;
+        r.nx = h.nx; r.ny = h.ny; r.nz = h.nz;
+    }
+    pendingReceipts_.push_back(r);
+}
+
+void PhysicsWorld::onInteractStructure(const engine::shared::PhysicsCommand& cmd) {
+    auto pushMiss = [this, &cmd]() {
+        // 记一条日志：交互是"按键驱动"的低频操作，打出原因比静默失败更好排查
+        // （例如"射线打空了"和"目标格被占用"在玩家看来都是"没反应"）。
+        ENGINE_LOG_INFO("Physics", "[刚体交互] 未生效（射线未命中刚体 / 目标格不可用）");
+        engine::shared::PhysicsResult r;
+        r.type = engine::shared::PhysicsResult::Type::StructureEditMiss;
+        r.pickSeq = cmd.pickSeq;
+        pendingReceipts_.push_back(r);
+    };
+
+    StructureRayHit h;
+    if (!castStructureRay(cmd, h)) { pushMiss(); return; }
+    const int structureId = h.structureId;
+    PhysicsBody* body = state_.findBodyByStructure(structureId);
+    if (body == nullptr) { pushMiss(); return; }
+    const engine::shared::BlockPos hitPos{h.bx, h.by, h.bz};
+    const engine::shared::BlockPos normal{h.nx, h.ny, h.nz};
     auto findBlock = [body](const engine::shared::BlockPos& p) {
         for (auto it = body->blocks.begin(); it != body->blocks.end(); ++it)
             if (it->pos == p) return it;
@@ -657,6 +735,7 @@ void PhysicsWorld::onInteractStructure(const engine::shared::PhysicsCommand& cmd
     // 回执：带编辑后的完整局部方块表 → 渲染端重建该结构的网格
     engine::shared::PhysicsResult r;
     r.type = engine::shared::PhysicsResult::Type::StructureEdited;
+    r.pickSeq = cmd.pickSeq;
     r.contraptionId = structureId;
     r.blockCount = body->blockCount;
     r.x = hitPos.x; r.y = hitPos.y; r.z = hitPos.z;   // 被编辑的局部坐标（诊断用）

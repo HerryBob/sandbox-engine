@@ -92,6 +92,18 @@ private:
     // 射线 × 刚体：命中刚体则在其上加/拆一块，并回执"编辑后的方块表"。
     // 没命中任何刚体 → 回一条 StructureEditMiss（业务据此回退到"打世界"）。
     void onInteractStructure(const engine::shared::PhysicsCommand& cmd);
+    // 射线探测（**只查询**，绝不修改形状）：回执 ProbeResult 给业务做裁决。
+    // 与 onInteractStructure 共用同一套"命中点 → 方块局部坐标 → 面法线"推导，
+    // 区别只在于这里不落任何修改。
+    void onProbeStructure(const engine::shared::PhysicsCommand& cmd);
+    // 射线 → 刚体命中信息（两条命令共用）。返回 false 表示没命中刚体。
+    struct StructureRayHit {
+        int    structureId = -1;
+        double t = 0.0;
+        int    bx = 0, by = 0, bz = 0;   // 命中块**局部**坐标
+        int    nx = 0, ny = 0, nz = 0;   // 命中面法线（局部单位轴）
+    };
+    bool castStructureRay(const engine::shared::PhysicsCommand& cmd, StructureRayHit& out);
     // 按 body.blocks 重建复合形状（编辑方块后调用）。失败返回 false。
     bool rebuildContraptionShape(int structureId);
     void onUnpackContraption(const engine::shared::PhysicsCommand& cmd);

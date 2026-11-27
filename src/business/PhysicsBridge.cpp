@@ -136,6 +136,10 @@ void PhysicsBridge::receiveResultsFromPhysics(
             structureEditedCount_.fetch_add(1, std::memory_order_relaxed);
             break;
         }
+        case engine::shared::PhysicsResult::Type::ProbeResult:
+            // 射线探测回执（只查询）：交给业务做"打方块还是打刚体"的裁决
+            probeResults_.push_back(res);
+            break;
         case engine::shared::PhysicsResult::Type::StructureEditMiss:
             // 射线没命中刚体：置标志，业务下一 tick 回退到"打世界"（见 pendingInteract_）
             lastStructureMiss_.fetch_add(1, std::memory_order_relaxed);

@@ -73,6 +73,28 @@ void BusinessWorld::receiveResultsFromPhysics() {
     bodyEvents_.clear();
     std::optional<engine::shared::BodyPose> bodyPose;
     physicsBridge_.receiveResultsFromPhysics(&bodyEvents_, &bodyPose);
+
+    // 射线探测回执 → 裁决（"这次点击打方块还是打刚体"，恰好一个生效）。
+    // 只查询阶段的回执，物理侧此时还没修改任何东西；真正的修改在 applyPick 里才发。
+    for (const auto& pr : physicsBridge_.probeResults()) {
+        if (pr.type != engine::shared::PhysicsResult::Type::ProbeResult) continue;
+        auto it = std::find_if(pendingPicks_.begin(), pendingPicks_.end(),
+                               [&pr](const PendingPick& p) { return p.seq == pr.pickSeq; });
+        if (it == pendingPicks_.end()) continue;   // 已超时处理过：忽略迟到的回执
+
+        engine::shared::pick::PickHit bodyHit;
+        if (pr.blockCount != 0) {
+            using engine::shared::pick::HitKind;
+            bodyHit.kind = HitKind::Body;
+            bodyHit.t = pr.rx;
+            bodyHit.structureId = pr.contraptionId;
+            bodyHit.lx = pr.x; bodyHit.ly = pr.y; bodyHit.lz = pr.z;
+            bodyHit.nx = pr.nx; bodyHit.ny = pr.ny; bodyHit.nz = pr.nz;
+        }
+        PendingPick pick = *it;
+        pendingPicks_.erase(it);
+        resolvePick(pick, bodyHit, /*timedOut=*/false);
+    }
     // 刚体数据转给渲染桥：结构事件逐条送（事件流），位姿只送最新（状态）。
     // push 失败即逻辑异常（队列已从 16 提到 64），不在此处重试。
     // B95：**检查返回值** —— 事件流丢了会导致渲染端多一个/漏一个网格，
@@ -175,6 +197,64 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
     const double dy = std::sin(pitch);
     const double dz = -std::cos(yaw) * cosP;
 
+
+    // 逐条消费：一个 tick 内落进几次点击就处理几次。
+    // 旧实现用"序号 + 按钮"两个原子变量、业务侧按序号跳号，一个 40ms tick 内的第二次点击会被吞掉。
+    engine::shared::ClickEvent ev;
+    while (clicks.clicks.pop(ev)) {
+        // 一次点击 = 一次拾取：
+        //   ① 冻结射线（两条射线共用同一份，保证可比）
+        //   ② 业务侧立刻算体素结果
+        //   ③ 发探测命令给物理（**只查询**）
+        //   ④ 回执到了再裁决（见 resolvePick）—— 物理侧此时还没改任何东西
+        engine::shared::pick::PickRay ray;
+        ray.ox = cx; ray.oy = cy; ray.oz = cz;
+        ray.dx = dx; ray.dy = dy; ray.dz = dz;
+        ray.maxDist = 8.0;
+
+        PendingPick pick;
+        pick.seq = nextPickSeq_++;
+        pick.ray = ray;
+        pick.blockHit = raycastVoxel(ray);
+        pick.leftButton = (ev.button == 0);
+
+        // 队列满 = 探测发不出去：直接按"无刚体"处理，点击不能丢
+        if (!pushProbe(pick)) {
+            resolvePick(pick, engine::shared::pick::PickHit{}, /*timedOut=*/true);
+            continue;
+        }
+        pendingPicks_.push_back(pick);
+        // 连点堆积：超上限时把最旧的按超时处理（宁可打方块，也不无限等待）
+        while (static_cast<int>(pendingPicks_.size()) > kMaxPendingPicks) {
+            PendingPick old = pendingPicks_.front();
+            pendingPicks_.erase(pendingPicks_.begin());
+            resolvePick(old, engine::shared::pick::PickHit{}, /*timedOut=*/true);
+        }
+    }
+
+    // 超时兜底：对端慢/丢回执时，等满 kPickTimeoutTicks 就按"无刚体"处理
+    expirePendingPicks();
+
+    // F9：把准星对着的那一个方块打包成刚体（仅第一人称；见 handlePackInFront）
+    if (clicks.packInFront.exchange(false, std::memory_order_relaxed)) {
+        handlePackInFront(cam);
+    }
+}
+
+// ---- 鼠标拾取：体素射线 + 刚体探测 → 裁决 → 唯一动作 ----
+//
+// 为什么体素射线单独实现一份：原来它内联在 handlePlayerInput 的点击循环里，
+// 与"放置位反推"耦合；现在点击要先算体素结果、再等物理回执，必须能独立调用。
+// 数学与旧实现完全一致（含 B97 未加载即停、B101 起点格参与判定）。
+engine::shared::pick::PickHit BusinessWorld::raycastVoxel(
+    const engine::shared::pick::PickRay& ray) const {
+    using engine::shared::pick::PickHit;
+    using engine::shared::pick::HitKind;
+
+    PickHit out;
+    const double cx = ray.ox, cy = ray.oy, cz = ray.oz;
+    const double dx = ray.dx, dy = ray.dy, dz = ray.dz;
+    // 起点格（floor）与各轴步进量：与旧内联 DDA 完全相同的数学
     const double ox = std::floor(cx), oy = std::floor(cy), oz = std::floor(cz);
     const double tDeltaX = (dx != 0.0 ? std::abs(1.0 / dx) : 1e30);
     const double tDeltaY = (dy != 0.0 ? std::abs(1.0 / dy) : 1e30);
@@ -183,120 +263,139 @@ void BusinessWorld::handlePlayerInput(const engine::shared::CameraState& cam,
     const int stepY = (dy > 0 ? 1 : -1);
     const int stepZ = (dz > 0 ? 1 : -1);
 
-    // 逐条消费：一个 tick 内落进几次点击就处理几次。
-    // 旧实现用"序号 + 按钮"两个原子变量、业务侧按序号跳号，一个 40ms tick 内的第二次点击会被吞掉。
-    engine::shared::ClickEvent ev;
-    while (clicks.clicks.pop(ev)) {
-        // DDA 状态每次点击独立 → 在循环内初始化
-        double tMaxX = (dx > 0 ? (ox + 1 - cx) / dx : (dx < 0 ? (ox - cx) / dx : 1e30));
-        double tMaxY = (dy > 0 ? (oy + 1 - cy) / dy : (dy < 0 ? (oy - cy) / dy : 1e30));
-        double tMaxZ = (dz > 0 ? (oz + 1 - cz) / dz : (dz < 0 ? (oz - cz) / dz : 1e30));
+    double tMaxX = (dx > 0 ? (ox + 1 - cx) / dx : (dx < 0 ? (ox - cx) / dx : 1e30));
+    double tMaxY = (dy > 0 ? (oy + 1 - cy) / dy : (dy < 0 ? (oy - cy) / dy : 1e30));
+    double tMaxZ = (dz > 0 ? (oz + 1 - cz) / dz : (dz < 0 ? (oz - cz) / dz : 1e30));
 
-        int ix = static_cast<int>(ox), iy = static_cast<int>(oy), iz = static_cast<int>(oz);
-        int dirX = 0, dirY = 0, dirZ = 0;   // 进入命中格的推进方向（反推放置位用）
-        bool hit = false;
-        int hx = 0, hy = 0, hz = 0;         // 命中格（左键破坏目标）
-        int px = ix, py = iy, pz = iz;      // 放置位（默认 = 起点格）
+    int ix = static_cast<int>(ox), iy = static_cast<int>(oy), iz = static_cast<int>(oz);
+    int dirX = 0, dirY = 0, dirZ = 0;   // 进入命中格的推进方向（反推放置位用）
 
-        // B101：**起点格也参与判定**。原来是"先推进、再检查"，所以站在方块里时
-        // 打不到身上这一格（射线第一格永远是邻格）。先探一次起点，再决定要不要推进。
-        {
-            engine::shared::BlockType t0 = engine::shared::BlockType::Air;
-            if (lookupBlock(engine::shared::BlockPos{ ix, iy, iz }, t0) ==
-                World::LookupResult::Occupied) {
-                hit = true; hx = ix; hy = iy; hz = iz;
-                px = ix; py = iy; pz = iz;  // 无"前格"：放置位退化为自身（会被裁决拒绝）
-            }
-        }
-
-        // ⑤ DDA 推进：最多 8 格（射线距离上限）。每次选最小的 tMax 推进对应轴
-        for (int s = 0; s < 8 && !hit; ++s) {
-            if (tMaxX < tMaxY && tMaxX < tMaxZ) {
-                tMaxX += tDeltaX; ix += stepX; dirX = stepX; dirY = 0; dirZ = 0;
-            }
-            else if (tMaxY < tMaxZ) {
-                tMaxY += tDeltaY; iy += stepY; dirX = 0; dirY = stepY; dirZ = 0;
-            }
-            else {
-                tMaxZ += tDeltaZ; iz += stepZ; dirX = 0; dirY = 0; dirZ = stepZ;
-            }
-            // B97：改用三态查询。原来用 findBlock（两态），把"所在 chunk 未加载"
-            // 和"这里是空气"当成了同一件事 —— 射线会直接穿过未加载区域，
-            // 命中背后的方块、或者算出很远的放置位，表现为"放块位置随机"。
-            // 现在遇到未加载就结束射线：宁可这一下不生效，也不猜。
-            engine::shared::BlockType hitType = engine::shared::BlockType::Air;
-            const auto q = lookupBlock(engine::shared::BlockPos{ ix, iy, iz }, hitType);
-            if (q == World::LookupResult::NotLoaded) break;   // 未加载：射线到此为止
-            if (q == World::LookupResult::Occupied) {
-                hit = true;
-                hx = ix; hy = iy; hz = iz;
-                px = ix - dirX; py = iy - dirY; pz = iz - dirZ;  // 放置位 = 命中格前一格
-                break;
-            }
-        }
-
-        playerActions_.fetch_add(1, std::memory_order_relaxed);
-        if (!hit) continue;  // 8 格内没碰到方块：本次点击已消费，无事可做
-
-        if (ev.button == 0) {  // 左键：破坏命中格
-            // B99：检查返回值 —— 失败说明裁决拒绝（方块已不存在），以前完全静默。
-            if (!removeBlock(engine::shared::BlockPos{ hx, hy, hz })) {
-                ENGINE_LOG_DEBUG("Business", "破坏被拒绝（目标已不是方块）");
-            }
-        }
-        else if (ev.button == 1) {  // 右键：在放置位放 Stone
-            // 方块 id 由注册表运行期分配，不能写死枚举值——读 freeze 后解析好的缓存。
-            // B99：同上，放置失败（位置已占用）以前也是静默的。
-            if (!placeBlock(engine::shared::BlockPos{ px, py, pz },
-                    static_cast<engine::shared::BlockType>(
-                        engine::registry::g_builtinBlockIds.stone))) {
-                ENGINE_LOG_DEBUG("Business", "放置被拒绝（位置已占用）");
-            }
+    // B101：起点格也参与判定（站在方块里时能打到身上这一格）
+    {
+        engine::shared::BlockType t0 = engine::shared::BlockType::Air;
+        if (lookupBlock(engine::shared::BlockPos{ ix, iy, iz }, t0) ==
+            World::LookupResult::Occupied) {
+            out.kind = HitKind::Block;
+            out.t = 0.0;
+            out.bx = ix; out.by = iy; out.bz = iz;
+            out.px = ix; out.py = iy; out.pz = iz;   // 无前格：放置位退化为自身（会被拒）
+            out.blockType = static_cast<std::uint16_t>(t0);
+            return out;
         }
     }
 
-    // F9：把准星对着的那一个方块打包成刚体（仅第一人称；见 handlePackInFront）
-    if (clicks.packInFront.exchange(false, std::memory_order_relaxed)) {
-        handlePackInFront(cam);
+    // DDA 推进：最多 8 格
+    double tEntry = 0.0;
+    for (int s = 0; s < 8; ++s) {
+        if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+            tEntry = tMaxX; tMaxX += tDeltaX;
+            ix += stepX; dirX = stepX; dirY = 0; dirZ = 0;
+        } else if (tMaxY < tMaxZ) {
+            tEntry = tMaxY; tMaxY += tDeltaY;
+            iy += stepY; dirX = 0; dirY = stepY; dirZ = 0;
+        } else {
+            tEntry = tMaxZ; tMaxZ += tDeltaZ;
+            iz += stepZ; dirX = 0; dirY = 0; dirZ = stepZ;
+        }
+        if (tEntry > ray.maxDist) break;   // 超出射线长度
+        // B97：三态查询 —— 遇到未加载就结束射线（宁可这一下不生效，也不猜）
+        engine::shared::BlockType hitType = engine::shared::BlockType::Air;
+        const auto q = lookupBlock(engine::shared::BlockPos{ ix, iy, iz }, hitType);
+        if (q == World::LookupResult::NotLoaded) break;
+        if (q == World::LookupResult::Occupied) {
+            out.kind = HitKind::Block;
+            out.t = tEntry;
+            out.bx = ix; out.by = iy; out.bz = iz;
+            out.px = ix - dirX; out.py = iy - dirY; out.pz = iz - dirZ;
+            out.blockType = static_cast<std::uint16_t>(hitType);
+            return out;
+        }
     }
-
-    // F10 / F11：对刚体放 / 拆一块（物理侧求解射线并执行；见 handleStructureInteract）
-    if (clicks.interactPlace.exchange(false, std::memory_order_relaxed)) {
-        handleStructureInteract(cam, 1);
-    }
-    if (clicks.interactRemove.exchange(false, std::memory_order_relaxed)) {
-        handleStructureInteract(cam, 0);
-    }
+    return out;   // 未命中：kind 保持 None，t = 1e30（裁决时视为"更远"）
 }
 
-// F10 / F11：对刚体放 / 拆一块。
-// 业务只负责"把相机射线发下去"：命中判定与形状修改都在物理线程（那里才有刚体）。
-// 这里不判断视角（第一/第三人称都能用）—— 用的是相机射线，第三人称下等于"从相机看过去"。
-void BusinessWorld::handleStructureInteract(const engine::shared::CameraState& cam, int action) {
-    const double cx = cam.camX.load(std::memory_order_relaxed);
-    const double cy = cam.camY.load(std::memory_order_relaxed);
-    const double cz = cam.camZ.load(std::memory_order_relaxed);
-    const double yaw = cam.yaw.load(std::memory_order_relaxed);
-    const double pitch = cam.pitch.load(std::memory_order_relaxed);
+// 发一条射线探测命令（只查询，不修改）。返回 false 表示队列满。
+bool BusinessWorld::pushProbe(const PendingPick& pick) {
+    engine::shared::PhysicsCommand cmd;
+    cmd.type = engine::shared::PhysicsCommand::Type::ProbeStructure;
+    cmd.rox = pick.ray.ox; cmd.roy = pick.ray.oy; cmd.roz = pick.ray.oz;
+    cmd.rdx = pick.ray.dx; cmd.rdy = pick.ray.dy; cmd.rdz = pick.ray.dz;
+    cmd.rmaxDist = pick.ray.maxDist;
+    cmd.pickSeq = pick.seq;
+    if (!physicsBridge_.pushInteractCommand(cmd)) {
+        ENGINE_LOG_WARN("Business", "射线探测指令队列满（本次按无刚体处理）");
+        return false;
+    }
+    return true;
+}
 
-    const double cosP = std::cos(pitch);
+// 发一条真正的刚体编辑（裁决之后才发；物理侧此时才改形状）。
+void BusinessWorld::sendStructureInteract(const engine::shared::pick::PickRay& ray, int action) {
     engine::shared::PhysicsCommand cmd;
     cmd.type = engine::shared::PhysicsCommand::Type::InteractStructure;
-    cmd.rox = cx; cmd.roy = cy; cmd.roz = cz;
-    cmd.rdx = std::sin(yaw) * cosP;
-    cmd.rdy = std::sin(pitch);
-    cmd.rdz = -std::cos(yaw) * cosP;
-    cmd.rmaxDist = 8.0;
+    cmd.rox = ray.ox; cmd.roy = ray.oy; cmd.roz = ray.oz;
+    cmd.rdx = ray.dx; cmd.rdy = ray.dy; cmd.rdz = ray.dz;
+    cmd.rmaxDist = ray.maxDist;
     cmd.raction = action;
     cmd.blockType = static_cast<int>(engine::registry::g_builtinBlockIds.stone);
-
     if (!physicsBridge_.pushInteractCommand(cmd)) {
         ENGINE_LOG_WARN("Business", "刚体交互指令队列满，本次忽略");
-        return;
     }
-    ENGINE_LOG_INFO("Business", std::string("刚体交互：") +
-        (action == 0 ? "拆一块" : "放一块"));
 }
+
+// 裁决并执行：两个射线结果 → 恰好一个动作（规则见 shared/pick/PickRay.hpp）
+void BusinessWorld::resolvePick(const PendingPick& pick,
+                                const engine::shared::pick::PickHit& bodyHit, bool timedOut) {
+    using namespace engine::shared::pick;
+    const PickAction action = resolve(pick.blockHit, bodyHit, timedOut, pick.leftButton,
+        static_cast<std::uint16_t>(engine::registry::g_builtinBlockIds.stone));
+    // 一次点击什么都没发生（射线打空 / 目标不可用）时留一条 DEBUG：
+    // 玩家看到的是"点了没反应"，排查时需要知道是"没命中"还是"被拒"。
+    if (action.kind == PickActionKind::None) {
+        ENGINE_LOG_DEBUG("Business", "拾取无动作（两条射线都没命中可用目标）");
+    }
+    applyPick(pick, action);
+}
+
+void BusinessWorld::applyPick(const PendingPick& pick, const engine::shared::pick::PickAction& a) {
+    using engine::shared::pick::PickActionKind;
+    switch (a.kind) {
+    case PickActionKind::BreakBlock:
+        if (!removeBlock(engine::shared::BlockPos{ a.block.bx, a.block.by, a.block.bz })) {
+            ENGINE_LOG_DEBUG("Business", "破坏被拒绝（目标已不是方块）");
+        }
+        break;
+    case PickActionKind::PlaceBlock:
+        // 方块 id 由注册表运行期分配，不能写死枚举值 —— 用 freeze 后解析好的缓存
+        if (!placeBlock(engine::shared::BlockPos{ a.block.px, a.block.py, a.block.pz },
+                static_cast<engine::shared::BlockType>(a.block.blockType))) {
+            ENGINE_LOG_DEBUG("Business", "放置被拒绝（位置已占用）");
+        }
+        break;
+    case PickActionKind::BreakBodyBlock:
+        sendStructureInteract(pick.ray, 0);
+        break;
+    case PickActionKind::PlaceBodyBlock:
+        sendStructureInteract(pick.ray, 1);
+        break;
+    case PickActionKind::None:
+    default:
+        break;
+    }
+}
+
+void BusinessWorld::expirePendingPicks() {
+    for (auto it = pendingPicks_.begin(); it != pendingPicks_.end();) {
+        if (++it->ageTicks > kPickTimeoutTicks) {
+            PendingPick old = *it;
+            it = pendingPicks_.erase(it);
+            resolvePick(old, engine::shared::pick::PickHit{}, /*timedOut=*/true);
+        } else {
+            ++it;
+        }
+    }
+}
+
 // F9：把准星对着的那一个方块打包成刚体（仅第一人称）。
 //
 // 为什么单独写一遍射线（没复用 handlePlayerInput 里的 DDA）：
@@ -320,7 +419,6 @@ void BusinessWorld::handlePackInFront(const engine::shared::CameraState& cam) {
     const double dx = std::sin(yaw) * cosP;
     const double dy = std::sin(pitch);
     const double dz = -std::cos(yaw) * cosP;
-
     const double ox = std::floor(cx), oy = std::floor(cy), oz = std::floor(cz);
     const double tDeltaX = (dx != 0.0 ? std::abs(1.0 / dx) : 1e30);
     const double tDeltaY = (dy != 0.0 ? std::abs(1.0 / dy) : 1e30);
@@ -328,6 +426,7 @@ void BusinessWorld::handlePackInFront(const engine::shared::CameraState& cam) {
     const int stepX = (dx > 0 ? 1 : -1);
     const int stepY = (dy > 0 ? 1 : -1);
     const int stepZ = (dz > 0 ? 1 : -1);
+
     double tMaxX = (dx > 0 ? (ox + 1 - cx) / dx : (dx < 0 ? (ox - cx) / dx : 1e30));
     double tMaxY = (dy > 0 ? (oy + 1 - cy) / dy : (dy < 0 ? (oy - cy) / dy : 1e30));
     double tMaxZ = (dz > 0 ? (oz + 1 - cz) / dz : (dz < 0 ? (oz - cz) / dz : 1e30));
