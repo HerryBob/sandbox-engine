@@ -11,6 +11,7 @@
 #include "save/SaveMenu.hpp"
 #include "shared/chunk/ChunkData.hpp"
 #include "business/ui/HotbarUi.hpp"
+#include "business/ui/UiLayouts.hpp"
 #include "shared/pick/PickRay.hpp"
 #include "shared/ui/UiCmd.hpp"
 #include "shared/pick/StructureRay.hpp"
@@ -691,7 +692,57 @@ bool uiLayout() {
         if (cmds[1].dst.x < sel.x - 0.01f || cmds[1].dst.x > sel.x + sel.w) return false;
     }
 
-    std::cout << "UI 布局：居中/九宫格无缝/快捷栏槽位/指令表 自检通过\n";
+    // ⑤ 每图布局表：格数与实测一致；cell(i) 与 hit() 必须互为逆运算；
+    //    槽位不得越出内容区（美术换图时最容易错的就是这几个数字）
+    {
+        using engine::business::ui::SlotGrid;
+        using engine::business::ui::UiLayout;
+
+        auto checkGrid = [](const SlotGrid& g, int expectCols, int expectRows) {
+            if (g.cols != expectCols || g.rows != expectRows) return false;
+            if (!g.valid() || g.count() != expectCols * expectRows) return false;
+            for (int i = 0; i < g.count(); ++i) {
+                const Rect c = g.cell(i);
+                if (c.w <= 0.0f || c.h <= 0.0f) return false;
+                // 用格子中心反查索引，必须回到 i
+                if (g.hit(c.x + c.w * 0.5f, c.y + c.h * 0.5f) != i) return false;
+            }
+            // 格间缝隙不该命中
+            if (g.cols > 1) {
+                const Rect c0 = g.cell(0);
+                if (g.hit(c0.x + c0.w + 1.0f, c0.y + c0.h * 0.5f) != -1) return false;
+            }
+            // 越界不命中
+            if (g.hit(-100.0f, -100.0f) != -1) return false;
+            return true;
+        };
+
+        const UiLayout& bar = engine::business::ui::layoutHotbar();
+        if (!checkGrid(bar.mainGrid, 9, 1)) return false;
+
+        const UiLayout& bag = engine::business::ui::layoutBackpack();
+        if (!checkGrid(bag.mainGrid, 9, 6)) return false;
+        if (!checkGrid(bag.bottomBar, 9, 1)) return false;
+
+        const UiLayout& craft = engine::business::ui::layoutCrafting();
+        if (!checkGrid(craft.mainGrid, 6, 6)) return false;
+        if (!checkGrid(craft.sideGrid, 3, 3)) return false;
+        if (!checkGrid(craft.bottomBar, 9, 1)) return false;
+
+        // 生成指令：整图 1 条 sprite + 高亮 2 条 quad
+        std::vector<UiCmd> cmds;
+        engine::business::ui::buildImageUi(bag, 1280.0f, 720.0f, 3.0f,
+                                           Rect{ 100.0f, 100.0f, 0.0f, 0.0f }, 3, 5, cmds);
+        if (cmds.size() != 3) return false;
+        if (cmds[0].type != CmdType::Sprite || cmds[0].texture != bag.texture) return false;
+        if (cmds[1].type != CmdType::Quad || cmds[2].type != CmdType::Quad) return false;
+        // 选中格高亮必须落在第 5 格内部（第一个主网格槽位坐标系）
+        const Rect sel = bag.mainGrid.cell(5);
+        const Rect selDst{ 100.0f + sel.x * 3.0f, 100.0f + sel.y * 3.0f, sel.w * 3.0f, sel.h * 3.0f };
+        if (cmds[1].dst.x < selDst.x - 0.01f || cmds[1].dst.x > selDst.x + selDst.w) return false;
+    }
+
+    std::cout << "UI 布局：居中/九宫格无缝/快捷栏槽位/指令表/每图网格 自检通过\n";
     return true;
 }
 // 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。

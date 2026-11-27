@@ -285,7 +285,7 @@ static void initNoiseAndRunSelfTests() {
               << (pickResolveOk ? "通过" : "失败") << "\n";
     std::cout << "结构射线：轴向/法线/打偏/距离/斜向自检"
               << (structureRayOk ? "通过" : "失败") << "\n";
-    std::cout << "UI 布局：居中/九宫格无缝/快捷栏槽位自检"
+    std::cout << "UI 布局：居中/九宫格无缝/快捷栏槽位/每图网格自检"
               << (uiLayoutOk ? "通过" : "失败") << "\n";
     std::cout << "物理内核：Jolt 初始化 + 地面/箱子 100 步落地自检"
               << (joltKernelOk ? "通过" : "失败") << "\n";
