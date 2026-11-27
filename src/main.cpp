@@ -79,7 +79,6 @@ using namespace engine;
 constexpr const char* kCameraHelp =
     "相机控制：WASD=平移 空格/左Shift=上下 移动鼠标=转视角 R=重置视角\n"
     "         F4=自由相机/玩家跟随切换 F5=第一人称/第三人称切换（仅玩家模式） F3=调试浮层\n"
-        "         F9=把准星对着的一个方块打包成刚体（仅第一人称）\n"
         "         鼠标左键=破坏 / 右键=放置（对地形和刚体都生效，射线自动裁决）\n";
 
 // 把工作目录切到 exe 所在目录：稳定解析 shaders/、textures/ 相对路径。

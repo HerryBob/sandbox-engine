@@ -106,9 +106,6 @@ public:
     void handlePlayerInput(const engine::shared::CameraState& cam,
                             engine::shared::PlayerInput& clicks);
 
-    // F9：把准星对着的那一个方块打包成刚体（仅第一人称）。
-    // 只看最多 kPackRaySteps 格内的第一个非空气方块；没打到就什么都不做。
-    void handlePackInFront(const engine::shared::CameraState& cam);
 
     // ---- 鼠标拾取：体素射线 + 刚体探测 → 裁决 → 唯一动作 ----
     // 业务侧只能看见 World 里的方块（已打包的方块已移走），物理侧没有静态方块的

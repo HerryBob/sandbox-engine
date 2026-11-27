@@ -46,10 +46,9 @@ struct PlayerInput {
     // F5 第一/第三人称切换请求（只在玩家模式下有效）：同上，回调置位、渲染线程消费。
     std::atomic<bool> toggleThirdPerson{ false };
 
-    // F9 打包请求（第一人称）：把准星对着的那**一个**方块变成刚体。
+
     // 语义同上面三个 toggle：键盘回调置位、**业务线程** exchange(false) 消费
     // （打包要改 World，只有业务线程能改）。
-    std::atomic<bool> packInFront{ false };
 
 };
 
