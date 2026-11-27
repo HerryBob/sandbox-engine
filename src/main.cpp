@@ -230,6 +230,7 @@ static void initNoiseAndRunSelfTests() {
 
     //拾取裁决（两条射线 → 唯一动作）：纯逻辑，不碰窗口/GPU/Jolt。
     const bool pickResolveOk = engine::selftest::pickResolve();
+    const bool structureRayOk = engine::selftest::structureRay();
 
     //刚体物理内核（Jolt）：初始化 + 地面/箱子跑 100 步 → 箱子落在地面顶面上。
     //验的是"内核能不能起来"（编译/链接/初始化顺序/分配器/精度），不碰引擎物理与渲染。
@@ -281,6 +282,8 @@ static void initNoiseAndRunSelfTests() {
               << (atlasUvOk ? "通过" : "失败") << "\n";
     std::cout << "拾取裁决：刚体/方块/近等距/超时自检"
               << (pickResolveOk ? "通过" : "失败") << "\n";
+    std::cout << "结构射线：轴向/法线/打偏/距离/斜向自检"
+              << (structureRayOk ? "通过" : "失败") << "\n";
     std::cout << "物理内核：Jolt 初始化 + 地面/箱子 100 步落地自检"
               << (joltKernelOk ? "通过" : "失败") << "\n";
     std::cout << "物理行为：自由落体 / 落到台面 / 挖掉脚下自检"

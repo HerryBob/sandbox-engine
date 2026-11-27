@@ -42,6 +42,9 @@ bool bodyMesh();
   // 拾取裁决：两条射线结果 → 唯一动作（刚体/方块/近等距/超时/双空）。
   bool pickResolve();
 
+  // 结构局部射线：单位立方体 DDA（业务侧同步裁决的几何核心）。
+  bool structureRay();
+
 // 模组排序：批次倒序依赖拒绝、跨批放行、缺失依赖拒绝、同批环双方拒绝。
 bool modSorter();
 

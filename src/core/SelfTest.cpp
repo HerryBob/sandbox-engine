@@ -11,6 +11,7 @@
 #include "save/SaveMenu.hpp"
 #include "shared/chunk/ChunkData.hpp"
 #include "shared/pick/PickRay.hpp"
+#include "shared/pick/StructureRay.hpp"
 
 #include <cmath>
 #include <filesystem>
@@ -567,6 +568,57 @@ bool pickResolve() {
     }
 
     std::cout << "拾取裁决：刚体/方块/近等距/超时/双空 自检通过\n";
+    return true;
+}
+// 结构局部射线：把射线变到刚体局部空间后，用"单位立方体 DDA"求交。
+// 这是业务侧同步裁决的核心几何（不再跨线程问物理），必须能脱机验证。
+bool structureRay() {
+    using namespace engine::shared::pick;
+
+    // 3×3×3 实心块，局部坐标 -1..1（与演示刚体同构）
+    auto solid = [](int x, int y, int z) {
+        return x >= -1 && x <= 1 && y >= -1 && y <= 1 && z >= -1 && z <= 1;
+    };
+
+    // ① 沿 -z 打：从 z=+5 出发，应先命中 z=+1 的面，法线 +z
+    {
+        const LocalHit h = raycastLocalVoxel(0.0, 0.0, 5.0, 0.0, 0.0, -1.0, 8.0, solid);
+        if (!h.hit || h.x != 0 || h.y != 0 || h.z != 1 || h.nz != 1) return false;
+        if (std::fabs(h.t - 3.0) > 1e-9) return false;   // 格 z=1 占 [1,2]，从 z=5 入射距离 = 3
+    }
+    // ② 沿 -x 打：命中 x=+1，法线 +x
+    {
+        const LocalHit h = raycastLocalVoxel(5.0, 0.0, 0.0, -1.0, 0.0, 0.0, 8.0, solid);
+        if (!h.hit || h.x != 1 || h.nx != 1) return false;
+    }
+    // ③ 沿 +y 从下方打：命中 y=-1，法线 -y
+    {
+        const LocalHit h = raycastLocalVoxel(0.0, -5.0, 0.0, 0.0, 1.0, 0.0, 8.0, solid);
+        if (!h.hit || h.y != -1 || h.ny != -1) return false;
+    }
+    // ④ 打偏（差 3 格）：不该命中
+    {
+        const LocalHit h = raycastLocalVoxel(3.0, 3.0, 5.0, 0.0, 0.0, -1.0, 8.0, solid);
+        if (h.hit) return false;
+    }
+    // ⑤ 距离不够（隔着 10 格）：不该命中
+    {
+        const LocalHit h = raycastLocalVoxel(0.0, 0.0, 12.0, 0.0, 0.0, -1.0, 8.0, solid);
+        if (h.hit) return false;
+    }
+    // ⑥ 起点在实体内：t=0 命中起点格
+    {
+        const LocalHit h = raycastLocalVoxel(0.5, 0.5, 0.5, 0.0, 0.0, -1.0, 8.0, solid);
+        if (!h.hit || h.t != 0.0 || h.x != 0) return false;
+    }
+    // ⑦ 斜向打：必须命中且 t 在合理范围（0 < t < 8）
+    {
+        const LocalHit h = raycastLocalVoxel(3.0, 3.0, 3.0, -0.5773503, -0.5773503, -0.5773503,
+                                             8.0, solid);
+        if (!h.hit || h.t <= 0.0 || h.t > 8.0) return false;
+    }
+
+    std::cout << "结构射线：轴向/法线/打偏/距离/起点在体内/斜向 自检通过\n";
     return true;
 }
 // 模组排序：跨批次依赖方向 + 缺失依赖 + 同批环，纯内存自检（不碰磁盘与 DLL）。
